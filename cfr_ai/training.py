@@ -27,7 +27,7 @@ print(f"Approximate expected value for starting player: {(util / args.num_iterat
 print(f"Strategy map memory size: {sum([sys.getsizeof(x) for x in cfr_trainer.infoset_map.items()]) / 1024 / 1024} MB")
 cfr_strategy = [{"k": k, "v": encode_probabilities(v.get_final_strategy())} for k,v in cfr_trainer.infoset_map.items()]
 with open('cfr_ai/outputs/' + "_".join(str(x) for x in args.NumCards) + '.csv', 'w', newline="") as csvfile:
-    writer = csv.DictWriter(csvfile, fieldnames=['k', 'v'], quoting=csv.QUOTE_NONNUMERIC)
+    writer = csv.DictWriter(csvfile, fieldnames=['k', 'v'])
     csv_row = writer.writeheader()
     for data in cfr_strategy:
         csv_row = writer.writerow(data)

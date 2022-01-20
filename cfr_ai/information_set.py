@@ -29,8 +29,10 @@ def get_possible_actions(history: List[int], NumCards: List[int]):
 def make_key(my_cards: List[str], history: List[int], NumCards: List[int]) -> str:
     # Abstraction trick: cluster hands
     my_cards.sort()
+    key = ''
     if (sum(NumCards) <= 8):
-        key = str([x[0] for x in my_cards])
+        for x in my_cards:
+            key += x[0]
     else:
         key = str(my_cards)
 
