@@ -1,20 +1,51 @@
 import numpy as np
 
-encoding_characters = '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNO'
+encoding_characters = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXY'
+digit_strings = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9']
 
 def encode_probabilities(probabilities: np.ndarray) -> str:
     concatenated = ''
+    zero_counter = 0
     for p in probabilities:
-        inflated = int(p * 2500)
-        part_1 = int(inflated / 50)
-        part_2 = inflated % 50
-        concatenated += encoding_characters[part_1] + encoding_characters[part_2]
+        if p == 0:
+            zero_counter += 1
+        else:
+            if zero_counter > 0:
+                zeros = str(int(zero_counter / 10)) + str(zero_counter % 10)
+                concatenated += zeros
+                zero_counter = 0
+            inflated = int(p * 2500)
+            part_1 = int(inflated / 50)
+            part_2 = inflated % 50
+            concatenated += encoding_characters[part_1] + encoding_characters[part_2]
+    # Final pass
+    if zero_counter > 0:
+        zeros = str(int(zero_counter / 10)) + str(zero_counter % 10)
+        concatenated += zeros
     return concatenated
+
 
 def decode_number_part(character: chr) -> int:
     return [i for i in range(51) if encoding_characters[i] == character][0]
 
+
 def decode_probabilities(concatenated: str) -> np.ndarray:
-    split = [concatenated[i*2:i*2+2] for i in range(int(len(concatenated)/2))]
-    numbers = [decode_number_part(x[0]) / 50 + decode_number_part(x[1]) / 2500 for x in split]
+    remaining = concatenated
+    numbers = []
+    while(len(remaining) > 2):
+        x, remaining = remaining[0:2], remaining[2:]
+        if x[0] in digit_strings:
+            for _ in range(int(x)):
+                numbers.append(0.0)
+        else:
+            probability = decode_number_part(x[0]) / 50 + decode_number_part(x[1]) / 2500
+            numbers.append(probability)
+    # Final pass
+    x = remaining
+    if x[0] in digit_strings:
+        for _ in range(int(x)):
+            numbers.append(0.0)
+    else:
+        probability = decode_number_part(x[0]) / 50 + decode_number_part(x[1]) / 2500
+        numbers.append(probability)
     return np.array(numbers)
