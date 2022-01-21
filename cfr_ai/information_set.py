@@ -45,6 +45,11 @@ def make_key(my_cards: List[str], history: List[int], NumCards: List[int]) -> st
     return key
 
 
+def make_full_key(my_cards: List[str], history: List[int], NumCards: List[int]) -> str:
+    my_cards.sort()
+    return str(my_cards) + str(history)
+
+
 class InformationSet():
     def __init__(self, history: List[int], NumCards: List[int]):
         self.possible_actions = get_possible_actions(history, NumCards)
