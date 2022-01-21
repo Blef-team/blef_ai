@@ -15,7 +15,6 @@ args = CLI.parse_args()
 class Params(object):
     NumCards = args.NumCards
 
-np.set_printoptions(precision=3, floatmode='fixed', suppress=True)
 cfr_trainer = Trainer(BlefCards, Params)
 
 print(f"\nRunning {args.num_iterations} iterations of Blef CFR")
@@ -25,12 +24,13 @@ print("Time spent: ", datetime.now() - start_time)
 print(f"Approximate expected value for starting player: {(util / args.num_iterations):.3f}\n")
 
 print(f"Strategy map memory size: {sum([sys.getsizeof(x) for x in cfr_trainer.infoset_map.items()]) / 1024 / 1024} MB")
-cfr_strategy = [{"k": k, "v": encode_probabilities(v.get_final_strategy())} for k,v in cfr_trainer.infoset_map.items()]
 with open('cfr_ai/outputs/' + "_".join(str(x) for x in args.NumCards) + '.csv', 'w', newline="") as csvfile:
     writer = csv.DictWriter(csvfile, fieldnames=['k', 'v'])
     csv_row = writer.writeheader()
-    for data in cfr_strategy:
-        csv_row = writer.writerow(data)
+    for k,v in cfr_trainer.infoset_map.items():
+        strategy = v.get_final_strategy()
+        if strategy[-1] < 1.0:
+            csv_row = writer.writerow({"k": k, "v": encode_probabilities(strategy)})
 
 print(f"\nComputing exploitability")
 start_time = datetime.now()

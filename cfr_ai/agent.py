@@ -36,7 +36,9 @@ def determine_action(game_state):
         if len(matching_strategies) == 1:
             strategy = decode_probabilities(matching_strategies[0])
             sampled_action = random.choices(relevant_actions, weights=strategy, k=1)[0]
-        else:
+        elif len(history) == 0:
             print("Asking Porevit")
             sampled_action = ask_porevit(game_state)
+        else:
+            sampled_action = 88
     return sampled_action
