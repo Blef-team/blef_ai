@@ -9,10 +9,12 @@ def get_relevant_actions(NumCards: List[int]):
         return [a for a in range(12)] + [a for a in range(30, 36)] + [88]
     elif sum(NumCards) <= 4:
         return [a for a in range(27)] + [a for a in range(30, 36)] + [88] # Skipped four of a kind
-    elif sum(NumCards) <= 6:
+    elif sum(NumCards) <= 5:
         return [a for a in range(29)] + [a for a in range(30, 66)] + [a for a in range(70, 76)] + [88] # Skipped flush and straight flush
+    elif sum(NumCards) <= 6:
+        return [a for a in range(66)] + [a for a in range(70, 76)] + [88] # Skipped flush and straight flush
     elif sum(NumCards) <= 13:
-        return [a for a in range(0, 70)] + [88] # Skipped from four of a kind
+        return [a for a in range(0, 88)]
     else:
         return [a for a in range(27, 88)] # Skipped high card, pair, two pair
 
