@@ -17,8 +17,9 @@ def determine_action(game_state):
     for i in range(len(players)):
         reorganised_players.append(players[(starting_player_index + i) % len(players)])
 
-    NumCards = [player.get("n_cards") for player in reorganised_players]
-    filename = 'cfr_ai/outputs/' + "_".join(str(x) for x in NumCards) + '.csv'
+    hand_sizes = [player.get("n_cards") for player in reorganised_players]
+    hand_sizes.sort()
+    filename = 'cfr_ai/outputs/' + "_".join(str(x) for x in hand_sizes) + '.csv'
     if not path.exists(filename):
         print("Asking Porevit")
         sampled_action = ask_porevit(game_state)
@@ -28,8 +29,8 @@ def determine_action(game_state):
             history = [action["action_id"] for action in game_state.get("history")]
         matching_hands = [hand for hand in game_state.get("hands", []) if hand.get("nickname") == agent_nickname]
         my_cards = [str(card["value"]) + str(card["colour"]) for card in matching_hands[0]["hand"]]
-        key = make_key(my_cards, history, NumCards)
-        relevant_actions = get_possible_actions(history, NumCards)
+        key = make_key(my_cards, history, hand_sizes)
+        relevant_actions = get_possible_actions(history, hand_sizes)
         with open(filename, 'r', encoding='utf-8') as f:
             strategy_list = csv.reader(f)
             matching_strategies = [x[1] for x in strategy_list if x[0] == key]

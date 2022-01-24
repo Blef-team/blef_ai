@@ -50,8 +50,10 @@ class Trainer():
             for mc_player in range(2):
                 hands = Game.deal_cards(self.BlefCards, self.NumCards)
                 util += self.get_node_value(hands, [], 1.0, 0, mc_player, warm_up, prune_feast)
+                hands = Game.deal_cards(self.BlefCards, self.NumCards)
+                util -= self.get_node_value(hands, [], 1.0, 1, mc_player, warm_up, prune_feast)
             for t in range(1, 10):
                 if i == int(t * num_iterations / 10):
                     for _,(k,v) in enumerate(self.infoset_map.items()):
                         v.strategy_sum *= (t / (t + 1)) # LINEAR MCCFR
-        return util / 2
+        return util / 4

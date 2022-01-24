@@ -1,4 +1,3 @@
-import numpy as np
 import sys
 import argparse
 from cfr_ai.trainer import *
@@ -34,5 +33,7 @@ with open('cfr_ai/outputs/' + "_".join(str(x) for x in args.NumCards) + '.csv', 
 
 print(f"\nComputing exploitability")
 start_time = datetime.now()
-print(f"\nExploitability: " + str(get_exploitability(cfr_trainer.infoset_map, BlefCards, Params)))
+print(f"\nExploitability when player 0 starts: " + str(get_exploitability(cfr_trainer.infoset_map, BlefCards, Params, 0)))
+if Params.NumCards[0] != Params.NumCards[1]:
+    print(f"\nExploitability when player 1 starts: " + str(get_exploitability(cfr_trainer.infoset_map, BlefCards, Params, 1)))
 print("Time spent: ", datetime.now() - start_time)
