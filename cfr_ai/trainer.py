@@ -17,18 +17,19 @@ class Trainer():
 
         key = make_key(hand, history, self.NumCards)
         if key not in self.infoset_map:
-            self.infoset_map[key] = InformationSet(history, self.NumCards)
+            self.infoset_map[key] = InformationSet(self.NumCards, history)
         info_set = self.infoset_map[key]
 
-        counterfactual_values = np.zeros(info_set.num_actions)
+        possible_actions = get_possible_actions(history, self.NumCards)
+        counterfactual_values = np.zeros(len(possible_actions))
         opponent = (active_player + 1) % 2
 
         if active_player == mc_player:
             strategy = info_set.get_strategy(reach_probability, warm_up)
-            for i, action in enumerate(info_set.possible_actions):
+            for i, action in enumerate(possible_actions):
                 if info_set.regrets[i] >= -300 or prune_feast:
                     counterfactual_values[i] = -self.get_node_value(hands, history + [action], reach_probability * strategy[i], opponent, mc_player, warm_up, prune_feast)
-            node_value = counterfactual_values.dot(strategy)
+            node_value = np.dot(counterfactual_values, strategy)
             if prune_feast:
                 info_set.regrets = np.maximum(info_set.regrets + counterfactual_values - node_value, -310)
             else:
@@ -37,7 +38,7 @@ class Trainer():
 
         else:
             strategy = info_set.get_strategy(1.0, warm_up)
-            action = random.choices(info_set.possible_actions, weights=strategy, k=1)[0]
+            action = random.choices(possible_actions, weights=strategy, k=1)[0]
             node_value = -self.get_node_value(hands, history + [action], reach_probability, opponent, mc_player, warm_up, prune_feast)
         return node_value
 
