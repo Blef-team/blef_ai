@@ -15,14 +15,9 @@ class Params(object):
     NumCards = args.NumCards
 
 cfr_trainer = Trainer(BlefCards, Params)
+util0, util1 = cfr_trainer.train(args.num_iterations)
+print(f"Expected values, depenging on who starts, are {util0:.3f} and {util1:.3f}")
 
-print(f"\nRunning {args.num_iterations} iterations of Blef CFR")
-start_time = datetime.now()
-util = cfr_trainer.train(args.num_iterations)
-print("Time spent: ", datetime.now() - start_time)
-print(f"Approximate expected value for starting player: {(util / args.num_iterations):.3f}\n")
-
-print(f"Strategy map memory size: {sum([sys.getsizeof(x) for x in cfr_trainer.infoset_map.items()]) / 1024 / 1024} MB")
 with open('cfr_ai/outputs/' + "_".join(str(x) for x in args.NumCards) + '.csv', 'w', newline="") as csvfile:
     writer = csv.DictWriter(csvfile, fieldnames=['k', 'v'])
     csv_row = writer.writeheader()

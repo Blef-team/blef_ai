@@ -42,19 +42,18 @@ class Trainer():
             node_value = -self.get_node_value(hands, history + [action], reach_probability, opponent, mc_player, warm_up, prune_feast)
         return node_value
 
-    def train(self, num_iterations: int) -> int:
-        util = 0
-        for i in range(num_iterations):
-            report_progress(i, num_iterations)
+    def train(self, num_iterations: int):
+        util0, util1 = 0, 0
+        for i in trange(num_iterations, desc = "MC iterations of Blef CFR"):
             warm_up = i < num_iterations * 0.3
             prune_feast = i % 20 == 0
             for mc_player in range(2):
                 hands = Game.deal_cards(self.BlefCards, self.NumCards)
-                util += self.get_node_value(hands, [], 1.0, 0, mc_player, warm_up, prune_feast)
+                util0 += self.get_node_value(hands, [], 1.0, 0, mc_player, warm_up, prune_feast)
                 hands = Game.deal_cards(self.BlefCards, self.NumCards)
-                util -= self.get_node_value(hands, [], 1.0, 1, mc_player, warm_up, prune_feast)
+                util1 += self.get_node_value(hands, [], 1.0, 1, mc_player, warm_up, prune_feast)
             for t in range(1, 10):
                 if i == int(t * num_iterations / 10):
-                    for _,(k,v) in enumerate(self.infoset_map.items()):
+                    for _,v in self.infoset_map.items():
                         v.strategy_sum *= (t / (t + 1)) # LINEAR MCCFR
-        return util / 4
+        return util0 / 2 / num_iterations, util1 / 2 / num_iterations
