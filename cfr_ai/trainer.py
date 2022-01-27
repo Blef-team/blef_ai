@@ -3,6 +3,7 @@ from cfr_ai.information_set import *
 from cfr_ai.game import *
 from cfr_ai.utils import *
 import numpy as np
+from tqdm import trange
 
 class Trainer():
     def __init__(self, BlefCards: List[str], Params: object):
