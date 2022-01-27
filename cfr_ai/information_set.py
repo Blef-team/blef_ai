@@ -13,12 +13,12 @@ for i in range(25):
         relevant_actions = [a for a in range(27)] + [a for a in range(30, 36)] + [88] # Skipped four of a kind
     elif i <= 5:
         relevant_actions = [a for a in range(29)] + [a for a in range(30, 66)] + [a for a in range(70, 76)] + [88] # Skipped flush and straight flush
-    elif i <= 6:
+    elif i <= 7:
         relevant_actions = [a for a in range(66)] + [a for a in range(70, 76)] + [88] # Skipped flush and straight flush
     elif i <= 13:
-        relevant_actions = [a for a in range(0, 88)] 
+        relevant_actions = [a for a in range(0, 89)] 
     else:
-        relevant_actions = [a for a in range(27, 88)] # Skipped high card, pair, two pair
+        relevant_actions = [a for a in range(27, 89)] # Skipped high card, pair, two pair
     relevant_actions_list.append(relevant_actions)
 
 
@@ -39,7 +39,8 @@ def make_key(my_cards: List[str], history: List[int], NumCards: List[int]) -> st
         for x in my_cards:
             key += x[0]
     else:
-        key = str(my_cards)
+        for x in my_cards:
+            key += x[0]
 
     Actions = relevant_actions_list[sum(NumCards)]
 

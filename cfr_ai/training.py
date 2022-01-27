@@ -1,4 +1,3 @@
-import sys
 import argparse
 from cfr_ai.trainer import *
 from cfr_ai.exploitability import *
@@ -7,7 +6,7 @@ from datetime import datetime
 import csv
 
 CLI = argparse.ArgumentParser()
-CLI.add_argument("--num_iterations", type=int, default=100000)
+CLI.add_argument("--num_iterations", type=int, default=300000)
 CLI.add_argument("--NumCards", nargs=2, type=int, default=[1, 1])
 args = CLI.parse_args()
 
