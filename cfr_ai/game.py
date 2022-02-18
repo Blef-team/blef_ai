@@ -2,6 +2,7 @@ from typing import List
 import random
 import itertools
 
+BlefCards = [str(value) + str(suit) for value in range(6) for suit in range(4)] 
 
 class Game():
     @staticmethod
@@ -81,7 +82,7 @@ class Game():
             return -1
     
     @staticmethod
-    def deal_cards(BlefCards, NumCards):
+    def deal_cards(NumCards):
         all_cards = random.sample(BlefCards, sum(NumCards))
         hands = []
         for i in range(0, len(NumCards)):
@@ -92,7 +93,7 @@ class Game():
         return hands
 
     @staticmethod
-    def hand_combinations(BlefCards, NumCards):
+    def hand_combinations(NumCards):
         def generate(remaining_num_cards, possible_cards):
             if not remaining_num_cards:
                 yield []
