@@ -82,18 +82,18 @@ class Game():
             return -1
     
     @staticmethod
-    def deal_cards(NumCards):
-        all_cards = random.sample(BlefCards, sum(NumCards))
+    def deal_cards(hand_sizes: List[int]):
+        all_cards = random.sample(BlefCards, sum(hand_sizes))
         hands = []
-        for i in range(0, len(NumCards)):
-            cumsum = [0] + list(itertools.accumulate(NumCards))
+        for i in range(0, len(hand_sizes)):
+            cumsum = [0] + list(itertools.accumulate(hand_sizes))
             i_cards = [all_cards[i] for i in range(cumsum[i], cumsum[i+1])]
             i_cards.sort()
             hands.append(i_cards)
         return hands
 
     @staticmethod
-    def hand_combinations(NumCards):
+    def hand_combinations(hand_sizes: List[int]):
         def generate(remaining_num_cards, possible_cards):
             if not remaining_num_cards:
                 yield []
@@ -102,4 +102,4 @@ class Game():
                 for player_hand in itertools.combinations(possible_cards, player_hand_size):
                     for tail in generate(remaining_num_cards[1:], possible_cards - set(player_hand)):
                         yield [sorted(player_hand)] + tail
-        return generate(NumCards, set(BlefCards))
+        return generate(hand_sizes, set(BlefCards))

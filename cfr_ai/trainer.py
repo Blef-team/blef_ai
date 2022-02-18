@@ -5,21 +5,21 @@ import numpy as np
 from tqdm import trange
 
 class Trainer():
-    def __init__(self, Params: object):
+    def __init__(self, hand_sizes: List[int]):
         self.infoset_map: Dict[str, InformationSet] = {}
-        self.NumCards = Params.NumCards
+        self.hand_sizes = hand_sizes
 
     def get_node_value(self, hands: List[List[str]], history: List[int], reach_probability: float, active_player: int, mc_player: int, warm_up: bool, prune_feast: bool):
         if Game.check_finish(history):
             return Game.get_payoff(history, hands)
         hand = hands[active_player]
 
-        key = make_key(hand, history, self.NumCards)
+        key = make_key(hand, history, self.hand_sizes)
         if key not in self.infoset_map:
-            self.infoset_map[key] = InformationSet(self.NumCards, history)
+            self.infoset_map[key] = InformationSet(self.hand_sizes, history)
         info_set = self.infoset_map[key]
 
-        possible_actions = get_possible_actions(history, self.NumCards)
+        possible_actions = get_possible_actions(history, self.hand_sizes)
         counterfactual_values = np.zeros(len(possible_actions))
         opponent = (active_player + 1) % 2
 
@@ -47,9 +47,9 @@ class Trainer():
             warm_up = i < num_iterations * 0.3
             prune_feast = i % 20 == 0
             for mc_player in range(2):
-                hands = Game.deal_cards(self.NumCards)
+                hands = Game.deal_cards(self.hand_sizes)
                 util0 += self.get_node_value(hands, [], 1.0, 0, mc_player, warm_up, prune_feast)
-                hands = Game.deal_cards(self.NumCards)
+                hands = Game.deal_cards(self.hand_sizes)
                 util1 += self.get_node_value(hands, [], 1.0, 1, mc_player, warm_up, prune_feast)
             for t in range(1, 10):
                 if i == int(t * num_iterations / 10):

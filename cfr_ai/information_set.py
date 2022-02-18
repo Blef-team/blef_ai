@@ -22,8 +22,8 @@ for i in range(25):
     relevant_actions_list.append(relevant_actions)
 
 
-def get_possible_actions(history: List[int], NumCards: List[int]):
-    relevant_actions = relevant_actions_list[sum(NumCards)]
+def get_possible_actions(history: List[int], hand_sizes: List[int]):
+    relevant_actions = relevant_actions_list[sum(hand_sizes)]
     if (len(history) == 0):
         return [a for a in relevant_actions if a != 88]
     else: 
@@ -31,18 +31,18 @@ def get_possible_actions(history: List[int], NumCards: List[int]):
         return [a for a in relevant_actions if a > last_action]
 
 
-def make_key(my_cards: List[str], history: List[int], NumCards: List[int]) -> str:
+def make_key(my_cards: List[str], history: List[int], hand_sizes: List[int]) -> str:
     # Abstraction trick: cluster hands
     my_cards.sort()
     key = ''
-    if (sum(NumCards) <= 8):
+    if (sum(hand_sizes) <= 8):
         for x in my_cards:
             key += x[0]
     else:
         for x in my_cards:
             key += x[0]
 
-    Actions = relevant_actions_list[sum(NumCards)]
+    Actions = relevant_actions_list[sum(hand_sizes)]
 
     # Abstraction trick: only consider three bets. Also, 'irrelevant' bets are clustered together
     abstracted_history = [min([a for a in Actions if a > x]) - 1 for x in history[-3:]]
@@ -51,14 +51,14 @@ def make_key(my_cards: List[str], history: List[int], NumCards: List[int]) -> st
     return key
 
 
-def make_full_key(my_cards: List[str], history: List[int], NumCards: List[int]) -> str:
+def make_full_key(my_cards: List[str], history: List[int], hand_sizes: List[int]) -> str:
     my_cards.sort()
     return str(my_cards) + str(history)
 
 
 class InformationSet():
-    def __init__(self, NumCards: List[int], history: List[int]):
-        possible_actions = get_possible_actions(history, NumCards)
+    def __init__(self, hand_sizes: List[int], history: List[int]):
+        possible_actions = get_possible_actions(history, hand_sizes)
         self.regrets = np.zeros(len(possible_actions))
         self.strategy_sum = np.zeros(len(possible_actions), dtype=np.float32)
 
