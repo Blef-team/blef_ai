@@ -2,7 +2,6 @@ import argparse
 from cfr_ai.trainer import *
 from cfr_ai.exploitability import *
 from cfr_ai.encoding import encode_probabilities
-from datetime import datetime
 import csv
 
 CLI = argparse.ArgumentParser()
@@ -24,8 +23,6 @@ with open('cfr_ai/outputs/' + "_".join(str(x) for x in args.hand_sizes) + '.csv'
             csv_row = writer.writerow({"k": k, "v": encode_probabilities(v)})
 
 print(f"\nComputing exploitability")
-start_time = datetime.now()
 print(f"\nExploitability when player 0 starts: " + str(get_exploitability(cfr_strategy, args.hand_sizes, 0)))
 if args.hand_sizes[0] != args.hand_sizes[1]:
     print(f"\nExploitability when player 1 starts: " + str(get_exploitability(cfr_strategy, args.hand_sizes, 1)))
-print("Time spent: ", datetime.now() - start_time)
