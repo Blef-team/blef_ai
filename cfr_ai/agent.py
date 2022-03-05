@@ -8,19 +8,10 @@ from cfr_ai.information_set import make_key, get_possible_actions
 def determine_action(game_state):
     agent_nickname = game_state["cp_nickname"]
     players = game_state.get("players", [])
-    if game_state.get("history"):
-        starting_player = game_state.get("history")[0]["player"]
-        starting_player_index = [i for i in range(len(players)) if players[i].get("nickname") == starting_player][0]
-    else:
-        starting_player_index = [i for i in range(len(players)) if players[i].get("nickname") == agent_nickname][0]
-    reorganised_players = []
-    for i in range(len(players)):
-        reorganised_players.append(players[(starting_player_index + i) % len(players)])
-
-    hand_sizes = [player.get("n_cards") for player in reorganised_players]
+    hand_sizes = [player.get("n_cards") for player in players]
     hand_sizes.sort()
-    filename = 'cfr_ai/outputs/' + "_".join(str(x) for x in hand_sizes) + '.csv'
-    if not path.exists(filename):
+    directory = 'cfr_ai/outputs/' + "_".join(str(x) for x in hand_sizes)
+    if not path.exists(directory):
         print("Asking Porevit")
         sampled_action = ask_porevit(game_state)
     else:
@@ -30,10 +21,12 @@ def determine_action(game_state):
         matching_hands = [hand for hand in game_state.get("hands", []) if hand.get("nickname") == agent_nickname]
         my_cards = [str(card["value"]) + str(card["colour"]) for card in matching_hands[0]["hand"]]
         key = make_key(my_cards, history, hand_sizes)
+        split_key = key.split('-')
+        filename = 'cfr_ai/outputs/' + "_".join(str(x) for x in hand_sizes) + '/' + split_key[0] + '/' + split_key[1] + '.csv'
         relevant_actions = get_possible_actions(history, hand_sizes)
         with open(filename, 'r', encoding='utf-8') as f:
             strategy_list = csv.reader(f)
-            matching_strategies = [x[1] for x in strategy_list if x[0] == key]
+            matching_strategies = [x[1] for x in strategy_list if x[0] == '-'.join(split_key[2:])]
         if len(matching_strategies) == 1:
             strategy = decode_probabilities(matching_strategies[0])
             sampled_action = random.choices(relevant_actions, weights=strategy, k=1)[0]
