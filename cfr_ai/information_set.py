@@ -1,53 +1,35 @@
 from typing import List
 import numpy as np
 
-relevant_actions_list = []
-for i in range(25):
-    if i <= 1:
-        relevant_actions = []
-    elif i <= 2:
-        relevant_actions = [a for a in range(12)] + [88]
-    elif i <= 3:
-        relevant_actions = [a for a in range(12)] + [a for a in range(30, 36)] + [88]
-    elif i <= 4:
-        relevant_actions = [a for a in range(27)] + [a for a in range(30, 36)] + [88] # Skipped four of a kind
-    elif i <= 5:
-        relevant_actions = [a for a in range(29)] + [a for a in range(30, 66)] + [a for a in range(70, 76)] + [88] # Skipped flush and straight flush
-    elif i <= 7:
-        relevant_actions = [a for a in range(66)] + [a for a in range(70, 76)] + [88] # Skipped flush and straight flush
-    elif i <= 13:
-        relevant_actions = [a for a in range(0, 89)] 
-    else:
-        relevant_actions = [a for a in range(27, 89)] # Skipped high card, pair, two pair
-    relevant_actions_list.append(relevant_actions)
+history_codes = np.genfromtxt('cfr_ai/history.csv', delimiter=',', dtype='|U5', skip_header=0)
 
 
 def get_possible_actions(history: List[int], hand_sizes: List[int]):
-    relevant_actions = relevant_actions_list[sum(hand_sizes)]
     if (len(history) == 0):
-        return [a for a in relevant_actions if a != 88]
+        return [a for a in range(88)]
     else: 
         last_action = history[-1]
-        return [a for a in relevant_actions if a > last_action]
+        return [a for a in range(89) if a > last_action]
 
 
 def make_key(my_cards: List[str], history: List[int], hand_sizes: List[int]) -> str:
-    # Abstraction trick: cluster hands
     my_cards.sort()
-    key = ''
-    if (sum(hand_sizes) <= 8):
-        for x in my_cards:
-            key += x[0]
+    key = str(len(my_cards))
+    
+    # History abstraction
+    if len(history) == 0:
+        key += '-88-'
     else:
-        for x in my_cards:
-            key += x[0]
+        key += '-' + str(history[-1]) + '-'
+        if len(history) > 1:
+            key += history_codes[history[-1], history[-2]] + '-'
+            if len(history) > 2:
+                key += history_codes[history[-1], history[-3]] + '-'
+    
+    # Cards abstraction
+    for x in my_cards:
+        key += x[0]
 
-    Actions = relevant_actions_list[sum(hand_sizes)]
-
-    # Abstraction trick: only consider three bets. Also, 'irrelevant' bets are clustered together
-    abstracted_history = [min([a for a in Actions if a > x]) - 1 for x in history[-3:]]
-    for h in abstracted_history:
-        key += ' ' + str(h) 
     return key
 
 
