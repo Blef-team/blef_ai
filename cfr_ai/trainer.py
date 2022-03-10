@@ -8,6 +8,7 @@ class Trainer():
     def __init__(self, hand_sizes: List[int]):
         self.infoset_map: Dict[str, InformationSet] = {}
         self.hand_sizes = hand_sizes
+        self.nodes_touched = 0
 
     def get_node_value(self, hands: List[List[str]], history: List[int], reach_probability: float, active_player: int, mc_player: int, warm_up: bool, prune_feast: bool):
         if Game.check_finish(history):
@@ -39,6 +40,7 @@ class Trainer():
             strategy = info_set.get_strategy(1.0, warm_up)
             action = random.choices(possible_actions, weights=strategy, k=1)[0]
             node_value = -self.get_node_value(hands, history + [action], reach_probability, opponent, mc_player, warm_up, prune_feast)
+        self.nodes_touched += 1
         return node_value
 
     def train(self, num_iterations: int):
