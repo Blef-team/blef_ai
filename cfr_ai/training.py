@@ -2,7 +2,8 @@ import argparse
 from cfr_ai.trainer import *
 from cfr_ai.exploitability import *
 from cfr_ai.encoding import encode_probabilities
-import csv
+import csv, os, psutil
+from datetime import datetime
 
 CLI = argparse.ArgumentParser()
 CLI.add_argument("--num_iterations", type=int, default=10000)
@@ -27,6 +28,16 @@ if not args.no_save:
                     split_key = k.split('-')
                     if split_key[0] == str(hand_size) and split_key[1] == str(last_bet):
                         csv_row = writer.writerow({"k": '-'.join(split_key[2:]), "v": encode_probabilities(v)})
+    with open('cfr_ai/outputs/' + "_".join(str(x) for x in args.hand_sizes) + '/metadata.csv', 'w', newline="") as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=['k', 'v'])
+        csv_row = writer.writerow({"k": "Time finished", "v": datetime.now().strftime("%Y-%m-%d, %H:%M:%S")})
+        csv_row = writer.writerow({"k": "Iterations", "v": args.num_iterations})
+        csv_row = writer.writerow({"k": "Nodes touched", "v": cfr_trainer.nodes_touched})
+        csv_row = writer.writerow({"k": "Explored infosets", "v": len(cfr_strategy)})
+        csv_row = writer.writerow({"k": "Non-checking infosets", "v": len(meaningful_policies)})
+        csv_row = writer.writerow({"k": "RAM taken (MB)", "v": psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024})
+        csv_row = writer.writerow({"k": "Player 1 game value", "v": util0})
+        csv_row = writer.writerow({"k": "Player 2 game value", "v": util1})
 
 if args.get_exploitability:
     cfr_strategy = {k: v.get_final_strategy() for k,v in cfr_trainer.infoset_map.items()}
