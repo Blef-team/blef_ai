@@ -44,14 +44,8 @@ class Trainer():
         return node_value
 
     def train(self, num_iterations: int):
-        util0, util1 = 0, 0
+        utils = [0, 0]
         for i in trange(num_iterations, desc = "MC iterations of Blef CFR"):
-            prune_feast = i % 20 == 0
-            for mc_player in range(2):
-                hands = Game.deal_cards(self.hand_sizes)
-                util0 += self.get_node_value(hands, [], 1.0, 0, mc_player, prune_feast)
-                hands = Game.deal_cards(self.hand_sizes)
-                util1 += self.get_node_value(hands, [], 1.0, 1, mc_player, prune_feast)
             if i == int(num_iterations * 0.3):
                 for _,v in self.infoset_map.items():
                     v.strategy_sum *= 0
@@ -59,4 +53,9 @@ class Trainer():
                 if i == int(t * num_iterations / 10):
                     for _,v in self.infoset_map.items():
                         v.strategy_sum *= (t / (t + 1)) # LINEAR MCCFR
-        return util0 / 2 / num_iterations, util1 / 2 / num_iterations
+            prune_feast = i % 20 == 0
+            for mc_player in range(2):
+                for starting_player in range(2):
+                    hands = Game.deal_cards(self.hand_sizes)
+                    utils[starting_player] += self.get_node_value(hands, [], 1.0, starting_player, mc_player, prune_feast)
+        return utils[0] / num_iterations / 2, utils[1] / num_iterations / 2

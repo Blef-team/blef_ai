@@ -6,7 +6,7 @@ import csv, os, psutil
 from datetime import datetime
 
 CLI = argparse.ArgumentParser()
-CLI.add_argument("--num_iterations", type=int, default=10000)
+CLI.add_argument("--num_iterations", type=int, default=50000)
 CLI.add_argument("--hand_sizes", nargs=2, type=int, default=[1, 1])
 CLI.add_argument("--no_save", action=argparse.BooleanOptionalAction)
 CLI.add_argument("--get_exploitability", action=argparse.BooleanOptionalAction)
@@ -14,7 +14,6 @@ args = CLI.parse_args()
 
 cfr_trainer = Trainer(args.hand_sizes)
 util0, util1 = cfr_trainer.train(args.num_iterations)
-print(f"Expected values, depenging on who starts, are {util0:.3f} and {util1:.3f}")
 
 if not args.no_save:
     cfr_strategy = {k: v.get_final_strategy() for k,v in cfr_trainer.infoset_map.items()}
