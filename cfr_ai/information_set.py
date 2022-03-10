@@ -42,7 +42,7 @@ class InformationSet():
     def __init__(self, hand_sizes: List[int], history: List[int]):
         possible_actions = get_possible_actions(history, hand_sizes)
         self.regrets = np.zeros(len(possible_actions))
-        self.strategy_sum = np.zeros(len(possible_actions), dtype=np.float32)
+        self.strategy_sum = np.zeros(len(possible_actions))
 
     def get_strategy(self, reach_probability: float, warm_up: bool = False) -> np.array:
         if any(self.regrets > 0):
