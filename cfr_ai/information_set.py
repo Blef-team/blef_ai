@@ -44,15 +44,14 @@ class InformationSet():
         self.regrets = np.zeros(len(possible_actions))
         self.strategy_sum = np.zeros(len(possible_actions))
 
-    def get_strategy(self, reach_probability: float, warm_up: bool = False) -> np.array:
+    def get_strategy(self, reach_probability: float) -> np.array:
         if any(self.regrets > 0):
             strategy = np.maximum(0, self.regrets)
             strategy /= sum(strategy)
         else:
             strategy = np.array([0.0] * (len(self.regrets) - 1) + [1.0])
 
-        if not warm_up: # LITERATURE TRICK: DISCOUNTING STRATEGIES FROM FIRST X% of iterations
-            self.strategy_sum += reach_probability * strategy
+        self.strategy_sum += reach_probability * strategy
         return strategy
 
     def get_final_strategy(self) -> np.array:
