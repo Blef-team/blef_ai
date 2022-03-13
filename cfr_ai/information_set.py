@@ -12,9 +12,29 @@ def get_possible_actions(history: List[int], hand_sizes: List[int]):
         return [a for a in range(89) if a > last_action]
 
 
-def make_key(my_cards: List[str], history: List[int], hand_sizes: List[int]) -> str:
-    my_cards.sort()
-    key = str(len(my_cards))
+def get_hand_abstraction(hand: List[str], hand_sizes: List[int]) -> str:
+    out = ''
+    # Rounds 1-5: get values
+    if (sum(hand_sizes) <= 8):
+        hand.sort()
+        for x in hand:
+            out += x[0]
+    # Rounds 6-7: Get the strongest four of a kind or flush, if any. 
+    # Otherwise, get all values
+    else:
+        strengths = np.arange(10)
+        for x in hand:
+            strengths[int(x[0]) + 4] += 10
+            strengths[int(x[1])] += 10
+        if np.max(strengths) >= 44:
+            out += str(np.max(strengths))
+        else:
+            out += ' '.join([str(x) for x in strengths[4:]])
+    return out
+
+
+def make_key(hand: List[str], hand_abstraction: str, history: List[int]) -> str:
+    key = str(len(hand))
     
     # History abstraction
     if len(history) == 0:
@@ -26,9 +46,8 @@ def make_key(my_cards: List[str], history: List[int], hand_sizes: List[int]) -> 
             if len(history) > 2:
                 key += history_codes[history[-1], history[-3]] + '-'
     
-    # Cards abstraction
-    for x in my_cards:
-        key += x[0]
+    # Hand abstraction
+    key += hand_abstraction
 
     return key
 

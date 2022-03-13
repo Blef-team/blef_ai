@@ -3,7 +3,7 @@ import csv
 from os import path
 from conservative_crawling_ai.agent import determine_action as ask_porevit
 from cfr_ai.encoding import decode_probabilities
-from cfr_ai.information_set import make_key, get_possible_actions
+from cfr_ai.information_set import make_key, get_possible_actions, get_hand_abstraction
 
 def determine_action(game_state):
     agent_nickname = game_state["cp_nickname"]
@@ -20,7 +20,8 @@ def determine_action(game_state):
             history = [action["action_id"] for action in game_state.get("history")]
         matching_hands = [hand for hand in game_state.get("hands", []) if hand.get("nickname") == agent_nickname]
         my_cards = [str(card["value"]) + str(card["colour"]) for card in matching_hands[0]["hand"]]
-        key = make_key(my_cards, history, hand_sizes)
+        hand_abstraction = get_hand_abstraction(my_cards, hand_sizes)
+        key = make_key(my_cards, hand_abstraction, history)
         split_key = key.split('-')
         filename = 'cfr_ai/outputs/' + "_".join(str(x) for x in hand_sizes) + '/' + split_key[0] + '/' + split_key[1] + '.csv'
         relevant_actions = get_possible_actions(history, hand_sizes)
