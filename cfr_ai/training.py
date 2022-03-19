@@ -25,14 +25,20 @@ if not args.no_save:
         for last_bet in range(89):
             key = str(hand_size) + '-' + str(last_bet)
             files[key] = open('cfr_ai/outputs/' + "_".join(str(x) for x in args.hand_sizes) + '/' + str(hand_size) + '/' + str(last_bet) + '.csv', 'w', newline="")
-            writers[key] = csv.DictWriter(files[str(hand_size) + '-' + str(last_bet)], fieldnames=['k', 'v'])
+            writers[key] = csv.DictWriter(files[key], fieldnames=['k', 'v'])
             header = writers[key].writeheader()
+            files[key + '-D'] = open('cfr_ai/outputs/' + "_".join(str(x) for x in args.hand_sizes) + '/' + str(hand_size) + '_diagnostic/' + str(last_bet) + '.csv', 'w', newline="")
+            writers[key + '-D'] = csv.DictWriter(files[key + '-D'], fieldnames=['k', 'first_touched', 'last_touched', 'times_touched', 'v'])
+            header = writers[key + '-D'].writeheader()
     for k,v in cfr_trainer.infoset_map.items():
         policy = v.get_final_strategy()
+        split_key = k.split('-')
         if policy[-1] < 1.0:
-            split_key = k.split('-')
-            csv_row = writers[split_key[0] + '-' + split_key[1]].writerow({"k": '-'.join(split_key[2:]), "v": encode_probabilities(policy)})
+            csv_row = writers[split_key[0] + '-' + split_key[1]].\
+                writerow({"k": '-'.join(split_key[2:]), "v": encode_probabilities(policy)})
             meaningful_policies += 1
+        csv_row = writers[split_key[0] + '-' + split_key[1] + '-D'].\
+            writerow({"k": '-'.join(split_key[2:]), "v": encode_probabilities(policy), "first_touched": v.first_touched, "last_touched": v.last_touched, "times_touched": v.times_touched})
     for k,v in files.items():
         v.close()
     with open('cfr_ai/outputs/' + "_".join(str(x) for x in args.hand_sizes) + '/metadata.csv', 'w', newline="") as csvfile:

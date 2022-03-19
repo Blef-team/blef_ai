@@ -58,10 +58,13 @@ def make_full_key(my_cards: List[str], history: List[int], hand_sizes: List[int]
 
 
 class InformationSet():
-    def __init__(self, hand_sizes: List[int], history: List[int]):
+    def __init__(self, hand_sizes: List[int], history: List[int], iter: int):
         possible_actions = get_possible_actions(history, hand_sizes)
         self.regrets = np.zeros(len(possible_actions))
         self.strategy_sum = np.zeros(len(possible_actions))
+        self.times_touched = 0
+        self.first_touched = iter
+        self.last_touched = 0
 
     def get_strategy(self, reach_probability: float) -> np.array:
         if any(self.regrets > 0):
