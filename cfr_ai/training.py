@@ -22,6 +22,8 @@ if not args.no_save:
     writers = {}
     meaningful_policies = 0
     for hand_size in set(args.hand_sizes):
+        os.makedirs('cfr_ai/outputs/' + "_".join(str(x) for x in args.hand_sizes) + '/' + str(hand_size), exist_ok=True)
+        os.makedirs('cfr_ai/outputs/' + "_".join(str(x) for x in args.hand_sizes) + '/' + str(hand_size) + '_diagnostic/', exist_ok=True)
         for last_bet in range(89):
             key = str(hand_size) + '-' + str(last_bet)
             files[key] = open('cfr_ai/outputs/' + "_".join(str(x) for x in args.hand_sizes) + '/' + str(hand_size) + '/' + str(last_bet) + '.csv', 'w', newline="")
