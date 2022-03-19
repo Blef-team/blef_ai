@@ -1,7 +1,7 @@
 import argparse
 from cfr_ai.trainer import *
 from cfr_ai.exploitability import *
-from cfr_ai.encoding import encode_probabilities
+from cfr_ai.encoding import encode_probabilities, clear_lows
 import csv, os, psutil
 from datetime import datetime
 
@@ -34,13 +34,12 @@ if not args.no_save:
             header = writers[key + '-D'].writeheader()
     for k,v in cfr_trainer.infoset_map.items():
         policy = v.get_final_strategy()
+        cleaned_policy = clear_lows(policy)
         split_key = k.split('-')
-        if policy[-1] < 1.0:
-            csv_row = writers[split_key[0] + '-' + split_key[1]].\
-                writerow({"k": '-'.join(split_key[2:]), "v": encode_probabilities(policy)})
+        if cleaned_policy[-1] < 1.0:
+            csv_row = writers[split_key[0] + '-' + split_key[1]].writerow({"k": '-'.join(split_key[2:]), "v": encode_probabilities(cleaned_policy)})
             meaningful_policies += 1
-        csv_row = writers[split_key[0] + '-' + split_key[1] + '-D'].\
-            writerow({"k": '-'.join(split_key[2:]), "v": encode_probabilities(policy), "first_touched": v.first_touched, "last_touched": v.last_touched, "times_touched": v.times_touched})
+        csv_row = writers[split_key[0] + '-' + split_key[1] + '-D'].writerow({"k": '-'.join(split_key[2:]), "v": encode_probabilities(policy), "first_touched": v.first_touched, "last_touched": v.last_touched, "times_touched": v.times_touched})
     for k,v in files.items():
         v.close()
     with open('cfr_ai/outputs/' + "_".join(str(x) for x in args.hand_sizes) + '/metadata.csv', 'w', newline="") as csvfile:

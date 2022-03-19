@@ -3,18 +3,23 @@ import numpy as np
 encoding_characters = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXY'
 digit_strings = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9']
 
+def clear_lows(probabilities: np.ndarray) -> np.ndarray:
+    probabilities[probabilities < 0.01] = 0
+    return probabilities / sum(probabilities)
+
+
 def encode_probabilities(probabilities: np.ndarray) -> str:
     concatenated = ''
     zero_counter = 0
     for p in probabilities:
-        if p == 0:
+        inflated = int(p * 2500)
+        if inflated == 0:
             zero_counter += 1
         else:
             if zero_counter > 0:
                 zeros = str(int(zero_counter / 10)) + str(zero_counter % 10)
                 concatenated += zeros
                 zero_counter = 0
-            inflated = int(p * 2500)
             part_1 = int(inflated / 50)
             part_2 = inflated % 50
             concatenated += encoding_characters[part_1] + encoding_characters[part_2]
