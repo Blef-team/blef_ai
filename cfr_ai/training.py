@@ -10,9 +10,11 @@ CLI.add_argument("--num_iterations", type=int, default=50000)
 CLI.add_argument("--hand_sizes", nargs=2, type=int, default=[1, 1])
 CLI.add_argument("--no_save", action=argparse.BooleanOptionalAction)
 CLI.add_argument("--get_exploitability", action=argparse.BooleanOptionalAction)
+CLI.add_argument("--pruning_range", nargs=2, type=int, default=[-300, -310])
+CLI.add_argument("--penalty", type=float, default=0.0)
 args = CLI.parse_args()
 
-cfr_trainer = Trainer(args.hand_sizes)
+cfr_trainer = Trainer(args.hand_sizes, args.pruning_range, args.penalty)
 util0, util1 = cfr_trainer.train(args.num_iterations)
 
 if not args.no_save:
@@ -31,6 +33,9 @@ if not args.no_save:
         writer = csv.DictWriter(csvfile, fieldnames=['k', 'v'])
         csv_row = writer.writerow({"k": "Time finished", "v": datetime.now().strftime("%Y-%m-%d, %H:%M:%S")})
         csv_row = writer.writerow({"k": "Iterations", "v": args.num_iterations})
+        csv_row = writer.writerow({"k": "Pruning threshold", "v": args.pruning_range[0]})
+        csv_row = writer.writerow({"k": "Minimum regret", "v": args.pruning_range[1]})
+        csv_row = writer.writerow({"k": "Penalty", "v": args.penalty})
         csv_row = writer.writerow({"k": "Nodes touched", "v": cfr_trainer.nodes_touched})
         csv_row = writer.writerow({"k": "Explored infosets", "v": len(cfr_strategy)})
         csv_row = writer.writerow({"k": "Non-checking infosets", "v": len(meaningful_policies)})

@@ -5,10 +5,13 @@ import numpy as np
 from tqdm import trange
 
 class Trainer():
-    def __init__(self, hand_sizes: List[int]):
+    def __init__(self, hand_sizes: List[int], pruning_range: List[int], penalty: float):
         self.infoset_map: Dict[str, InformationSet] = {}
         self.hand_sizes = hand_sizes
         self.nodes_touched = 0
+        self.pruning_threshold = pruning_range[0]
+        self.min_regret = pruning_range[1]
+        self.penalty = penalty
 
     def get_node_value(self, hands: List[List[str]], hand_abstractions: List[str], history: List[int], reach_probability: float, active_player: int, mc_player: int, prune_feast: bool):
         if Game.check_finish(history):
@@ -26,19 +29,19 @@ class Trainer():
         if active_player == mc_player:
             strategy = info_set.get_strategy(reach_probability)
             for i, action in enumerate(possible_actions):
-                if info_set.regrets[i] >= -300 or prune_feast:
+                if info_set.regrets[i] >= self.pruning_threshold or prune_feast:
                     counterfactual_values[i] = -self.get_node_value(hands, hand_abstractions, history + [action], reach_probability * strategy[i], opponent, mc_player, prune_feast)
             node_value = np.dot(counterfactual_values, strategy)
             if prune_feast:
-                info_set.regrets = np.maximum(info_set.regrets + counterfactual_values - node_value, -310)
+                info_set.regrets = np.maximum(info_set.regrets + counterfactual_values - node_value, self.min_regret)
             else:
-                to_update = info_set.regrets >= -300
+                to_update = info_set.regrets >= self.pruning_threshold
                 info_set.regrets[to_update] += counterfactual_values[to_update] - node_value
 
         else:
             strategy = info_set.get_strategy(1.0)
             action = random.choices(possible_actions, weights=strategy, k=1)[0]
-            node_value = -self.get_node_value(hands, hand_abstractions, history + [action], reach_probability, opponent, mc_player, prune_feast)
+            node_value = -self.get_node_value(hands, hand_abstractions, history + [action], reach_probability, opponent, mc_player, prune_feast) + self.penalty
         self.nodes_touched += 1
         return node_value
 
