@@ -13,41 +13,89 @@ def get_possible_actions(history: List[int], hand_sizes: List[int]):
 
 
 def get_hand_abstraction(hand: List[str], hand_sizes: List[int]) -> str:
-    out = ''
     # Rounds 1-5: get values
-    if (sum(hand_sizes) <= 8):
+    if (sum(hand_sizes) <= 6):
+        values = ''
         hand.sort()
         for x in hand:
-            out += x[0]
-    # Rounds 6-7: Get the strongest four of a kind or flush, if any. 
-    # Otherwise, get all values
+            values += x[0]
+        out = [values] * 89
+    # Rounds 6-21: use main abstraction
     else:
-        strengths = np.arange(10)
+        counts = np.zeros(10, dtype=int)
+        strengths = np.arange(10, dtype=int)
         for x in hand:
-            strengths[int(x[0]) + 4] += 10
-            strengths[int(x[1])] += 10
-        if np.max(strengths) >= 44:
-            out += str(np.max(strengths))
+            counts[int(x[0]) + 4] += 1
+            counts[int(x[1])] += 1
+        for i in range(10):
+            strengths[i] += 10 * counts[i]
+        sf_strengths = strengths[0:4].copy().astype(float)
+        for x in hand:
+            if x[0] == '0':
+                sf_strengths[int(x[1])] += 0.1
+            if x[0] == '5':
+                sf_strengths[int(x[1])] += 0.2
+        top_strength = np.max(strengths)
+        # Pre-straight:
+        ## If there's four of a kind or flush on hand, get the top strength
+        ## If there's a three of a kind on hand, get the top 2 strengths
+        ## Else, get all card values
+        if top_strength >= 44:
+            pre_straight_abstraction = str(top_strength)
+        elif np.max(strengths[4:10]) >= 34:
+            pre_straight_abstraction = str(sorted(strengths[4:10], reverse=True)[0]) + ' ' + str(sorted(strengths[4:10], reverse=True)[1])
         else:
-            out += ' '.join([str(x) for x in strengths[4:]])
+            values = ''
+            hand.sort()
+            for x in hand:
+                values += x[0]
+            pre_straight_abstraction = values
+        out = [pre_straight_abstraction] * 27
+        # Straights: check which values we have and get top strength
+        straight_part = ''.join([str(min(x, 1)) for x in counts[4:10]]) + ' ' + str(top_strength)
+        out += [straight_part] * 3
+        # Three of a kind: check how many we have of that value and get top strength
+        for i in range(4, 10):
+            out += [str(counts[i]) + ' ' + str(top_strength)]
+        # Full house: check how many we have of the two values each and get top strength
+        first_value = 0
+        second_value = 0
+        for i in range(30):
+            second_value += 1
+            if second_value == 6:
+                first_value += 1
+                second_value = 0
+            if second_value == first_value:
+                second_value += 1
+            out += [str(counts[4 + first_value]) + str(counts[4 + second_value]) + ' ' + str(np.max(np.delete(strengths, [4 + first_value, 4 + second_value], 0)))]
+        # Flush: check how many we have of that suit and get top strength
+        for i in range(4):
+            out += [str(counts[i]) + ' ' + str(top_strength)]
+        # Four of a kind: check how many we have of that value and get top strength
+        for i in range(4, 10):
+            out += [str(counts[i]) + ' ' + str(top_strength)]
+        # Straight flush: get information about the suit being bet on and our strongest suit (including information about Nines and Aces)
+        for i in range(3):
+            for j in range(4):
+                out += [str(sf_strengths[j]) + ' ' + str(np.max(np.delete(sf_strengths, j, 0)))]
+        # Beginning of round: 
+        out += [pre_straight_abstraction]
     return out
 
 
-def make_key(hand: List[str], hand_abstraction: str, history: List[int]) -> str:
+def make_key(hand: List[str], hand_abstractions: str, history: List[int]) -> str:
     key = str(len(hand))
     
     # History abstraction
-    if len(history) == 0:
-        key += '-88-'
-    else:
-        key += '-' + str(history[-1]) + '-'
-        if len(history) > 1:
-            key += history_codes[history[-1], history[-2]] + '-'
-            if len(history) > 2:
-                key += history_codes[history[-1], history[-3]] + '-'
+    last_bet = 88 if len(history) == 0 else history[-1]
+    key += '-' + str(last_bet) + '-'
+    if len(history) > 1:
+        key += history_codes[last_bet, history[-2]] + '-'
+        if len(history) > 2:
+            key += history_codes[last_bet, history[-3]] + '-'
     
     # Hand abstraction
-    key += hand_abstraction
+    key += hand_abstractions[last_bet]
 
     return key
 
