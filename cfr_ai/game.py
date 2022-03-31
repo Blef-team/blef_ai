@@ -22,44 +22,44 @@ class Game():
             correct = sum([x[0] == str(last_bet - 6) for x in all_cards]) >= 2
         elif last_bet in range(12, 27): # Two pair
             if last_bet == 12:
-                correct = sum([x[0] == '1' for x in all_cards]) >= 2 & sum([x[0] == '0' for x in all_cards]) >= 2
+                correct = sum([x[0] == '1' for x in all_cards]) >= 2 and sum([x[0] == '0' for x in all_cards]) >= 2
             elif last_bet in range(13, 15):
-                correct = sum([x[0] == '2' for x in all_cards]) >= 2 & sum([x[0] == str(last_bet - 13) for x in all_cards]) >= 2
+                correct = sum([x[0] == '2' for x in all_cards]) >= 2 and sum([x[0] == str(last_bet - 13) for x in all_cards]) >= 2
             elif last_bet in range(15, 18):
-                correct = sum([x[0] == '3' for x in all_cards]) >= 2 & sum([x[0] == str(last_bet - 15) for x in all_cards]) >= 2
+                correct = sum([x[0] == '3' for x in all_cards]) >= 2 and sum([x[0] == str(last_bet - 15) for x in all_cards]) >= 2
             elif last_bet in range(18, 22):
-                correct = sum([x[0] == '4' for x in all_cards]) >= 2 & sum([x[0] == str(last_bet - 18) for x in all_cards]) >= 2
+                correct = sum([x[0] == '4' for x in all_cards]) >= 2 and sum([x[0] == str(last_bet - 18) for x in all_cards]) >= 2
             else:
-                correct = sum([x[0] == '5' for x in all_cards]) >= 2 & sum([x[0] == str(last_bet - 22) for x in all_cards]) >= 2
+                correct = sum([x[0] == '5' for x in all_cards]) >= 2 and sum([x[0] == str(last_bet - 22) for x in all_cards]) >= 2
         elif last_bet == 27: # Small straight
-            correct = sum([x[0] == '0' for x in all_cards]) >= 1 & sum([x[0] == '1' for x in all_cards]) >= 1 & sum([x[0] == '2' for x in all_cards]) >= 1 & sum([x[0] == '3' for x in all_cards]) >= 1 & sum([x[0] == '4' for x in all_cards]) >= 1
+            correct = sum([x[0] == '0' for x in all_cards]) >= 1 and sum([x[0] == '1' for x in all_cards]) >= 1 and sum([x[0] == '2' for x in all_cards]) >= 1 and sum([x[0] == '3' for x in all_cards]) >= 1 and sum([x[0] == '4' for x in all_cards]) >= 1
         elif last_bet == 28: # Big straight
-            correct = sum([x[0] == '1' for x in all_cards]) >= 1 & sum([x[0] == '2' for x in all_cards]) >= 1 & sum([x[0] == '3' for x in all_cards]) >= 1 & sum([x[0] == '4' for x in all_cards]) >= 1 & sum([x[0] == '5' for x in all_cards]) >= 1
+            correct = sum([x[0] == '1' for x in all_cards]) >= 1 and sum([x[0] == '2' for x in all_cards]) >= 1 and sum([x[0] == '3' for x in all_cards]) >= 1 and sum([x[0] == '4' for x in all_cards]) >= 1 and sum([x[0] == '5' for x in all_cards]) >= 1
         elif last_bet == 29: # Great straight
-            correct = sum([x[0] == '0' for x in all_cards]) >= 1 & sum([x[0] == '1' for x in all_cards]) >= 1 & sum([x[0] == '2' for x in all_cards]) >= 1 & sum([x[0] == '3' for x in all_cards]) >= 1 & sum([x[0] == '4' for x in all_cards]) >= 1 & sum([x[0] == '5' for x in all_cards]) >= 1
+            correct = sum([x[0] == '0' for x in all_cards]) >= 1 and sum([x[0] == '1' for x in all_cards]) >= 1 and sum([x[0] == '2' for x in all_cards]) >= 1 and sum([x[0] == '3' for x in all_cards]) >= 1 and sum([x[0] == '4' for x in all_cards]) >= 1 and sum([x[0] == '5' for x in all_cards]) >= 1
         elif last_bet in range(30, 36): # Three of a kind
             correct = sum([x[0] == str(last_bet - 30) for x in all_cards]) >= 3
         elif last_bet in range(36, 66): # Full house
             if last_bet in range(36, 41):
-                correct = sum([x[0] == '0' for x in all_cards]) >= 3 & sum([x[0] == str(last_bet - 36 + 1) for x in all_cards]) >= 2
+                correct = sum([x[0] == '0' for x in all_cards]) >= 3 and sum([x[0] == str(last_bet - 36 + 1) for x in all_cards]) >= 2
             elif last_bet in range(41, 42):
-                correct = sum([x[0] == '1' for x in all_cards]) >= 3 & sum([x[0] == str(last_bet - 41) for x in all_cards]) >= 2
+                correct = sum([x[0] == '1' for x in all_cards]) >= 3 and sum([x[0] == str(last_bet - 41) for x in all_cards]) >= 2
             elif last_bet in range(42, 46):
-                correct = sum([x[0] == '1' for x in all_cards]) >= 3 & sum([x[0] == str(last_bet - 41 + 1) for x in all_cards]) >= 2
+                correct = sum([x[0] == '1' for x in all_cards]) >= 3 and sum([x[0] == str(last_bet - 41 + 1) for x in all_cards]) >= 2
             elif last_bet in range(46, 48):
-                correct = sum([x[0] == '2' for x in all_cards]) >= 3 & sum([x[0] == str(last_bet - 46) for x in all_cards]) >= 2
+                correct = sum([x[0] == '2' for x in all_cards]) >= 3 and sum([x[0] == str(last_bet - 46) for x in all_cards]) >= 2
             elif last_bet in range(48, 51):
-                correct = sum([x[0] == '2' for x in all_cards]) >= 3 & sum([x[0] == str(last_bet - 46 + 1) for x in all_cards]) >= 2
+                correct = sum([x[0] == '2' for x in all_cards]) >= 3 and sum([x[0] == str(last_bet - 46 + 1) for x in all_cards]) >= 2
             elif last_bet in range(51, 54):
-                correct = sum([x[0] == '3' for x in all_cards]) >= 3 & sum([x[0] == str(last_bet - 51) for x in all_cards]) >= 2
+                correct = sum([x[0] == '3' for x in all_cards]) >= 3 and sum([x[0] == str(last_bet - 51) for x in all_cards]) >= 2
             elif last_bet in range(54, 56):
-                correct = sum([x[0] == '3' for x in all_cards]) >= 3 & sum([x[0] == str(last_bet - 51 + 1) for x in all_cards]) >= 2
+                correct = sum([x[0] == '3' for x in all_cards]) >= 3 and sum([x[0] == str(last_bet - 51 + 1) for x in all_cards]) >= 2
             elif last_bet in range(56, 60):
-                correct = sum([x[0] == '4' for x in all_cards]) >= 3 & sum([x[0] == str(last_bet - 56) for x in all_cards]) >= 2
+                correct = sum([x[0] == '4' for x in all_cards]) >= 3 and sum([x[0] == str(last_bet - 56) for x in all_cards]) >= 2
             elif last_bet in range(60, 61):
-                correct = sum([x[0] == '4' for x in all_cards]) >= 3 & sum([x[0] == str(last_bet - 56 + 1) for x in all_cards]) >= 2
+                correct = sum([x[0] == '4' for x in all_cards]) >= 3 and sum([x[0] == str(last_bet - 56 + 1) for x in all_cards]) >= 2
             else:
-                correct = sum([x[0] == '5' for x in all_cards]) >= 3 & sum([x[0] == str(last_bet - 61) for x in all_cards]) >= 2
+                correct = sum([x[0] == '5' for x in all_cards]) >= 3 and sum([x[0] == str(last_bet - 61) for x in all_cards]) >= 2
         elif last_bet in range(66, 70): # Flush
             correct = sum([x[1] == str(last_bet - 66) for x in all_cards]) >= 5
         elif last_bet in range(70, 76): # Four of a kind
