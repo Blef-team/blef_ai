@@ -22,25 +22,30 @@ def get_hand_abstraction(hand: List[str], hand_sizes: List[int]) -> str:
         out = [values] * 89
     # Rounds 6-21: use main abstraction
     else:
+        # Make counts of suits and values
         counts = np.zeros(10, dtype=int)
-        strengths = np.arange(10, dtype=int)
         for x in hand:
             counts[int(x[0]) + 4] += 1
             counts[int(x[1])] += 1
+        # Sort the counts by opinionated strength (N of a value is better than N+1 of a suit)
+        strengths = np.arange(10, dtype=int)
+        strengths[0:4] -= 10
         for i in range(10):
             strengths[i] += 10 * counts[i]
+        # Keep the top 1 strength handy
+        top_strength = np.max(strengths)
+        # Make an augmented version of suit strengths, with nines and aces, for use in straight flushes
         sf_strengths = strengths[0:4].copy().astype(float)
         for x in hand:
             if x[0] == '0':
                 sf_strengths[int(x[1])] += 0.1
             if x[0] == '5':
                 sf_strengths[int(x[1])] += 0.2
-        top_strength = np.max(strengths)
         # Pre-straight:
         ## If there's four of a kind or flush on hand, get the top strength
         ## If there's a three of a kind on hand, get the top 2 strengths
         ## Else, get all card values
-        if top_strength >= 44:
+        if top_strength >= 40:
             pre_straight_abstraction = str(top_strength)
         elif np.max(strengths[4:10]) >= 34:
             pre_straight_abstraction = str(sorted(strengths[4:10], reverse=True)[0]) + ' ' + str(sorted(strengths[4:10], reverse=True)[1])
@@ -74,11 +79,11 @@ def get_hand_abstraction(hand: List[str], hand_sizes: List[int]) -> str:
         # Four of a kind: check how many we have of that value and get top strength
         for i in range(4, 10):
             out += [str(counts[i]) + ' ' + str(top_strength)]
-        # Straight flush: get information about the suit being bet on and our strongest suit (including information about Nines and Aces)
+        # Straight flush: get augmented information about the suit being bet on and our strongest suit
         for i in range(3):
             for j in range(4):
                 out += [str(sf_strengths[j]) + ' ' + str(np.max(np.delete(sf_strengths, j, 0)))]
-        # Beginning of round: 
+        # Beginning of round (at index 88): same as pre-straight
         out += [pre_straight_abstraction]
     return out
 
