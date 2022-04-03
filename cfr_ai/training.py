@@ -6,7 +6,7 @@ import csv, os, psutil
 from datetime import datetime
 
 CLI = argparse.ArgumentParser()
-CLI.add_argument("--num_iterations", type=int, default=50000)
+CLI.add_argument("--num_iterations", type=int, default=400000)
 CLI.add_argument("--hand_sizes", nargs=2, type=int, default=[1, 1])
 CLI.add_argument("--no_save", action=argparse.BooleanOptionalAction)
 CLI.add_argument("--get_exploitability", action=argparse.BooleanOptionalAction)
