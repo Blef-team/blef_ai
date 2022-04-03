@@ -105,7 +105,7 @@ def make_key(hand: List[str], hand_abstractions: str, history: List[int]) -> str
     return key
 
 
-def make_full_key(my_cards: List[str], history: List[int], hand_sizes: List[int]) -> str:
+def make_full_key(my_cards: List[str], history: List[int]) -> str:
     my_cards.sort()
     return str(my_cards) + str(history)
 
