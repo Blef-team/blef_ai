@@ -22,30 +22,34 @@ class Trainer():
             self.infoset_map[key] = InformationSet(self.hand_sizes, history, iter)
         info_set = self.infoset_map[key]
 
-        possible_actions = get_possible_actions(history, self.hand_sizes)
-        counterfactual_values = np.zeros(len(possible_actions))
-        opponent = (active_player + 1) % 2
-
-        if active_player == mc_player:
-            strategy = info_set.get_strategy(reach_probability)
-            for i, action in enumerate(possible_actions):
-                if info_set.regrets[i] >= self.pruning_threshold or prune_feast:
-                    counterfactual_values[i] = -self.get_node_value(hands, hand_abstractions, history + [action], reach_probability * strategy[i], opponent, mc_player, prune_feast, iter)
-            node_value = np.dot(counterfactual_values, strategy)
-            if prune_feast:
-                info_set.regrets = np.maximum(info_set.regrets + counterfactual_values - node_value, self.min_regret)
-            else:
-                to_update = info_set.regrets >= self.pruning_threshold
-                info_set.regrets[to_update] += counterfactual_values[to_update] - node_value
-
+        if info_set.last_touched == iter:
+            return info_set.temporary_value
         else:
-            strategy = info_set.get_strategy(1.0)
-            action = random.choices(possible_actions, weights=strategy, k=1)[0]
-            node_value = -self.get_node_value(hands, hand_abstractions, history + [action], reach_probability, opponent, mc_player, prune_feast, iter) + self.penalty
-        info_set.times_touched += 1
-        info_set.last_touched = iter
-        self.nodes_touched += 1
-        return node_value
+            possible_actions = get_possible_actions(history, self.hand_sizes)
+            counterfactual_values = np.zeros(len(possible_actions))
+            opponent = (active_player + 1) % 2
+
+            if active_player == mc_player:
+                strategy = info_set.get_strategy(reach_probability)
+                for i, action in enumerate(possible_actions):
+                    if info_set.regrets[i] >= self.pruning_threshold or prune_feast:
+                        counterfactual_values[i] = -self.get_node_value(hands, hand_abstractions, history + [action], reach_probability * strategy[i], opponent, mc_player, prune_feast, iter)
+                node_value = np.dot(counterfactual_values, strategy)
+                if prune_feast:
+                    info_set.regrets = np.maximum(info_set.regrets + counterfactual_values - node_value, self.min_regret)
+                else:
+                    to_update = info_set.regrets >= self.pruning_threshold
+                    info_set.regrets[to_update] += counterfactual_values[to_update] - node_value
+
+            else:
+                strategy = info_set.get_strategy(1.0)
+                action = random.choices(possible_actions, weights=strategy, k=1)[0]
+                node_value = -self.get_node_value(hands, hand_abstractions, history + [action], reach_probability, opponent, mc_player, prune_feast, iter) + self.penalty
+            info_set.times_touched += 1
+            info_set.last_touched = iter
+            info_set.temporary_value = node_value
+            self.nodes_touched += 1
+            return node_value
 
     def train(self, num_iterations: int):
         utils = [0, 0]
@@ -60,7 +64,7 @@ class Trainer():
             prune_feast = int(i/4) % 20 == 0
             mc_player = int(i/2) % 2 == 0
             starting_player = i % 2 == 0
-                    hands = Game.deal_cards(self.hand_sizes)
-                    hand_abstractions = [get_hand_abstraction(hand, self.hand_sizes) for hand in hands]
-                    utils[starting_player] += self.get_node_value(hands, hand_abstractions, [], 1.0, starting_player, mc_player, prune_feast, i)
+            hands = Game.deal_cards(self.hand_sizes)
+            hand_abstractions = [get_hand_abstraction(hand, self.hand_sizes) for hand in hands]
+            utils[starting_player] += self.get_node_value(hands, hand_abstractions, [], 1.0, starting_player, mc_player, prune_feast, i)
         return utils[0] * 2 / num_iterations, utils[1] * 2 / num_iterations
