@@ -62,8 +62,8 @@ class Trainer():
                     for _,v in self.infoset_map.items():
                         v.strategy_sum *= (t / (t + 1)) # LINEAR MCCFR
             prune_feast = int(i/4) % 20 == 0
-            mc_player = int(i/2) % 2 == 0
-            starting_player = i % 2 == 0
+            mc_player = int(i/2) % 2
+            starting_player = i % 2
             hands = Game.deal_cards(self.hand_sizes)
             hand_abstractions = [get_hand_abstraction(hand, self.hand_sizes) for hand in hands]
             utils[starting_player] += self.get_node_value(hands, hand_abstractions, [], 1.0, starting_player, mc_player, prune_feast, i)
