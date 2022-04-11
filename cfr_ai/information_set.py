@@ -41,9 +41,10 @@ def get_hand_abstraction(hand: List[str], hand_sizes: List[int]) -> str:
                 sf_strengths[int(x[1])] += 0.1
             if x[0] == '5':
                 sf_strengths[int(x[1])] += 0.2
+        augmented_strengths = np.append(sf_strengths, strengths[4:10])
         # Pre-straight:
         ## If there's four of a kind or flush on hand, get the top strength
-        ## If there's a three of a kind on hand, get the top 2 strengths
+        ## If there's a three of a kind on hand, get the top 2 value strengths
         ## Else, get all card values
         if top_strength >= 40:
             pre_straight_abstraction = str(top_strength)
@@ -56,33 +57,46 @@ def get_hand_abstraction(hand: List[str], hand_sizes: List[int]) -> str:
                 values += x[0]
             pre_straight_abstraction = values
         out = [pre_straight_abstraction] * 27
-        # Straights: check which values we have and get top strength
-        straight_part = ''.join([str(min(x, 1)) for x in counts[4:10]]) + ' ' + str(top_strength)
-        out += [straight_part] * 3
-        # Three of a kind: check how many we have of that value and get top strength
-        for i in range(4, 10):
-            out += [str(counts[i]) + ' ' + str(top_strength)]
-        # Full house: check how many we have of the two values each and get top strength
-        first_value = 0
-        second_value = 0
-        for i in range(30):
-            second_value += 1
-            if second_value == 6:
-                first_value += 1
-                second_value = 0
-            if second_value == first_value:
+        # Straight to full: if there's four of a kind or great straight flush, report just it
+        if top_strength >= 44:
+            out += [str(top_strength)] * 39
+        else:
+            ## Else for straights: check which values we have and get top strength
+            straight_part = ''.join([str(min(x, 1)) for x in counts[4:10]]) + ' ' + str(top_strength)
+            out += [straight_part] * 3
+            ## Else for three of a kind: check how many we have of that value and get top strength
+            for i in range(4, 10):
+                out += [str(counts[i]) + ' ' + str(top_strength)]
+            ## Else for full house: check how many we have of the two values each and get top strength
+            first_value = 0
+            second_value = 0
+            for i in range(30):
                 second_value += 1
-            out += [str(counts[4 + first_value]) + str(counts[4 + second_value]) + ' ' + str(np.max(np.delete(strengths, [4 + first_value, 4 + second_value], 0)))]
-        # Flush: check how many we have of that suit and get top strength
+                if second_value == 6:
+                    first_value += 1
+                    second_value = 0
+                if second_value == first_value:
+                    second_value += 1
+                out += [str(counts[4 + first_value]) + str(counts[4 + second_value]) + ' ' + str(np.max(np.delete(strengths, [4 + first_value, 4 + second_value], 0)))]
+        # Flush: check how many we have of that suit and get top (augmented) strength
         for i in range(4):
-            out += [str(counts[i]) + ' ' + str(top_strength)]
-        # Four of a kind: check how many we have of that value and get top strength
+            out += [str(counts[i]) + ' ' + str(np.max(augmented_strengths))]
+        # Four of a kind: check how many we have of that value and get top (augmented) strength, skipping already irrelevant ones
+        temp_strengths = augmented_strengths.copy()
         for i in range(4, 10):
-            out += [str(counts[i]) + ' ' + str(top_strength)]
-        # Straight flush: get augmented information about the suit being bet on and our strongest suit
-        for i in range(3):
+            temp_strengths = np.delete(temp_strengths, 4, 0)
+            out += [str(counts[i]) + ' ' + str(np.max(temp_strengths))]
+        # Small / big straight flush: get augmented information about the suit being bet on and our strongest suit
+        for i in range(2):
             for j in range(4):
                 out += [str(sf_strengths[j]) + ' ' + str(np.max(np.delete(sf_strengths, j, 0)))]
+        # Great straight flush: get augmented information about the suit being bet on and our strongest suit, skipping already irrelevant ones
+        temp_strengths = sf_strengths
+        for j in range(3):
+            temp_strengths = temp_strengths[1:]
+            out += [str(sf_strengths[j]) + ' ' + str(np.max(temp_strengths))]
+        # Great straight flush spades: ignore the hand
+        out += ['X']
         # Beginning of round (at index 88): same as pre-straight
         out += [pre_straight_abstraction]
     return out

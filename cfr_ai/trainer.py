@@ -53,7 +53,7 @@ class Trainer():
 
     def train(self, num_iterations: int):
         utils = [0, 0]
-        for i in trange(num_iterations, desc = "MC iterations of Blef CFR"):
+        for i in trange(num_iterations, desc = "Training"):
             if i == int(num_iterations * 0.3):
                 for _,v in self.infoset_map.items():
                     v.strategy_sum *= 0
