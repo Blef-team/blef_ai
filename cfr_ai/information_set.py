@@ -57,8 +57,8 @@ def get_hand_abstraction(hand: List[str], hand_sizes: List[int]) -> str:
                 values += x[0]
             pre_straight_abstraction = values
         out = [pre_straight_abstraction] * 27
-        # Straight to full: if there's four of a kind or great straight flush, report just it
-        if top_strength >= 44:
+        # Straight to full: if there's four of a kind or flush, report just it
+        if top_strength >= 40:
             out += [str(top_strength)] * 39
         else:
             ## Else for straights: check which values we have and get top strength
@@ -128,7 +128,7 @@ class InformationSet():
     def __init__(self, hand_sizes: List[int], history: List[int], iter: int):
         possible_actions = get_possible_actions(history, hand_sizes)
         self.regrets = np.zeros(len(possible_actions))
-        self.strategy_sum = np.zeros(len(possible_actions))
+        self.strategy_sum = np.zeros(len(possible_actions), dtype=np.float32)
         self.times_touched = 0
         self.first_touched = iter
         self.last_touched = 0
