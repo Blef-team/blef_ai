@@ -62,7 +62,7 @@ def get_hand_abstraction(hand: List[str], hand_sizes: List[int]) -> str:
             out += [str(top_strength)] * 39
         else:
             ## Else for straights: check which values we have and get top strength
-            straight_part = ''.join([str(min(x, 1)) for x in counts[4:10]]) + ' ' + str(top_strength)
+            straight_part = str(min(counts[4], 1)) + str(sum([min(x, 1) for x in counts[5:9]])) + str(min(counts[9], 1)) + ' ' + str(top_strength)
             out += [straight_part] * 3
             ## Else for three of a kind: check how many we have of that value and get top strength
             for i in range(4, 10):
