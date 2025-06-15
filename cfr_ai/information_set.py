@@ -4,7 +4,7 @@ import numpy as np
 history_codes = np.genfromtxt('cfr_ai/history.csv', delimiter=',', dtype='|U5', skip_header=0)
 
 
-def get_possible_actions(history: List[int], hand_sizes: List[int]):
+def get_possible_actions(history: List[int]):
     if (len(history) == 0):
         return [a for a in range(88)]
     else: 
@@ -125,10 +125,10 @@ def make_full_key(my_cards: List[str], history: List[int]) -> str:
 
 
 class InformationSet():
-    def __init__(self, hand_sizes: List[int], history: List[int], iter: int):
-        possible_actions = get_possible_actions(history, hand_sizes)
-        self.regrets = np.zeros(len(possible_actions))
-        self.strategy_sum = np.zeros(len(possible_actions), dtype=np.float32)
+    def __init__(self, history: List[int], iter: int):
+        self.possible_actions = get_possible_actions(history)
+        self.regrets = np.zeros(len(self.possible_actions))
+        self.strategy_sum = np.zeros(len(self.possible_actions), dtype=np.float32)
         self.times_touched = 0
         self.first_touched = iter
         self.last_touched = 0

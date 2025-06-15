@@ -19,10 +19,10 @@ class Trainer():
 
         key = make_key(hands[active_player], hand_abstractions[active_player], history)
         if key not in self.infoset_map:
-            self.infoset_map[key] = InformationSet(self.hand_sizes, history, iter)
+            self.infoset_map[key] = InformationSet(history, iter)
         info_set = self.infoset_map[key]
 
-        possible_actions = get_possible_actions(history, self.hand_sizes)
+        possible_actions = info_set.possible_actions
         counterfactual_values = np.zeros(len(possible_actions))
         opponent = (active_player + 1) % 2
 
