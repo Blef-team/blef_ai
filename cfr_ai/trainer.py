@@ -22,34 +22,30 @@ class Trainer():
             self.infoset_map[key] = InformationSet(self.hand_sizes, history, iter)
         info_set = self.infoset_map[key]
 
-        if info_set.last_touched == iter:
-            return info_set.temporary_value
-        else:
-            possible_actions = get_possible_actions(history, self.hand_sizes)
-            counterfactual_values = np.zeros(len(possible_actions))
-            opponent = (active_player + 1) % 2
+        possible_actions = get_possible_actions(history, self.hand_sizes)
+        counterfactual_values = np.zeros(len(possible_actions))
+        opponent = (active_player + 1) % 2
 
-            if active_player == mc_player:
-                strategy = info_set.get_strategy(reach_probability)
-                for i, action in enumerate(possible_actions):
-                    if info_set.regrets[i] >= self.pruning_threshold or prune_feast:
-                        counterfactual_values[i] = -self.get_node_value(hands, hand_abstractions, history + [action], reach_probability * strategy[i], opponent, mc_player, prune_feast, iter)
-                node_value = np.dot(counterfactual_values, strategy)
-                if prune_feast:
-                    info_set.regrets = np.maximum(info_set.regrets + counterfactual_values - node_value, self.min_regret)
-                else:
-                    to_update = info_set.regrets >= self.pruning_threshold
-                    info_set.regrets[to_update] += counterfactual_values[to_update] - node_value
-
+        if active_player == mc_player:
+            strategy = info_set.get_strategy(reach_probability)
+            for i, action in enumerate(possible_actions):
+                if info_set.regrets[i] >= self.pruning_threshold or prune_feast:
+                    counterfactual_values[i] = -self.get_node_value(hands, hand_abstractions, history + [action], reach_probability * strategy[i], opponent, mc_player, prune_feast, iter)
+            node_value = np.dot(counterfactual_values, strategy)
+            if prune_feast:
+                info_set.regrets = np.maximum(info_set.regrets + counterfactual_values - node_value, self.min_regret)
             else:
-                strategy = info_set.get_strategy(1.0)
-                action = random.choices(possible_actions, weights=strategy, k=1)[0]
-                node_value = -self.get_node_value(hands, hand_abstractions, history + [action], reach_probability, opponent, mc_player, prune_feast, iter) + self.penalty
-            info_set.times_touched += 1
-            info_set.last_touched = iter
-            info_set.temporary_value = node_value
-            self.nodes_touched += 1
-            return node_value
+                to_update = info_set.regrets >= self.pruning_threshold
+                info_set.regrets[to_update] += counterfactual_values[to_update] - node_value
+
+        else:
+            strategy = info_set.get_strategy(1.0)
+            action = random.choices(possible_actions, weights=strategy, k=1)[0]
+            node_value = -self.get_node_value(hands, hand_abstractions, history + [action], reach_probability, opponent, mc_player, prune_feast, iter) + self.penalty
+        info_set.times_touched += 1
+        info_set.last_touched = iter
+        self.nodes_touched += 1
+        return node_value
 
     def train(self, num_iterations: int):
         utils = [0, 0]
