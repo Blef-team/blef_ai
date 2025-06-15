@@ -2,7 +2,7 @@ from typing import List, Dict
 from cfr_ai.information_set import *
 from cfr_ai.game import *
 import numpy as np
-from tqdm import trange
+from tqdm import trange, tqdm
 
 class Trainer():
     def __init__(self, hand_sizes: List[int], pruning_range: List[int], penalty: float):
@@ -49,6 +49,7 @@ class Trainer():
 
     def train(self, num_iterations: int):
         utils = [0, 0]
+        last_utils = [0, 0]
         for i in trange(num_iterations, desc = "Training"):
             if i == int(num_iterations * 0.3):
                 for _,v in self.infoset_map.items():
@@ -63,4 +64,9 @@ class Trainer():
             hands = Game.deal_cards(self.hand_sizes)
             hand_abstractions = [get_hand_abstraction(hand, self.hand_sizes) for hand in hands]
             utils[starting_player] += self.get_node_value(hands, hand_abstractions, [], 1.0, starting_player, mc_player, prune_feast, i)
+            for t in range(1, 11):
+                if i == int(t * num_iterations / 10):
+                    utils_to_display = [round((utils[0] - last_utils[0]) / num_iterations * 20, 4), round((utils[1] - last_utils[1]) / num_iterations * 20, 4)]
+                    tqdm.write(f"Utilities at {t * 10}%: {utils_to_display[0]}, {utils_to_display[1]}")
+                    last_utils = utils.copy()
         return utils[0] * 2 / num_iterations, utils[1] * 2 / num_iterations
