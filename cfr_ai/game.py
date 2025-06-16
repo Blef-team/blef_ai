@@ -7,80 +7,69 @@ from numba import njit
 BlefCards = np.arange(24, dtype=np.int64) 
 rng = np.random.default_rng()
 
-
-@njit
-def is_all_in(a, b):
-    for i in range(a.shape[0]):
-        found = False
-        for j in range(b.shape[0]):
-            if a[i] == b[j]:
-                found = True
-                break
-        if not found:
-            return False
-    return True
-
-
 class Game():
     @staticmethod
     def check_finish(history: List[int]) -> bool:
         return len(history) > 0 and history[-1] == 88
 
-    @njit
-    def get_payoff(history: List[int], all_cards) -> int:
-        """get payoff for player who made last bet"""
-        last_bet = history[-2]
-        
+    @staticmethod
+    def precompute_set_existence(hands: list) -> np.ndarray:
+        """
+        Calculates the outcome for all 88 possible bets at once for a given deal.
+        Returns a boolean numpy array of size 88.
+        """
+        all_cards = np.concatenate(hands)
         card_values = all_cards // 4
         card_suits = all_cards % 4
 
-        if last_bet < 6: # High card (e.g., last_bet=0 for card '9')
-            correct = np.sum(card_values == last_bet) >= 1
-        elif last_bet < 12: # Pair (e.g., last_bet=6 for pair of '9's)
-            correct = np.sum(card_values == (last_bet - 6)) >= 2
-        elif last_bet < 27: # Two pair
-            if last_bet == 12: v1, v2 = 1, 0
-            elif last_bet < 15: v1, v2 = 2, last_bet - 13
-            elif last_bet < 18: v1, v2 = 3, last_bet - 15
-            elif last_bet < 22: v1, v2 = 4, last_bet - 18
-            else: v1, v2 = 5, last_bet - 22
-            correct = (np.sum(card_values == v1) >= 2) and (np.sum(card_values == v2) >= 2)
-        elif last_bet < 30: # Straights
-            if last_bet == 27:
-                correct = is_all_in(np.array([0, 1, 2, 3, 4]), card_values)
-            elif last_bet == 28:
-                correct = is_all_in(np.array([1, 2, 3, 4, 5]), card_values)
-            elif last_bet == 29:
-                correct = is_all_in(np.array([0, 1, 2, 3, 4, 5]), card_values)
-        elif last_bet < 36: # Three of a kind
-            correct = np.sum(card_values == (last_bet - 30)) >= 3
-        elif last_bet < 66: # Full house
-            if last_bet < 41:   v_three, v_two = 0, last_bet - 35
-            elif last_bet == 41: v_three, v_two = 1, 0
-            elif last_bet < 46: v_three, v_two = 1, last_bet - 40
-            elif last_bet < 48: v_three, v_two = 2, last_bet - 46
-            elif last_bet < 51: v_three, v_two = 2, last_bet - 45
-            elif last_bet < 54: v_three, v_two = 3, last_bet - 51
-            elif last_bet < 56: v_three, v_two = 3, last_bet - 50
-            elif last_bet < 60: v_three, v_two = 4, last_bet - 56
-            elif last_bet == 60: v_three, v_two = 4, 5
-            else: v_three, v_two = 5, last_bet - 61
-            correct = (np.sum(card_values == v_three) >= 3) and (np.sum(card_values == v_two) >= 2)
-        elif last_bet < 70: # Flush
-            correct = np.sum(card_suits == (last_bet - 66)) >= 5
-        elif last_bet < 76: # Four of a kind
-            correct = np.sum(card_values == (last_bet - 70)) >= 4
-        elif last_bet < 88: # Straight Flushes
-            suit = last_bet % 4
-            if last_bet in range(76, 80): required_values = np.array([0, 1, 2, 3, 4])
-            elif last_bet in range(80, 84): required_values = np.array([1, 2, 3, 4, 5])
-            else: required_values = np.array([0, 1, 2, 3, 4, 5])
-            required_cards = required_values * 4 + suit
-            correct = is_all_in(required_cards, all_cards)
-        if correct:
-            return 1
-        else:
-            return -1
+        existence_array = np.zeros(88, dtype=np.bool_)
+
+        for bet in range(88):
+            if bet < 6: # High card (e.g., last_bet=0 for card '9')
+                correct = np.sum(card_values == bet) >= 1
+            elif bet < 12: # Pair (e.g., last_bet=6 for pair of '9's)
+                correct = np.sum(card_values == (bet - 6)) >= 2
+            elif bet < 27: # Two pair
+                if bet == 12: v1, v2 = 1, 0
+                elif bet < 15: v1, v2 = 2, bet - 13
+                elif bet < 18: v1, v2 = 3, bet - 15
+                elif bet < 22: v1, v2 = 4, bet - 18
+                else: v1, v2 = 5, bet - 22
+                correct = (np.sum(card_values == v1) >= 2) and (np.sum(card_values == v2) >= 2)
+            elif bet < 30: # Straights
+                if bet == 27:
+                    correct = np.all(np.isin(np.array([0, 1, 2, 3, 4]), card_values))
+                elif bet == 28:
+                    correct = np.all(np.isin(np.array([1, 2, 3, 4, 5]), card_values))
+                elif bet == 29:
+                    correct = np.all(np.isin(np.array([0, 1, 2, 3, 4, 5]), card_values))
+            elif bet < 36: # Three of a kind
+                correct = np.sum(card_values == (bet - 30)) >= 3
+            elif bet < 66: # Full house
+                if bet < 41:   v_three, v_two = 0, bet - 35
+                elif bet == 41: v_three, v_two = 1, 0
+                elif bet < 46: v_three, v_two = 1, bet - 40
+                elif bet < 48: v_three, v_two = 2, bet - 46
+                elif bet < 51: v_three, v_two = 2, bet - 45
+                elif bet < 54: v_three, v_two = 3, bet - 51
+                elif bet < 56: v_three, v_two = 3, bet - 50
+                elif bet < 60: v_three, v_two = 4, bet - 56
+                elif bet == 60: v_three, v_two = 4, 5
+                else: v_three, v_two = 5, bet - 61
+                correct = (np.sum(card_values == v_three) >= 3) and (np.sum(card_values == v_two) >= 2)
+            elif bet < 70: # Flush
+                correct = np.sum(card_suits == (bet - 66)) >= 5
+            elif bet < 76: # Four of a kind
+                correct = np.sum(card_values == (bet - 70)) >= 4
+            elif bet < 88: # Straight Flushes
+                suit = bet % 4
+                if bet in range(76, 80): required_values = np.array([0, 1, 2, 3, 4])
+                elif bet in range(80, 84): required_values = np.array([1, 2, 3, 4, 5])
+                else: required_values = np.array([0, 1, 2, 3, 4, 5])
+                required_cards = required_values * 4 + suit
+                correct = np.all(np.isin(required_cards, all_cards))
+            existence_array[bet] = correct
+        return existence_array
     
     @staticmethod
     def deal_cards(hand_sizes: List[int]):
