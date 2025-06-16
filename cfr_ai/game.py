@@ -1,15 +1,14 @@
 from typing import List
 import random
 import itertools
+import numpy as np
 
 BlefCards = [str(value) + str(suit) for value in range(6) for suit in range(4)] 
 
 class Game():
     @staticmethod
     def check_finish(history: List[int]) -> bool:
-        if (len(history) == 0): 
-            return False 
-        return history[-1] == 88
+        return len(history) > 0 and history[-1] == 88
 
     @staticmethod
     def get_payoff(history: List[int], hands: List[List[str]]) -> int:
