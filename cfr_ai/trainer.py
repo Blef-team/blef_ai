@@ -13,7 +13,7 @@ class Trainer():
         self.min_regret = pruning_range[1]
         self.penalty = penalty
 
-    def get_node_value(self, hands: List[List[str]], hand_abstractions: List[str], history: List[int], reach_probability: float, active_player: int, mc_player: int, prune_feast: bool, iter: int):
+    def get_node_value(self, hands: List[List[str]], hand_abstractions: List[str], history: List[int], reach_probability: float, active_player: int, traverser: int, prune_feast: bool, iter: int):
         if Game.check_finish(history):
             return Game.get_payoff(history, hands)
 
@@ -26,11 +26,11 @@ class Trainer():
         counterfactual_values = np.zeros(len(possible_actions))
         opponent = (active_player + 1) % 2
 
-        if active_player == mc_player:
+        if active_player == traverser:
             strategy = info_set.get_strategy(reach_probability)
             for i, action in enumerate(possible_actions):
                 if info_set.regrets[i] >= self.pruning_threshold or prune_feast:
-                    counterfactual_values[i] = -self.get_node_value(hands, hand_abstractions, history + [action], reach_probability * strategy[i], opponent, mc_player, prune_feast, iter)
+                    counterfactual_values[i] = -self.get_node_value(hands, hand_abstractions, history + [action], reach_probability * strategy[i], opponent, traverser, prune_feast, iter)
             node_value = np.dot(counterfactual_values, strategy)
             if prune_feast:
                 info_set.regrets = np.maximum(info_set.regrets + counterfactual_values - node_value, self.min_regret)
@@ -41,7 +41,7 @@ class Trainer():
         else:
             strategy = info_set.get_strategy(1.0)
             action = random.choices(possible_actions, weights=strategy, k=1)[0]
-            node_value = -self.get_node_value(hands, hand_abstractions, history + [action], reach_probability, opponent, mc_player, prune_feast, iter) + self.penalty
+            node_value = -self.get_node_value(hands, hand_abstractions, history + [action], reach_probability, opponent, traverser, prune_feast, iter) + self.penalty
         info_set.times_touched += 1
         info_set.last_touched = iter
         self.nodes_touched += 1
@@ -59,11 +59,11 @@ class Trainer():
                     for _,v in self.infoset_map.items():
                         v.strategy_sum *= (t / (t + 1)) # LINEAR MCCFR
             prune_feast = int(i/4) % 20 == 0
-            mc_player = int(i/2) % 2
+            traverser = int(i/2) % 2
             starting_player = i % 2
             hands = Game.deal_cards(self.hand_sizes)
             hand_abstractions = [get_hand_abstraction(hand, self.hand_sizes) for hand in hands]
-            utils[starting_player] += self.get_node_value(hands, hand_abstractions, [], 1.0, starting_player, mc_player, prune_feast, i)
+            utils[starting_player] += self.get_node_value(hands, hand_abstractions, [], 1.0, starting_player, traverser, prune_feast, i)
             for t in range(1, 11):
                 if i == int(t * num_iterations / 10):
                     utils_to_display = [round((utils[0] - last_utils[0]) / num_iterations * 20, 4), round((utils[1] - last_utils[1]) / num_iterations * 20, 4)]
