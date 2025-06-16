@@ -2,79 +2,81 @@ from typing import List
 import random
 import itertools
 import numpy as np
+from numba import njit
 
-BlefCards = [str(value) + str(suit) for value in range(6) for suit in range(4)] 
+BlefCards = np.arange(24, dtype=np.int64) 
+rng = np.random.default_rng()
+
+
+@njit
+def is_all_in(a, b):
+    for i in range(a.shape[0]):
+        found = False
+        for j in range(b.shape[0]):
+            if a[i] == b[j]:
+                found = True
+                break
+        if not found:
+            return False
+    return True
+
 
 class Game():
     @staticmethod
     def check_finish(history: List[int]) -> bool:
         return len(history) > 0 and history[-1] == 88
 
-    @staticmethod
-    def get_payoff(history: List[int], hands: List[List[str]]) -> int:
+    @njit
+    def get_payoff(history: List[int], all_cards) -> int:
         """get payoff for player who made last bet"""
         last_bet = history[-2]
-        all_cards = hands[0] + hands[1]
-        if last_bet in range(0, 6): # High card
-            correct = sum([x[0] == str(last_bet) for x in all_cards]) >= 1
-        elif last_bet in range(6, 12): # Pair
-            correct = sum([x[0] == str(last_bet - 6) for x in all_cards]) >= 2
-        elif last_bet in range(12, 27): # Two pair
-            if last_bet == 12:
-                correct = sum([x[0] == '1' for x in all_cards]) >= 2 and sum([x[0] == '0' for x in all_cards]) >= 2
-            elif last_bet in range(13, 15):
-                correct = sum([x[0] == '2' for x in all_cards]) >= 2 and sum([x[0] == str(last_bet - 13) for x in all_cards]) >= 2
-            elif last_bet in range(15, 18):
-                correct = sum([x[0] == '3' for x in all_cards]) >= 2 and sum([x[0] == str(last_bet - 15) for x in all_cards]) >= 2
-            elif last_bet in range(18, 22):
-                correct = sum([x[0] == '4' for x in all_cards]) >= 2 and sum([x[0] == str(last_bet - 18) for x in all_cards]) >= 2
-            else:
-                correct = sum([x[0] == '5' for x in all_cards]) >= 2 and sum([x[0] == str(last_bet - 22) for x in all_cards]) >= 2
-        elif last_bet == 27: # Small straight
-            correct = sum([x[0] == '0' for x in all_cards]) >= 1 and sum([x[0] == '1' for x in all_cards]) >= 1 and sum([x[0] == '2' for x in all_cards]) >= 1 and sum([x[0] == '3' for x in all_cards]) >= 1 and sum([x[0] == '4' for x in all_cards]) >= 1
-        elif last_bet == 28: # Big straight
-            correct = sum([x[0] == '1' for x in all_cards]) >= 1 and sum([x[0] == '2' for x in all_cards]) >= 1 and sum([x[0] == '3' for x in all_cards]) >= 1 and sum([x[0] == '4' for x in all_cards]) >= 1 and sum([x[0] == '5' for x in all_cards]) >= 1
-        elif last_bet == 29: # Great straight
-            correct = sum([x[0] == '0' for x in all_cards]) >= 1 and sum([x[0] == '1' for x in all_cards]) >= 1 and sum([x[0] == '2' for x in all_cards]) >= 1 and sum([x[0] == '3' for x in all_cards]) >= 1 and sum([x[0] == '4' for x in all_cards]) >= 1 and sum([x[0] == '5' for x in all_cards]) >= 1
-        elif last_bet in range(30, 36): # Three of a kind
-            correct = sum([x[0] == str(last_bet - 30) for x in all_cards]) >= 3
-        elif last_bet in range(36, 66): # Full house
-            if last_bet in range(36, 41):
-                correct = sum([x[0] == '0' for x in all_cards]) >= 3 and sum([x[0] == str(last_bet - 36 + 1) for x in all_cards]) >= 2
-            elif last_bet in range(41, 42):
-                correct = sum([x[0] == '1' for x in all_cards]) >= 3 and sum([x[0] == str(last_bet - 41) for x in all_cards]) >= 2
-            elif last_bet in range(42, 46):
-                correct = sum([x[0] == '1' for x in all_cards]) >= 3 and sum([x[0] == str(last_bet - 41 + 1) for x in all_cards]) >= 2
-            elif last_bet in range(46, 48):
-                correct = sum([x[0] == '2' for x in all_cards]) >= 3 and sum([x[0] == str(last_bet - 46) for x in all_cards]) >= 2
-            elif last_bet in range(48, 51):
-                correct = sum([x[0] == '2' for x in all_cards]) >= 3 and sum([x[0] == str(last_bet - 46 + 1) for x in all_cards]) >= 2
-            elif last_bet in range(51, 54):
-                correct = sum([x[0] == '3' for x in all_cards]) >= 3 and sum([x[0] == str(last_bet - 51) for x in all_cards]) >= 2
-            elif last_bet in range(54, 56):
-                correct = sum([x[0] == '3' for x in all_cards]) >= 3 and sum([x[0] == str(last_bet - 51 + 1) for x in all_cards]) >= 2
-            elif last_bet in range(56, 60):
-                correct = sum([x[0] == '4' for x in all_cards]) >= 3 and sum([x[0] == str(last_bet - 56) for x in all_cards]) >= 2
-            elif last_bet in range(60, 61):
-                correct = sum([x[0] == '4' for x in all_cards]) >= 3 and sum([x[0] == str(last_bet - 56 + 1) for x in all_cards]) >= 2
-            else:
-                correct = sum([x[0] == '5' for x in all_cards]) >= 3 and sum([x[0] == str(last_bet - 61) for x in all_cards]) >= 2
-        elif last_bet in range(66, 70): # Flush
-            correct = sum([x[1] == str(last_bet - 66) for x in all_cards]) >= 5
-        elif last_bet in range(70, 76): # Four of a kind
-            correct = sum([x[0] == str(last_bet - 70) for x in all_cards]) >= 4
-        elif last_bet in range(76, 80): # Small straight flush
-            suit = str(last_bet - 76)
-            relevant_cards = ['0' + suit, '1' + suit, '2' + suit, '3' + suit, '4' + suit]
-            correct = len([x for x in all_cards if x in relevant_cards]) >= 5
-        elif last_bet in range(80, 84): # Big straight flush
-            suit = str(last_bet - 80)
-            relevant_cards = ['1' + suit, '2' + suit, '3' + suit, '4' + suit, '5' + suit]
-            correct = len([x for x in all_cards if x in relevant_cards]) >= 5
-        elif last_bet in range(84, 88): # Great straight flush
-            suit = str(last_bet - 84)
-            relevant_cards = ['0' + suit, '1' + suit, '2' + suit, '3' + suit, '4' + suit, '5' + suit]
-            correct = len([x for x in all_cards if x in relevant_cards]) >= 6
+        
+        card_values = all_cards // 4
+        card_suits = all_cards % 4
+
+        if last_bet < 6: # High card (e.g., last_bet=0 for card '9')
+            correct = np.sum(card_values == last_bet) >= 1
+        elif last_bet < 12: # Pair (e.g., last_bet=6 for pair of '9's)
+            correct = np.sum(card_values == (last_bet - 6)) >= 2
+        elif last_bet < 27: # Two pair
+            if last_bet == 12: v1, v2 = 1, 0
+            elif last_bet < 15: v1, v2 = 2, last_bet - 13
+            elif last_bet < 18: v1, v2 = 3, last_bet - 15
+            elif last_bet < 22: v1, v2 = 4, last_bet - 18
+            else: v1, v2 = 5, last_bet - 22
+            correct = (np.sum(card_values == v1) >= 2) and (np.sum(card_values == v2) >= 2)
+        elif last_bet < 30: # Straights
+            if last_bet == 27:
+                correct = is_all_in(np.array([0, 1, 2, 3, 4]), card_values)
+            elif last_bet == 28:
+                correct = is_all_in(np.array([1, 2, 3, 4, 5]), card_values)
+            elif last_bet == 29:
+                correct = is_all_in(np.array([0, 1, 2, 3, 4, 5]), card_values)
+        elif last_bet < 36: # Three of a kind
+            correct = np.sum(card_values == (last_bet - 30)) >= 3
+        elif last_bet < 66: # Full house
+            if last_bet < 41:   v_three, v_two = 0, last_bet - 35
+            elif last_bet == 41: v_three, v_two = 1, 0
+            elif last_bet < 46: v_three, v_two = 1, last_bet - 40
+            elif last_bet < 48: v_three, v_two = 2, last_bet - 46
+            elif last_bet < 51: v_three, v_two = 2, last_bet - 45
+            elif last_bet < 54: v_three, v_two = 3, last_bet - 51
+            elif last_bet < 56: v_three, v_two = 3, last_bet - 50
+            elif last_bet < 60: v_three, v_two = 4, last_bet - 56
+            elif last_bet == 60: v_three, v_two = 4, 5
+            else: v_three, v_two = 5, last_bet - 61
+            correct = (np.sum(card_values == v_three) >= 3) and (np.sum(card_values == v_two) >= 2)
+        elif last_bet < 70: # Flush
+            correct = np.sum(card_suits == (last_bet - 66)) >= 5
+        elif last_bet < 76: # Four of a kind
+            correct = np.sum(card_values == (last_bet - 70)) >= 4
+        elif last_bet < 88: # Straight Flushes
+            suit = last_bet % 4
+            if last_bet in range(76, 80): required_values = np.array([0, 1, 2, 3, 4])
+            elif last_bet in range(80, 84): required_values = np.array([1, 2, 3, 4, 5])
+            else: required_values = np.array([0, 1, 2, 3, 4, 5])
+            required_cards = required_values * 4 + suit
+            correct = is_all_in(required_cards, all_cards)
         if correct:
             return 1
         else:
@@ -82,7 +84,7 @@ class Game():
     
     @staticmethod
     def deal_cards(hand_sizes: List[int]):
-        all_cards = random.sample(BlefCards, sum(hand_sizes))
+        all_cards = rng.choice(BlefCards, size=sum(hand_sizes), replace=False)
         hands = []
         for i in range(0, len(hand_sizes)):
             cumsum = [0] + list(itertools.accumulate(hand_sizes))

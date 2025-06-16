@@ -13,7 +13,7 @@ class Trainer():
         self.min_regret = pruning_range[1]
         self.penalty = penalty
 
-    def get_node_value(self, hands: List[List[str]], hand_abstractions: List[str], history: List[int], reach_probability: float, active_player: int, traverser: int, prune_feast: bool, iter: int):
+    def get_node_value(self, hands: List[np.ndarray], hand_abstractions: List[str], history: List[int], reach_probability: float, active_player: int, traverser: int, prune_feast: bool, iter: int):
         if Game.check_finish(history):
             return Game.get_payoff(history, hands)
 

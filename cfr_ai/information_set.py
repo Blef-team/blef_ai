@@ -12,7 +12,8 @@ def get_possible_actions(history: List[int]):
         return [a for a in range(89) if a > last_action]
 
 
-def get_hand_abstraction(hand: List[str], hand_sizes: List[int]) -> str:
+def get_hand_abstraction(hand: np.ndarray, hand_sizes: List[int]) -> str:
+    hand = [str(card // 4) + str(card % 4) for card in hand]
     # Rounds 1-5: get values
     if (sum(hand_sizes) <= 6):
         values = ''
@@ -102,7 +103,7 @@ def get_hand_abstraction(hand: List[str], hand_sizes: List[int]) -> str:
     return out
 
 
-def make_key(hand: List[str], hand_abstractions: str, history: List[int]) -> str:
+def make_key(hand: np.ndarray, hand_abstractions: str, history: List[int]) -> str:
     key = str(len(hand))
     
     # History abstraction
@@ -121,7 +122,7 @@ def make_key(hand: List[str], hand_abstractions: str, history: List[int]) -> str
 
 def make_full_key(my_cards: List[str], history: List[int]) -> str:
     my_cards.sort()
-    return str(my_cards) + str(history)
+    return str(my_cards) + ' ' + str(history)
 
 
 class InformationSet():
