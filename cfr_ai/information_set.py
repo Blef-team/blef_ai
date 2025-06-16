@@ -138,7 +138,8 @@ class InformationSet():
             strategy = np.maximum(0, self.regrets)
             strategy /= sum(strategy)
         else:
-            strategy = np.array([0.0] * (len(self.regrets) - 1) + [1.0])
+            strategy = np.zeros(len(self.regrets))
+            strategy[-1] = 1.0
 
         self.strategy_sum += reach_probability * strategy
         return strategy
