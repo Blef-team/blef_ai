@@ -4,6 +4,7 @@ from cfr_ai.exploitability import *
 from cfr_ai.encoding import encode_probabilities, clear_lows
 import csv, os, psutil
 from datetime import datetime
+import time
 
 CLI = argparse.ArgumentParser()
 CLI.add_argument("--num_iterations", type=int, default=400000)
@@ -12,10 +13,27 @@ CLI.add_argument("--no_save", action=argparse.BooleanOptionalAction)
 CLI.add_argument("--get_exploitability", action=argparse.BooleanOptionalAction)
 CLI.add_argument("--pruning_range", nargs=2, type=int, default=[-20, -22])
 CLI.add_argument("--penalty", type=float, default=0.0)
+CLI.add_argument("--log_points", type=int, default=25)
 args = CLI.parse_args()
 
-cfr_trainer = Trainer(args.hand_sizes, args.pruning_range, args.penalty)
-util0, util1 = cfr_trainer.train(args.num_iterations)
+cfr_trainer = Trainer(args.hand_sizes, args.pruning_range, args.penalty, args.log_points)
+
+start_time = time.time()
+util0, util1, utility_log = cfr_trainer.train(args.num_iterations)
+duration_seconds = time.time() - start_time
+training_duration = time.strftime('%H:%M', time.gmtime(duration_seconds))
+
+exploitability_log = {}
+if args.get_exploitability:
+    cfr_strategy = {k: v.get_final_strategy() for k,v in cfr_trainer.infoset_map.items()}
+    print(f"\nComputing exploitability")
+    exploitability_p0 = get_exploitability(cfr_strategy, args.hand_sizes, 0)
+    exploitability_log['Exploitability when player 0 starts'] = exploitability_p0
+    print(f"\nExploitability when player 0 starts: {exploitability_p0}")
+    if args.hand_sizes[0] != args.hand_sizes[1]:
+        exploitability_p1 = get_exploitability(cfr_strategy, args.hand_sizes, 1)
+        exploitability_log['Exploitability when player 1 starts'] = exploitability_p1
+        print(f"\nExploitability when player 1 starts: {exploitability_p1}")
 
 if not args.no_save:
     files = {}
@@ -45,6 +63,7 @@ if not args.no_save:
     with open('cfr_ai/outputs/' + "_".join(str(x) for x in args.hand_sizes) + '/metadata.csv', 'w', newline="") as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=['k', 'v'])
         csv_row = writer.writerow({"k": "Time finished", "v": datetime.now().strftime("%Y-%m-%d, %H:%M:%S")})
+        csv_row = writer.writerow({"k": "Training duration", "v": training_duration})
         csv_row = writer.writerow({"k": "Iterations", "v": args.num_iterations})
         csv_row = writer.writerow({"k": "Pruning threshold", "v": args.pruning_range[0]})
         csv_row = writer.writerow({"k": "Minimum regret", "v": args.pruning_range[1]})
@@ -55,10 +74,10 @@ if not args.no_save:
         csv_row = writer.writerow({"k": "RAM taken (MB)", "v": psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024})
         csv_row = writer.writerow({"k": "Player 1 game value", "v": util0})
         csv_row = writer.writerow({"k": "Player 2 game value", "v": util1})
+        writer.writerow({"k": "--- Utility Log ---", "v": ""})
+        for log_key, log_value in utility_log.items():
+            writer.writerow({"k": log_key, "v": log_value})
+        writer.writerow({"k": "--- Exploitability ---", "v": ""})
+        for log_key, log_value in exploitability_log.items():
+            writer.writerow({"k": log_key, "v": f"{log_value:.6f}"})
 
-if args.get_exploitability:
-    cfr_strategy = {k: v.get_final_strategy() for k,v in cfr_trainer.infoset_map.items()}
-    print(f"\nComputing exploitability")
-    print(f"\nExploitability when player 0 starts: " + str(get_exploitability(cfr_strategy, args.hand_sizes, 0)))
-    if args.hand_sizes[0] != args.hand_sizes[1]:
-        print(f"\nExploitability when player 1 starts: " + str(get_exploitability(cfr_strategy, args.hand_sizes, 1)))

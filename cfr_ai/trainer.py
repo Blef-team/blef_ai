@@ -1,17 +1,18 @@
-from typing import List, Dict
+from typing import List, Dict, Any
 from cfr_ai.information_set import *
 from cfr_ai.game import *
 import numpy as np
 from tqdm import trange, tqdm
 
 class Trainer():
-    def __init__(self, hand_sizes: List[int], pruning_range: List[int], penalty: float):
+    def __init__(self, hand_sizes: List[int], pruning_range: List[int], penalty: float, log_points: int):
         self.infoset_map: Dict[str, InformationSet] = {}
         self.hand_sizes = hand_sizes
         self.nodes_touched = 0
         self.pruning_threshold = pruning_range[0]
         self.min_regret = pruning_range[1]
         self.penalty = penalty
+        self.log_points = log_points
 
     def get_node_value(self, hands: List[np.ndarray], hand_abstractions: List[str], history: List[int], reach_probability: float, active_player: int, traverser: int, prune_feast: bool, existence_array, iter: int):
         if Game.check_finish(history):
@@ -48,8 +49,9 @@ class Trainer():
         return node_value
 
     def train(self, num_iterations: int):
-        utils = [0, 0]
-        last_utils = [0, 0]
+        utils = [0.0, 0.0]
+        last_utils = [0.0, 0.0]
+        utility_log: Dict[str, Any] = {}
         for i in trange(num_iterations, desc = "Training"):
             if i == int(num_iterations * 0.3):
                 for _,v in self.infoset_map.items():
@@ -65,9 +67,11 @@ class Trainer():
             existence_array = Game.precompute_set_existence(hands)
             hand_abstractions = [get_hand_abstraction(hand, self.hand_sizes) for hand in hands]
             utils[starting_player] += self.get_node_value(hands, hand_abstractions, [], 1.0, starting_player, traverser, prune_feast, existence_array, i)
-            for t in range(1, 11):
-                if i == int(t * num_iterations / 10):
-                    utils_to_display = [round((utils[0] - last_utils[0]) / num_iterations * 20, 4), round((utils[1] - last_utils[1]) / num_iterations * 20, 4)]
-                    tqdm.write(f"Utilities at {t * 10}%: {utils_to_display[0]}, {utils_to_display[1]}")
-                    last_utils = utils.copy()
-        return utils[0] * 2 / num_iterations, utils[1] * 2 / num_iterations
+            if (self.log_points > 0 and i % (num_iterations // self.log_points) == 0):
+                util0_chunk = (utils[0] - last_utils[0]) / num_iterations * self.log_points * 2
+                util1_chunk = (utils[1] - last_utils[1]) / num_iterations * self.log_points * 2
+                tqdm.write(f"Iter {i}: P0 Util: {util0_chunk:.4f}, P1 Util: {util1_chunk:.4f}")
+                utility_log[f"P0 Utility at Iter {i}"] = f"{util0_chunk:.4f}"
+                utility_log[f"P1 Utility at Iter {i}"] = f"{util1_chunk:.4f}"
+                last_utils = list(utils)
+        return utils[0] * 2 / num_iterations, utils[1] * 2 / num_iterations, utility_log
