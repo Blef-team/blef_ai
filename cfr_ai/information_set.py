@@ -8,8 +8,7 @@ def get_possible_actions(history: List[int]):
     if (len(history) == 0):
         return [a for a in range(88)]
     else: 
-        last_action = history[-1]
-        return [a for a in range(89) if a > last_action]
+        return [a for a in range(history[-1] + 1, 89)]
 
 
 def get_hand_abstraction(hand: np.ndarray, hand_sizes: List[int]) -> str:
