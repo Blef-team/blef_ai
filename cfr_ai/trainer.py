@@ -67,11 +67,11 @@ class Trainer():
             existence_array = Game.precompute_set_existence(hands)
             hand_abstractions = [get_hand_abstraction(hand, self.hand_sizes) for hand in hands]
             utils[starting_player] += self.get_node_value(hands, hand_abstractions, [], 1.0, starting_player, traverser, prune_feast, existence_array, i)
-            if (self.log_points > 0 and i % (num_iterations // self.log_points) == 0):
+            if (self.log_points > 0 and (i + 1) % (num_iterations // self.log_points) == 0):
                 util0_chunk = (utils[0] - last_utils[0]) / num_iterations * self.log_points * 2
                 util1_chunk = (utils[1] - last_utils[1]) / num_iterations * self.log_points * 2
-                tqdm.write(f"Iter {i}: P0 Util: {util0_chunk:.4f}, P1 Util: {util1_chunk:.4f}")
-                utility_log[f"P0 Utility at Iter {i}"] = f"{util0_chunk:.4f}"
-                utility_log[f"P1 Utility at Iter {i}"] = f"{util1_chunk:.4f}"
+                tqdm.write(f"Iter {i + 1}: P0 Util: {util0_chunk:.4f}, P1 Util: {util1_chunk:.4f}")
+                utility_log[f"P0 Utility at Iter {i + 1}"] = f"{util0_chunk:.4f}"
+                utility_log[f"P1 Utility at Iter {i + 1}"] = f"{util1_chunk:.4f}"
                 last_utils = list(utils)
         return utils[0] * 2 / num_iterations, utils[1] * 2 / num_iterations, utility_log
