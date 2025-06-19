@@ -12,12 +12,12 @@ def determine_action(game_state):
     if game_state.get("history"):
         history = [action["action_id"] for action in game_state.get("history")]
     matching_hands = [hand for hand in game_state.get("hands", []) if hand.get("nickname") == agent_nickname]
-    my_cards = [str(card["value"]) + str(card["colour"]) for card in matching_hands[0]["hand"]]
+    my_cards = [card["value"] * 4 + card["colour"] for card in matching_hands[0]["hand"]]
     hand_abstraction = get_hand_abstraction(my_cards, hand_sizes)
     key = make_key(my_cards, hand_abstraction, history)
     split_key = key.split('-')
     filename = 'cfr_ai/outputs/' + "_".join(str(x) for x in hand_sizes) + '/' + split_key[0] + '/' + split_key[1] + '.csv'
-    relevant_actions = get_possible_actions(history, hand_sizes)
+    relevant_actions = get_possible_actions(history)
     with open(filename, 'r', encoding='utf-8') as f:
         strategy_list = csv.reader(f)
         matching_strategies = [x[1] for x in strategy_list if x[0] == '-'.join(split_key[2:])]
