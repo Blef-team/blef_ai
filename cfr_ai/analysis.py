@@ -15,6 +15,21 @@ def format_value(value, precision=3, is_percent=False):
     except (ValueError, TypeError):
         return 'N/A'
 
+def get_strategy_folder_size(directory_path):
+    """
+    Calculates the total size of all non-diagnostic strategy sub-folders.
+    """
+    total_size = 0
+    for item_name in os.listdir(directory_path):
+        item_path = os.path.join(directory_path, item_name)
+        # Look for directories that are purely numeric (like '1')
+        if os.path.isdir(item_path) and item_name.isdigit():
+            for dirpath, _, filenames in os.walk(item_path):
+                for f in filenames:
+                    fp = os.path.join(dirpath, f)
+                    total_size += os.path.getsize(fp)
+    return round(total_size / (1024 * 1024)) # Convert to MB
+
 def parse_metadata(file_path):
     """Parses a metadata.csv file into a dictionary."""
     data = {}
@@ -102,15 +117,19 @@ def main():
             date_str = data.get('Time finished', '')
             day_month = datetime.strptime(date_str, "%Y-%m-%d, %H:%M:%S").strftime("%d.%m")
 
+            storage_mb = get_strategy_folder_size(subdir)
+
             run_summary = {
+                'Round': sum([int(n_cards) for n_cards in setup_name.split('_')]) - 1,
                 'Setup': setup_name.replace('_', ','),
                 'Day': day_month,
                 'Iterations': data.get('Iterations', 'N/A'),
-                'Duration': data.get('Training duration', 'N/A'),
                 'Pruning range': data.get('Pruning threshold') + ', ' + data.get('Minimum regret'),
+                'Penalty': data.get('Penalty', 'N/A'),
+                'Duration': data.get('Training duration', 'N/A'),
                 'Exp. Value': exp_value_str,
                 'Memory (MB)': round(float(data.get('RAM taken (MB)', 0))),
-                'Penalty': data.get('Penalty', 'N/A'),
+                'Storage (MB)': storage_mb,
                 'Exploitability': exploit_str
             }
             all_runs_data.append(run_summary)
@@ -124,7 +143,7 @@ def main():
         return
 
     df = pd.DataFrame(all_runs_data)
-    df = df.sort_values(by='Setup')
+    df = df.sort_values(by=['Round', 'Setup'])
     
     print("\n--- Training Summary ---")
     print(df.to_string(index=False))
