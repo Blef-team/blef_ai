@@ -185,8 +185,6 @@ To use it, run `python -m cfr_ai.analysis`.
 
 ## Deployment
 
-[TODO: Finish and describe deployment scripts]
-
-```
-aws lambda update-function-code --function-name blef-aiagent-cfr --zip-file fileb://cfr_ai/dispatcher/lambda_function.zip
-```
+The AI is meant to be deployed alongside the [game engine](https://github.com/Blef-team/blef_game_engine). The integration has two components:
+* the dispatcher lambda. The code in dispatcher/lambda_function.py needs to be copied over to the `blef-aiagent-cfr` lambda. This can be done through the UI or by zipping the function and executing `aws lambda update-function-code --function-name blef-aiagent-cfr --zip-file fileb://cfr_ai/dispatcher/lambda_function.zip`; and
+* a collection of agents, each serving a particular setup. To deploy them, you need to run the `deploy` script. For example, for the 1 vs 1 card setup, run `python -m cfr_ai.deploy --hand-sizes 1 1`
