@@ -41,6 +41,7 @@ def get_hand_abstraction(hand: np.ndarray, hand_sizes: List[int]) -> str:
                 sf_strengths[int(x[1])] += 0.1
             if x[0] == '5':
                 sf_strengths[int(x[1])] += 0.2
+        sf_strengths = np.around(sf_strengths, decimals=1)
         augmented_strengths = np.append(sf_strengths, strengths[4:10])
         # Pre-straight:
         ## If there's four of a kind or flush on hand, get the top strength
