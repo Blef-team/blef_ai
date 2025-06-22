@@ -57,6 +57,7 @@ def create_lambda_zip(setup_name: str, build_dir: str, zip_path: str):
 
 def deploy_to_lambda(function_name: str, zip_path: str):
     try:
+        print(f"Deploying to Lambda...")
         lambda_client = boto3.client('lambda')
         with open(zip_path, 'rb') as f:
             zipped_code = f.read()
