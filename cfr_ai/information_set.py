@@ -132,6 +132,7 @@ class InformationSet():
         self.times_touched = 0
         self.first_touched = iter
         self.last_touched = 0
+        self.temporary_value = 0.0
 
     def get_strategy(self, reach_probability: float) -> np.array:
         if any(self.regrets > 0):
