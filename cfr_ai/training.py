@@ -14,7 +14,8 @@ def main():
     CLI.add_argument("--penalty", type=float, default=0.0, help="Penalty for betting instead of checking. Default: 0.0")
     CLI.add_argument("--log-points", type=int, default=25, help="Number of intervals for logging utility values. Default: 25")
     CLI.add_argument("--get-exploitability", action=argparse.BooleanOptionalAction, help="Flag to run the (potentially slow) exploitability calculation after training.")
-    CLI.add_argument("--no-save", action=argparse.BooleanOptionalAction, help="Flag to disable recording any outputs or metadata.")
+    CLI.add_argument("--no-save", action="store_false", dest="save", help="Flag to disable recording any outputs.")
+    CLI.set_defaults(save=True)
     args = CLI.parse_args()
 
     cfr_trainer = Trainer(args.hand_sizes, args.pruning_range, args.penalty, args.log_points)
@@ -36,7 +37,7 @@ def main():
             exploitability_log['Exploitability when player 1 starts'] = exploitability_p1
             print(f"\nExploitability when player 1 starts: {exploitability_p1}")
 
-    if not args.no_save:
+    if args.save:
         files = {}
         writers = {}
         meaningful_policies = 0
