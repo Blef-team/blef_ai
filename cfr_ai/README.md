@@ -32,13 +32,17 @@ We also use regret-based pruning. Actions below a certain regret level (specifie
 
 There is also a minimum regret, set by the second `pruning-range` CLI argument.
 
+### Initial strategy
+
+The initial strategy in every set is to take the last action with 100% probability (so in all situations apart from the start of the round, it will be a check). This is because a check with 100% probability is the best strategy in most infosets in the game and makes the initial iterations fast. It would be possible to start each infoset with a more sophisticated strategy, for example by engaging the next-best AI to compute it. However, it is impractical, as we need to make as many iterations (or tighten the abstraction so much) that the algorithm figures out a reasonable strategy well within the first 30% of iterations anyway.
+
 ### Strategy sum discounting
 
 In CFR, the latest iteration's strategy may not be convergent towards the equilibrium, only the average strategy is. However, we can suspect that regret updates and strategies (and therefore entries to the strategy sum) get better in later iterations.
 
 We are not discounting regrets (apart from imposing a minimum).
 
-However, we are discounting the strategy sum contributions. Contributions from the first 30% of iterations are not taken into account (warm start). Later contributions are multiplied by linearly increasing discounts. For example: 
+However, we are discounting the strategy sum contributions. Contributions from the first 30% of iterations are not taken into account. Later contributions are multiplied by linearly increasing discounts. For example: 
 * Contributions from the 30-40% range of iterations weigh 40% as much as those from the 90-100% range
 * Contributions from the 40-50% range of tierations weigh 50% as much as those from the 90-100% range
 
@@ -64,11 +68,21 @@ We have considered but ultimately not implemented:
 
 ## Evaluation
 
-We have developed an algorithm to compute the exploitability of the AI in the unabstracted game.
+Evaluation is key to informed development of the algorithm. Usually in the case of CFR, it is done by computing exploitability. We have created optimised tools to compute the exploitability of this AI in the unabstracted game. However, we are unable to run them within 1 core-day beyond the 3rd round. Therefore, we use a suite of other tools to get a rough idea as to the performance of the algorithm. 
 
-However, we found it infeasible to compute the explotability beyond approximately the 4th round. This means we have a limited idea as to whether we are using the best possible variation of the algorithm and a good abstraction of the information sets.
+### Utility logging
 
-However, to get an approximate idea of whether we are running enough iterations, we are logging utility at equal intervals across the training run. If there is no substantial trend beyond the first 30% of iterations, then the exploitability coming from insufficient iterations is likely to be low (however, exploitability coming from the abstraction may still be high).
+To get an approximate idea of whether we are running enough iterations, we are logging utility at equal intervals across the training run. If there is no substantial trend beyond the first 30% of iterations, then the exploitability coming from insufficient iterations is likely to be low (however, exploitability coming from the abstraction may still be high).
+
+There is an `analysis.py` script that makes:
+* a summary table showing key data for each setup trained;
+* charts of utility over time for each setup.
+
+To use it, run `python -m cfr_ai.analysis`.
+
+### Head-to-head comparison
+
+There is a `head_to_head.py` script that can be used to compare two versions of strategies for a single setup by making them play against each other. It computes in around 1 hour for rounds 6-7. This is perhaps the best tool for evaluating modifications to the core algorithm.
 
 ## Resource limits and abstraction
 
@@ -174,14 +188,6 @@ For each setup, there's also a training metadata file (`metadata.csv`), which no
 * the game value of each player (e.g. if we're training the 2 cards vs 3 cards case, it's 1. the game value for the starting player when the 2-card player is starting and 2. the game value for the starting player when the 3-card player is starting);
 * the log of utilities along the training run; and
 * exploitability, if applicable.
-
-### Analysis.py
-
-There is a script that makes:
-* a summary table showing key data for each setup trained;
-* charts of utility over time for each setup.
-
-To use it, run `python -m cfr_ai.analysis`.
 
 ## Deployment
 
