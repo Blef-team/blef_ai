@@ -82,7 +82,7 @@ To use it, run `python -m cfr_ai.analysis`.
 
 ### Head-to-head comparison
 
-There is a `head_to_head.py` script that can be used to compare two versions of strategies for a single setup by making them play against each other. It computes in around 1 hour for rounds 6-7. This is perhaps the best tool for evaluating modifications to the core algorithm.
+There is a `head_to_head.py` script that can be used to compare two versions of strategies for a single setup by making them play against each other. Using the Monte Carlo sampling, it runs within minutes for any setup. It is the best tool for evaluating modifications to the core algorithm.
 
 ## Resource limits and abstraction
 

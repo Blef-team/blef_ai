@@ -61,10 +61,7 @@ def preload_all_strategies(model_folder, hand_sizes_sorted):
                 next(reader, None)  # skip header
                 for row in reader:
                     if not row: continue
-                    k_part = row[0]
-                    full_key = f"{hand_size_str}-{last_bet_str}-{k_part}"
-                    strategies[full_key] = row[1]
-                    
+                    strategies[f"{hand_size_str}-{last_bet_str}-{row[0]}"] = row[1]
     print(f"Loaded {len(strategies)} strategy entries from {model_folder}.")
     return strategies
 
@@ -81,12 +78,32 @@ def load_strategy_from_files(model_folder: str, key: str, hand_sizes: list, num_
             search_key = '-'.join(split_key[2:])
             for row in reader:
                 if row and row[0] == search_key:
-                    decoded_strat = decode_probabilities(row[1])
-                    if len(decoded_strat) == num_possible_actions:
-                         return decoded_strat
+                    return decode_probabilities(row[1])
     strategy = np.zeros(num_possible_actions)
     strategy[-1] = 1.0
     return strategy
+
+def get_strategy(current_model, key, hand_sizes, possible_actions):
+    """Helper to get a strategy from pre-loaded dict or from file."""
+    strategy = None
+    num_actions = len(possible_actions)
+    if current_model.get('strategies') is not None:  # Check if pre-loaded
+        encoded_strategy = current_model['strategies'].get(key)
+        if encoded_strategy:
+            strategy = decode_probabilities(encoded_strategy)
+    else:  # Fallback to file loading
+        strategy = load_strategy_from_files(current_model['folder'], key, hand_sizes, num_actions)
+
+    if strategy is None:
+        strategy = np.zeros(num_actions)
+        strategy[-1] = 1.0
+    if len(strategy) < num_actions:
+        padded = np.zeros(num_actions)
+        padded[:len(strategy)] = strategy
+        strategy = padded
+    if sum(strategy) == 0:
+        strategy[-1] = 1.0
+    return strategy / sum(strategy)
 
 def get_h2h_expected_value(models: tuple, hands: tuple, history: list, active_player_idx: int, hand_sizes: list, existence_array: np.ndarray) -> float:
     """
@@ -101,39 +118,45 @@ def get_h2h_expected_value(models: tuple, hands: tuple, history: list, active_pl
     my_hand = hands[active_player_idx]
     hand_abstractions = current_model['module'].get_hand_abstraction(my_hand, hand_sizes)
     key = current_model['module'].make_key(my_hand, hand_abstractions, history)
-
-    # --- Get Strategy: either from memory or from file ---
-    strategy = None
-    if current_model.get('strategies') is not None: # Check if pre-loaded
-        encoded_strategy = current_model['strategies'].get(key)
-        if encoded_strategy:
-            strategy = decode_probabilities(encoded_strategy)
-    else: # Fallback to file loading
-        strategy = load_strategy_from_files(current_model['folder'], key, hand_sizes, len(possible_actions))
-
-    # Ensure strategy is valid, default to 'check' if not found
-    if strategy is None:
-        strategy = np.zeros(len(possible_actions))
-        strategy[-1] = 1.0
     
-    # Pad strategy if its length is less than the number of possible actions
-    if len(strategy) < len(possible_actions):
-        padded_strategy = np.zeros(len(possible_actions))
-        padded_strategy[:len(strategy)] = strategy
-        strategy = padded_strategy
+    strategy = get_strategy(current_model, key, hand_sizes, possible_actions)
 
-    if sum(strategy) > 0 and not np.isclose(sum(strategy), 1.0):
-        strategy /= sum(strategy)
-    elif sum(strategy) == 0:
-        strategy[-1] = 1.0
-
-    node_expected_value = 0.0
+    node_ev = 0.0
     next_player_idx = (active_player_idx + 1) % 2
     for i, action in enumerate(possible_actions):
         if strategy[i] > 0:
             action_ev = -get_h2h_expected_value(models, hands, history + [action], next_player_idx, hand_sizes, existence_array)
-            node_expected_value += strategy[i] * action_ev
-    return node_expected_value
+            node_ev += strategy[i] * action_ev
+    return node_ev
+
+def run_mc_playout(models: tuple, hands: tuple, starting_player_idx: int, hand_sizes: list, existence_array: np.ndarray) -> int:
+    """
+    (New Fast Playout) Simulates a single game path based on sampling actions.
+    Returns +1 for a win for the starting player, -1 for a loss.
+    """
+    history = []
+    active_player_idx = 0
+
+    while not Game.check_finish(history):
+        current_model = models[active_player_idx]
+        my_hand = hands[active_player_idx]
+        
+        possible_actions = current_model['module'].get_possible_actions(history)
+        hand_abstractions = current_model['module'].get_hand_abstraction(my_hand, hand_sizes)
+        key = current_model['module'].make_key(my_hand, hand_abstractions, history)
+        
+        chosen_action = random.choices(possible_actions, weights=get_strategy(current_model, key, hand_sizes, possible_actions), k=1)[0]
+        
+        history.append(chosen_action)
+        active_player_idx = (active_player_idx + 1) % 2
+
+    # Right now, checked player = active player
+    payoff_for_checked_player = 1 if existence_array[history[-2]] else -1
+
+    if active_player_idx == 0:
+        return payoff_for_checked_player
+    else:
+        return -payoff_for_checked_player
 
 def main():
     parser = argparse.ArgumentParser(description="Run a head-to-head comparison between two Blef CFR AIs.")
@@ -141,7 +164,8 @@ def main():
     parser.add_argument("--model1-folder", type=str, required=True, help="Path to the folder for the first AI model (Model A).")
     parser.add_argument("--model2-folder", type=str, required=True, help="Path to the folder for the second AI model (Model B).")
     parser.add_argument("--num-deals", type=int, default=1000, help="Number of random card deals to simulate.")
-    parser.add_argument("--preload-strategies", action="store_true", help="Pre-load all strategies into memory. Faster but uses more RAM.")
+    parser.add_argument("--preload-strategies", action="store_true", help="Pre-load strategies for faster, memory-intensive evaluation.")
+    parser.add_argument("--monte-carlo", action="store_true", help="Use fast Monte Carlo playouts instead of full tree traversal.")
     args = parser.parse_args()
 
     print("Loading AI models and their abstraction logic...")
@@ -149,10 +173,9 @@ def main():
     for i, folder in enumerate([args.model1_folder, args.model2_folder]):
         try:
             module = load_abstractions_and_strategy_logic(folder)
-            model_name_char = 'A' if i == 0 else 'B'
-            models_list.append({'folder': folder, 'module': module, 'name': f"Model {model_name_char} ({os.path.basename(folder)})", 'strategies': None})
+            models_list.append({'folder': folder, 'module': module, 'name': f"Model {'A' if i == 0 else 'B'}", 'strategies': None})
         except FileNotFoundError as e:
-            print(f"Error loading files for model in '{folder}': {e}", file=sys.stderr)
+            print(f"Error: {e}", file=sys.stderr)
             sys.exit(1)
     model_A, model_B = models_list[0], models_list[1]
     hand_sizes = sorted(args.hand_sizes)
@@ -161,57 +184,48 @@ def main():
         model_A['strategies'] = preload_all_strategies(model_A['folder'], hand_sizes)
         model_B['strategies'] = preload_all_strategies(model_B['folder'], hand_sizes)
 
-    total_deals = math.comb(24, hand_sizes[0]) * math.comb(24 - hand_sizes[0], hand_sizes[1])
-    num_to_sample = min(args.num_deals, total_deals)
-    if num_to_sample == 0: sys.exit("Error: No deals to simulate.")
-    
-    print(f"\nMemory-efficiently sampling {num_to_sample} deals from {total_deals} possible combinations...")
-    deals_iterator = Game.hand_combinations(hand_sizes)
-    reservoir = list(itertools.islice(deals_iterator, num_to_sample))
-    pbar = tqdm(deals_iterator, total=total_deals, initial=len(reservoir), desc="Sampling deals")
-    for i, deal in enumerate(pbar, start=len(reservoir) + 1):
-        j = random.randint(0, i - 1)
-        if j < num_to_sample: reservoir[j] = deal
-    sampled_deals = reservoir
+    if args.monte_carlo:
+        print(f"\nGenerating {args.num_deals} random deals (with replacement)...")
+        sampled_deals = [Game.deal_cards(hand_sizes) for _ in range(args.num_deals)]
+    else:
+        total_deals = math.comb(24, hand_sizes[0]) * math.comb(24 - hand_sizes[0], hand_sizes[1])
+        num_to_sample = min(args.num_deals, total_deals)
+        print(f"\nMemory-efficiently sampling {num_to_sample} deals from {total_deals} combinations...")
+        deals_iterator = Game.hand_combinations(hand_sizes)
+        reservoir = list(itertools.islice(deals_iterator, num_to_sample))
+        pbar = tqdm(deals_iterator, total=total_deals, initial=len(reservoir), desc="Sampling deals")
+        for i, deal in enumerate(pbar, start=len(reservoir) + 1):
+            j = random.randint(0, i - 1)
+            if j < num_to_sample: reservoir[j] = deal
+        sampled_deals = reservoir
 
     print(f"\nStarting head-to-head evaluation for {len(sampled_deals)} deals...")
-    total_payoff_A_starts_P0, total_payoff_B_starts_P0 = 0.0, 0.0
-    total_payoff_A_starts_P1, total_payoff_B_starts_P1 = 0.0, 0.0
+    payoffs = {'A_starts_P0': 0.0, 'B_starts_P0': 0.0, 'A_starts_P1': 0.0, 'B_starts_P1': 0.0}
 
     for hands in tqdm(sampled_deals, desc="Simulating Deals"):
         p0_hand, p1_hand = hands[0], hands[1]
         existence_array = Game.precompute_set_existence(hands)
+        eval_func = run_mc_playout if args.monte_carlo else get_h2h_expected_value
 
         # Case 1: Player with hand_sizes[0] starts
-        total_payoff_A_starts_P0 += get_h2h_expected_value((model_A, model_B), (p0_hand, p1_hand), [], 0, hand_sizes, existence_array)
-        total_payoff_B_starts_P0 += get_h2h_expected_value((model_B, model_A), (p0_hand, p1_hand), [], 0, hand_sizes, existence_array)
+        payoffs['A_starts_P0'] += eval_func((model_A, model_B), (p0_hand, p1_hand), 0, hand_sizes, existence_array)
+        payoffs['B_starts_P0'] += eval_func((model_B, model_A), (p0_hand, p1_hand), 0, hand_sizes, existence_array)
 
         # Case 2: Player with hand_sizes[1] starts
         if hand_sizes[0] != hand_sizes[1]:
-            total_payoff_A_starts_P1 += get_h2h_expected_value((model_A, model_B), (p1_hand, p0_hand), [], 0, [hand_sizes[1], hand_sizes[0]], existence_array)
-            total_payoff_B_starts_P1 += get_h2h_expected_value((model_B, model_A), (p1_hand, p0_hand), [], 0, [hand_sizes[1], hand_sizes[0]], existence_array)
+            payoffs['A_starts_P1'] += eval_func((model_A, model_B), (p1_hand, p0_hand), 0, [hand_sizes[1], hand_sizes[0]], existence_array)
+            payoffs['B_starts_P1'] += eval_func((model_B, model_A), (p1_hand, p0_hand), 0, [hand_sizes[1], hand_sizes[0]], existence_array)
 
-    avg_A_starts_P0 = total_payoff_A_starts_P0 / num_to_sample
-    avg_B_starts_P0 = total_payoff_B_starts_P0 / num_to_sample
-    diff_when_P0_starts = avg_B_starts_P0 - avg_A_starts_P0
+    num_to_sample = len(sampled_deals)
+    normalised_advantage_P0 = (payoffs['B_starts_P0'] - payoffs['A_starts_P0']) / num_to_sample / 2.0
 
     print("\n" + "="*80)
     print("--- Head-to-Head Performance Difference (Model B vs. Model A) ---")
-    print(f"Comparison between '{model_A['name']}' and '{model_B['name']}'")
-    print(f"Setup: {hand_sizes[0]} vs {hand_sizes[1]} cards, based on {len(sampled_deals)} deals.")
-    print("\nValue represents the extra payoff Model B gets over Model A when starting.")
-    print(f"\nAdvantage when player with {hand_sizes[0]} cards starts: {diff_when_P0_starts:+.6f}")
-    
+    print(f"\nNormalised (-1 to 1) advantage when player with {hand_sizes[0]} cards starts: {normalised_advantage_P0:+.5f}")
+
     if hand_sizes[0] != hand_sizes[1]:
-        avg_A_starts_P1 = total_payoff_A_starts_P1 / num_to_sample
-        avg_B_starts_P1 = total_payoff_B_starts_P1 / num_to_sample
-        diff_when_P1_starts = avg_B_starts_P1 - avg_A_starts_P1
-        print(f"Advantage when player with {hand_sizes[1]} cards starts: {diff_when_P1_starts:+.6f}")
-    
-    print("\n--- Detailed Average Payoffs (for the starting player) ---")
-    print(f"As Starting Player with {hand_sizes[0]} cards: Model A gets {avg_A_starts_P0:.4f}, Model B gets {avg_B_starts_P0:.4f}")
-    if hand_sizes[0] != hand_sizes[1]:
-        print(f"As Starting Player with {hand_sizes[1]} cards: Model A gets {avg_A_starts_P1:.4f}, Model B gets {avg_B_starts_P1:.4f}")
+        normalised_advantage_P1 = (payoffs['B_starts_P1'] - payoffs['A_starts_P1']) / num_to_sample / 2.0
+        print(f"Normalized advantage when player with {hand_sizes[1]} cards starts: {normalised_advantage_P1:+.5f}")
     print("="*80)
 
 
