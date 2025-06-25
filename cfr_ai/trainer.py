@@ -43,7 +43,7 @@ class Trainer():
                     info_set.regrets[to_update] += counterfactual_values[to_update] - node_value
 
             else:
-                strategy = info_set.get_strategy(1.0)
+                strategy = info_set.get_strategy(0.0)
                 action = random.choices(possible_actions, weights=strategy, k=1)[0]
                 node_value = -self.get_node_value(hands, hand_abstractions, history + [action], reach_probability, opponent, traverser, prune_feast, existence_array, iter) + self.penalty
             info_set.times_touched += 1
