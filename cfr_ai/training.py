@@ -6,6 +6,8 @@ import csv, os, psutil
 from datetime import datetime
 import time
 
+VERSION_CODE = 'TV-NR-SS-SD'
+
 def main():
     CLI = argparse.ArgumentParser(description="Train a CFR AI for Blef.")
     CLI.add_argument("--hand-sizes", nargs=2, type=int, required=True, help="The number of cards per player, sorted ascending.")
@@ -76,6 +78,7 @@ def main():
             csv_row = writer.writerow({"k": "RAM taken (MB)", "v": psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024})
             csv_row = writer.writerow({"k": "Player 1 game value", "v": util0})
             csv_row = writer.writerow({"k": "Player 2 game value", "v": util1})
+            csv_row = writer.writerow({"k": "Version code", "v": VERSION_CODE})
             writer.writerow({"k": "--- Utility Log ---", "v": ""})
             for log_key, log_value in utility_log.items():
                 writer.writerow({"k": log_key, "v": log_value})

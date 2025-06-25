@@ -130,7 +130,8 @@ def main():
                 'Exp. Value': exp_value_str,
                 'Memory (MB)': round(float(data.get('RAM taken (MB)', 0))),
                 'Storage (MB)': storage_mb,
-                'Exploitability': exploit_str
+                'Exploitability': exploit_str,
+                'Version': data.get('Version code', 'N/A')
             }
             all_runs_data.append(run_summary)
 
