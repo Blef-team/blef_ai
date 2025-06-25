@@ -59,7 +59,7 @@ class Trainer():
         for i in trange(num_iterations, desc = "Training"):
             if i == int(num_iterations * 0.3):
                 for _,v in self.infoset_map.items():
-                    v.strategy_sum *= 0
+                    v.strategy_sum *= 0.02
             for t in range(4, 10):
                 if i == int(t * num_iterations / 10):
                     for _,v in self.infoset_map.items():
