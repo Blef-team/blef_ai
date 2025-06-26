@@ -42,7 +42,15 @@ def create_lambda_zip(setup_name: str, build_dir: str, zip_path: str):
     # Copy cfr_ai subfolder files
     for dest_name, src_path in cfr_ai_files.items():
         shutil.copy(src_path, os.path.join(build_dir, 'cfr_ai', dest_name))
-        
+
+    # Copy the metadata file
+    metadata_path = os.path.join(outputs_dir, 'metadata.csv')
+    if os.path.exists(metadata_path):
+        print(f"  -> Including metadata.csv")
+        shutil.copy(metadata_path, os.path.join(build_dir, 'metadata.csv'))
+    else:
+        print(f"Warning: metadata.csv not found at '{metadata_path}'. Agent will use default parameters.")
+
     # Copy the specific setup's output directory
     for item_name in os.listdir(outputs_dir):
         source_item_path = os.path.join(outputs_dir, item_name)

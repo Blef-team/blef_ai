@@ -129,13 +129,21 @@ Only the last 3 moves are remembered. Additionally, there is a complex hand-craf
 
 In rounds 1-5, the AI only looks at card values and not suits. In further rounds, there is a complex hand-crafted abstraction for hands, which depends on the last bet. It's encoded in `get_hand_abstraction` in `information_set.py`. 
 
+### Action abstraction
+
+We have a mechanism for the AI to not acknowledge or make a specific number of the lowest bets (e.g. all high cards). If it encounters one of those bets during online play, it acts as if the round just started.
+
+With 14 cards, any specific high card has 98% chance of existing (97% and 99% with 13 and 15 cards respectively).
+
+With 16 cards on the table, the great straight has 96% chance of existing (88%, 93%, 98% and 99% for 14, 15, 17 and 18 cards respectively). In an experiment we found that having the 11 11 setup discard all bets below straights results in an approximately twofold improvement in time, memory and strategy storage space used.
+
 ### Strategy encoding
 
 There is an encoding that highly compresses strategies so that they can be deployed on platforms with limited storage, such as within AWS Lambda functions.
 
 ## Usage
 
-To train a model for a specific setup (ordered number of cards per player), execute `training.py`, specifying the number of hands. For example, the train the 1 card vs 1 card setup, run this from the project root:
+The training is done by setup, which is the ordered number of cards per player, no matter which player the AI is and who is starting. To train a model for a specific setup, execute `training.py`, specifying the number of hands. For example, the train the 1 card vs 1 card setup, run this from the project root:
 
 ```
 python -m cfr_ai.training --hand-sizes 1 1
@@ -146,6 +154,8 @@ python -m cfr_ai.training --hand-sizes 1 1
 `--num-iterations` (default: 5 million) specifies the number of Monte Carlo iterations to run. Within one iteration, each player gets one set of cards and there is only one traverser.
 
 `--no-save` (default: no) doesn't save any outputs. Designed for trial runs where you measure performance.
+
+`--min-bet` (default: 0) specifies the minimum bet the AI will make or acknowledge.
 
 `--pruning-range` (default: -20 and -22) is a tuple that specifies the threshold for pruning and the minimum regret.
 

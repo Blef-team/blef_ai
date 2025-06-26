@@ -4,12 +4,11 @@ import numpy as np
 history_codes = np.genfromtxt('cfr_ai/history.csv', delimiter=',', dtype='|U5', skip_header=0)
 
 
-def get_possible_actions(history: List[int]):
+def get_possible_actions(history: List[int], min_bet: int):
     if (len(history) == 0):
-        return [a for a in range(88)]
+        return [a for a in range(min_bet, 88)]
     else: 
         return [a for a in range(history[-1] + 1, 89)]
-
 
 def get_hand_abstraction(hand: np.ndarray, hand_sizes: List[int]) -> str:
     hand = [str(card // 4) + str(card % 4) for card in hand]
@@ -103,15 +102,15 @@ def get_hand_abstraction(hand: np.ndarray, hand_sizes: List[int]) -> str:
     return out
 
 
-def make_key(hand: np.ndarray, hand_abstractions: str, history: List[int]) -> str:
+def make_key(hand: np.ndarray, hand_abstractions: str, history: List[int], min_bet: int) -> str:
     key = str(len(hand))
     
     # History abstraction
     last_bet = 88 if len(history) == 0 else history[-1]
     key += '-' + str(last_bet) + '-'
-    if len(history) > 1:
+    if len(history) > 1 and history[-2] >= min_bet:
         key += history_codes[last_bet, history[-2]] + '-'
-        if len(history) > 2:
+        if len(history) > 2 and history[-3] >= min_bet:
             key += history_codes[last_bet, history[-3]] + '-'
     
     # Hand abstraction
@@ -126,8 +125,8 @@ def make_full_key(my_cards: List[str], history: List[int]) -> str:
 
 
 class InformationSet():
-    def __init__(self, history: List[int], iter: int):
-        self.possible_actions = get_possible_actions(history)
+    def __init__(self, history: List[int], iter: int, min_bet: int):
+        self.possible_actions = get_possible_actions(history, min_bet)
         self.regrets = np.zeros(len(self.possible_actions))
         self.strategy_sum = np.zeros(len(self.possible_actions), dtype=np.float32)
         self.times_touched = 0

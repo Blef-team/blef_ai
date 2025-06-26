@@ -124,6 +124,7 @@ def main():
                 'Setup': setup_name.replace('_', ','),
                 'Day': day_month,
                 'Iterations': data.get('Iterations', 'N/A'),
+                'Min. bet': data.get('Minimum bet', '0'),
                 'Pruning range': data.get('Pruning threshold') + ', ' + data.get('Minimum regret'),
                 'Penalty': data.get('Penalty', 'N/A'),
                 'Duration': data.get('Training duration', 'N/A'),

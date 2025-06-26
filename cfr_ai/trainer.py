@@ -5,7 +5,7 @@ import numpy as np
 from tqdm import trange, tqdm
 
 class Trainer():
-    def __init__(self, hand_sizes: List[int], pruning_range: List[int], penalty: float, log_points: int):
+    def __init__(self, hand_sizes: List[int], min_bet: int, pruning_range: List[int], penalty: float, log_points: int):
         self.infoset_map: Dict[str, InformationSet] = {}
         self.hand_sizes = hand_sizes
         self.nodes_touched = 0
@@ -13,14 +13,15 @@ class Trainer():
         self.min_regret = pruning_range[1]
         self.penalty = penalty
         self.log_points = log_points
+        self.min_bet = min_bet
 
     def get_node_value(self, hands: List[np.ndarray], hand_abstractions: List[str], history: List[int], reach_probability: float, active_player: int, traverser: int, prune_feast: bool, existence_array, iter: int):
         if Game.check_finish(history):
             return 1 if existence_array[history[-2]] else -1
         
-        key = make_key(hands[active_player], hand_abstractions[active_player], history)
+        key = make_key(hands[active_player], hand_abstractions[active_player], history, self.min_bet)
         if key not in self.infoset_map:
-            self.infoset_map[key] = InformationSet(history, iter)
+            self.infoset_map[key] = InformationSet(history, iter, self.min_bet)
         info_set = self.infoset_map[key]
 
         if info_set.last_touched == iter:

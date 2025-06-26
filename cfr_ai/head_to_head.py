@@ -8,15 +8,43 @@ import random
 import importlib.util
 from tqdm import tqdm
 import math
+import inspect # New import to check function arguments
 
 from cfr_ai.game import Game
 from cfr_ai.encoding import decode_probabilities
 
-def load_abstractions_and_strategy_logic(model_folder_path: str):
+def parse_metadata(model_folder_path: str, hand_sizes_sorted: list):
     """
-    Dynamically loads the information_set.py module and history.csv
-    from a specific model's folder to get its unique abstraction logic.
+    Parses the metadata.csv file for a specific setup.
+    Returns a dictionary of found parameters.
     """
+    metadata = {'min_bet': 0} # Default value
+    
+    setup_name = "_".join(str(x) for x in hand_sizes_sorted)
+    metadata_path = os.path.join(model_folder_path, 'outputs', setup_name, 'metadata.csv')
+
+    if os.path.exists(metadata_path):
+        with open(metadata_path, 'r', encoding='utf-8') as f:
+            reader = csv.reader(f)
+            for row in reader:
+                if not row: continue
+                key, value = row[0].strip(), row[1].strip()
+                if key == 'Minimum bet':
+                    try:
+                        metadata['min_bet'] = int(value)
+                    except (ValueError, TypeError):
+                        pass
+    else:
+        print(f"Warning: Metadata file not found at '{metadata_path}'. Using default min_bet=0.", file=sys.stderr)
+    return metadata
+
+def load_model_components(model_folder_path: str, hand_sizes_sorted: list):
+    """
+    Loads a model's information_set module and its metadata for a specific setup.
+    """
+    metadata = parse_metadata(model_folder_path, hand_sizes_sorted)
+
+    # Dynamically load the information_set.py module
     base_paths_to_check = [model_folder_path, os.path.join(model_folder_path, 'cfr_ai')]
     history_csv_path, info_set_module_path = None, None
     for base_path in base_paths_to_check:
@@ -31,7 +59,29 @@ def load_abstractions_and_strategy_logic(model_folder_path: str):
     info_set_module = importlib.util.module_from_spec(spec)
     info_set_module.history_codes = np.genfromtxt(history_csv_path, delimiter=',', dtype='|U5')
     spec.loader.exec_module(info_set_module)
-    return info_set_module
+    return info_set_module, metadata
+
+def make_key_wrapper(module, my_hand, hand_abstractions, history, min_bet):
+    """
+    Calls make_key, passing min_bet only if the function supports it.
+    """
+    func = module.make_key
+    sig = inspect.signature(func)
+    if 'min_bet' in sig.parameters:
+        return func(my_hand, hand_abstractions, history, min_bet=min_bet)
+    else:
+        return func(my_hand, hand_abstractions, history)
+
+def get_possible_actions_wrapper(module, history, min_bet):
+    """
+    Calls get_possible_actions, passing min_bet only if the function supports it.
+    """
+    func = module.get_possible_actions
+    sig = inspect.signature(func)
+    if 'min_bet' in sig.parameters:
+        return func(history, min_bet=min_bet)
+    else:
+        return func(history)
 
 def preload_all_strategies(model_folder, hand_sizes_sorted):
     """
@@ -114,10 +164,23 @@ def get_h2h_expected_value(models: tuple, hands: tuple, history: list, active_pl
         return -payoff_for_checker
 
     current_model = models[active_player_idx]
-    possible_actions = current_model['module'].get_possible_actions(history)
+    
+    possible_actions = get_possible_actions_wrapper(
+        module=current_model['module'],
+        history=history,
+        min_bet=current_model['metadata']['min_bet']
+    )
+
     my_hand = hands[active_player_idx]
     hand_abstractions = current_model['module'].get_hand_abstraction(my_hand, hand_sizes)
-    key = current_model['module'].make_key(my_hand, hand_abstractions, history)
+
+    key = make_key_wrapper(
+        module=current_model['module'],
+        my_hand=my_hand,
+        hand_abstractions=hand_abstractions,
+        history=history,
+        min_bet=current_model['metadata']['min_bet']
+    )
     
     strategy = get_strategy(current_model, key, hand_sizes, possible_actions)
 
@@ -131,8 +194,7 @@ def get_h2h_expected_value(models: tuple, hands: tuple, history: list, active_pl
 
 def run_mc_playout(models: tuple, hands: tuple, starting_player_idx: int, hand_sizes: list, existence_array: np.ndarray) -> int:
     """
-    (New Fast Playout) Simulates a single game path based on sampling actions.
-    Returns +1 for a win for the starting player, -1 for a loss.
+    Simulates a single game path based on sampling actions.
     """
     history = []
     active_player_idx = 0
@@ -141,11 +203,25 @@ def run_mc_playout(models: tuple, hands: tuple, starting_player_idx: int, hand_s
         current_model = models[active_player_idx]
         my_hand = hands[active_player_idx]
         
-        possible_actions = current_model['module'].get_possible_actions(history)
-        hand_abstractions = current_model['module'].get_hand_abstraction(my_hand, hand_sizes)
-        key = current_model['module'].make_key(my_hand, hand_abstractions, history)
+        possible_actions = get_possible_actions_wrapper(
+            module=current_model['module'],
+            history=history,
+            min_bet=current_model['metadata']['min_bet']
+        )
         
-        chosen_action = random.choices(possible_actions, weights=get_strategy(current_model, key, hand_sizes, possible_actions), k=1)[0]
+        hand_abstractions = current_model['module'].get_hand_abstraction(my_hand, hand_sizes)
+
+        key = make_key_wrapper(
+            module=current_model['module'],
+            my_hand=my_hand,
+            hand_abstractions=hand_abstractions,
+            history=history,
+            min_bet=current_model['metadata']['min_bet']
+        )
+
+        strategy = get_strategy(current_model, key, hand_sizes, possible_actions)
+        
+        chosen_action = random.choices(possible_actions, weights=strategy, k=1)[0]
         
         history.append(chosen_action)
         active_player_idx = (active_player_idx + 1) % 2
@@ -168,17 +244,26 @@ def main():
     parser.add_argument("--monte-carlo", action="store_true", help="Use fast Monte Carlo playouts instead of full tree traversal.")
     args = parser.parse_args()
 
-    print("Loading AI models and their abstraction logic...")
+    hand_sizes = sorted(args.hand_sizes)
+
+    print("Loading AI models, logic, and metadata...")
     models_list = []
     for i, folder in enumerate([args.model1_folder, args.model2_folder]):
         try:
-            module = load_abstractions_and_strategy_logic(folder)
-            models_list.append({'folder': folder, 'module': module, 'name': f"Model {'A' if i == 0 else 'B'}", 'strategies': None})
+            module, metadata = load_model_components(folder, hand_sizes)
+            model_name = f"Model {'A' if i == 0 else 'B'}"
+            print(f"  - {model_name} from '{os.path.basename(folder)}' | Min Bet: {metadata.get('min_bet', 0)}")
+            models_list.append({
+                'folder': folder,
+                'module': module,
+                'metadata': metadata,
+                'name': model_name,
+                'strategies': None
+            })
         except FileNotFoundError as e:
             print(f"Error: {e}", file=sys.stderr)
             sys.exit(1)
     model_A, model_B = models_list[0], models_list[1]
-    hand_sizes = sorted(args.hand_sizes)
 
     if args.preload_strategies:
         model_A['strategies'] = preload_all_strategies(model_A['folder'], hand_sizes)

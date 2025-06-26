@@ -6,12 +6,13 @@ import csv, os, psutil
 from datetime import datetime
 import time
 
-VERSION_CODE = 'TV-NR-SS-SD'
+VERSION_CODE = 'TV-NR-SS-SD-MB'
 
 def main():
     CLI = argparse.ArgumentParser(description="Train a CFR AI for Blef.")
     CLI.add_argument("--hand-sizes", nargs=2, type=int, required=True, help="The number of cards per player, sorted ascending.")
     CLI.add_argument("--num-iterations", type=int, default=5000000, help="Total number of training iterations. Default: 5,000,000")
+    CLI.add_argument("--min-bet", type=int, default=0, help="The lowest bet acknowledged or made by the AI")
     CLI.add_argument("--pruning-range", nargs=2, type=int, default=[-20, -22], help="Regret pruning threshold and minimum regret value. Default: -20 -22")
     CLI.add_argument("--penalty", type=float, default=0.0, help="Penalty for betting instead of checking. Default: 0.0")
     CLI.add_argument("--log-points", type=int, default=25, help="Number of intervals for logging utility values. Default: 25")
@@ -20,7 +21,7 @@ def main():
     CLI.set_defaults(save=True)
     args = CLI.parse_args()
 
-    cfr_trainer = Trainer(args.hand_sizes, args.pruning_range, args.penalty, args.log_points)
+    cfr_trainer = Trainer(args.hand_sizes, args.min_bet, args.pruning_range, args.penalty, args.log_points)
 
     start_time = time.time()
     util0, util1, utility_log = cfr_trainer.train(args.num_iterations)
@@ -31,11 +32,11 @@ def main():
     if args.get_exploitability:
         cfr_strategy = {k: v.get_final_strategy() for k,v in cfr_trainer.infoset_map.items()}
         print(f"\nComputing exploitability")
-        exploitability_p0 = get_exploitability(cfr_strategy, args.hand_sizes, 0)
+        exploitability_p0 = get_exploitability(cfr_strategy, args.hand_sizes, 0, args.min_bet)
         exploitability_log['Exploitability when player 0 starts'] = exploitability_p0
         print(f"\nExploitability when player 0 starts: {exploitability_p0}")
         if args.hand_sizes[0] != args.hand_sizes[1]:
-            exploitability_p1 = get_exploitability(cfr_strategy, args.hand_sizes, 1)
+            exploitability_p1 = get_exploitability(cfr_strategy, args.hand_sizes, 1, args.min_bet)
             exploitability_log['Exploitability when player 1 starts'] = exploitability_p1
             print(f"\nExploitability when player 1 starts: {exploitability_p1}")
 
@@ -69,6 +70,7 @@ def main():
             csv_row = writer.writerow({"k": "Time finished", "v": datetime.now().strftime("%Y-%m-%d, %H:%M:%S")})
             csv_row = writer.writerow({"k": "Training duration", "v": training_duration})
             csv_row = writer.writerow({"k": "Iterations", "v": args.num_iterations})
+            csv_row = writer.writerow({"k": "Minimum bet", "v": args.min_bet})
             csv_row = writer.writerow({"k": "Pruning threshold", "v": args.pruning_range[0]})
             csv_row = writer.writerow({"k": "Minimum regret", "v": args.pruning_range[1]})
             csv_row = writer.writerow({"k": "Penalty", "v": args.penalty})
