@@ -32,11 +32,12 @@ def main():
     if args.get_exploitability:
         cfr_strategy = {k: v.get_final_strategy() for k,v in cfr_trainer.infoset_map.items()}
         print(f"\nComputing exploitability")
-        exploitability_p0 = get_exploitability(cfr_strategy, args.hand_sizes, 0, args.min_bet)
+        calculator = ExploitabilityCalculator(cfr_strategy, args.hand_sizes, args.min_bet)
+        exploitability_p0 = calculator.calculate_for_starting_player(starting_player=0)
         exploitability_log['Exploitability when player 0 starts'] = exploitability_p0
         print(f"\nExploitability when player 0 starts: {exploitability_p0}")
         if args.hand_sizes[0] != args.hand_sizes[1]:
-            exploitability_p1 = get_exploitability(cfr_strategy, args.hand_sizes, 1, args.min_bet)
+            exploitability_p1 = calculator.calculate_for_starting_player(starting_player=1)
             exploitability_log['Exploitability when player 1 starts'] = exploitability_p1
             print(f"\nExploitability when player 1 starts: {exploitability_p1}")
 
