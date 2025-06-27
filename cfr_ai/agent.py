@@ -33,7 +33,7 @@ def determine_action(game_state):
         strategy = decode_probabilities(matching_strategies[0])
         return random.choices(relevant_actions, weights=strategy, k=1)[0]
     elif len(history) == 0:
-        print("No policy found though the round has just begun. Betting high card 9")
-        return 0
+        print("No policy found though the round has just begun. Betting great straight flush spades (hopefully that was intended)")
+        return 87
     else:
         return 88
