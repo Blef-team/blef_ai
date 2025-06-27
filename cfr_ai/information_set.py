@@ -5,7 +5,7 @@ history_codes = np.genfromtxt('cfr_ai/history.csv', delimiter=',', dtype='|U5', 
 
 
 def get_possible_actions(history: List[int], min_bet: int):
-    if (len(history) == 0):
+    if (len(history) == 0 or history[-1] < min_bet):
         return [a for a in range(min_bet, 88)]
     else: 
         return [a for a in range(history[-1] + 1, 89)]
@@ -106,7 +106,7 @@ def make_key(hand: np.ndarray, hand_abstractions: str, history: List[int], min_b
     key = str(len(hand))
     
     # History abstraction
-    last_bet = 88 if len(history) == 0 else history[-1]
+    last_bet = 88 if len(history) == 0 or history[-1] < min_bet else history[-1]
     key += '-' + str(last_bet) + '-'
     if len(history) > 1 and history[-2] >= min_bet:
         key += history_codes[last_bet, history[-2]] + '-'
