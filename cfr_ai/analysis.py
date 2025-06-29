@@ -4,8 +4,9 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import re
 from datetime import datetime
+from typing import Dict, Any
 
-def format_value(value, precision=3, is_percent=False):
+def format_value(value: Any, precision: int = 3, is_percent: bool = False) -> str:
     """Safely formats a value to a string with a given precision."""
     try:
         num = float(value)
@@ -15,7 +16,7 @@ def format_value(value, precision=3, is_percent=False):
     except (ValueError, TypeError):
         return 'N/A'
 
-def get_strategy_folder_size(directory_path):
+def get_strategy_folder_size(directory_path: str) -> int:
     """
     Calculates the total size of all non-diagnostic strategy sub-folders.
     """
@@ -30,7 +31,7 @@ def get_strategy_folder_size(directory_path):
                     total_size += os.path.getsize(fp)
     return round(total_size / (1024 * 1024)) # Convert to MB
 
-def parse_metadata(file_path):
+def parse_metadata(file_path: str) -> Dict[str, Any]:
     """Parses a metadata.csv file into a dictionary."""
     data = {}
     utility_log = {'iter': [], 'p0': [], 'p1': []}
@@ -64,7 +65,7 @@ def parse_metadata(file_path):
     data['utility_log'] = utility_log
     return data
 
-def generate_utility_chart(setup_name, data, output_dir):
+def generate_utility_chart(setup_name: str, data: Dict[str, Any], output_dir: str) -> None:
     """Creates and saves a utility chart for a single run."""
     log = data.get('utility_log')
     if not log or not log['iter']:
@@ -88,7 +89,7 @@ def generate_utility_chart(setup_name, data, output_dir):
     print(f"Saved utility chart to {chart_path}")
 
 
-def main():
+def main() -> None:
     """
     Main function to scan directories, parse data, create the summary table,
     and generate charts.

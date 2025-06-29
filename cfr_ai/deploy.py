@@ -6,7 +6,7 @@ import argparse
 import boto3
 from botocore.exceptions import ClientError
 
-def create_lambda_zip(setup_name: str, build_dir: str, zip_path: str):
+def create_lambda_zip(setup_name: str, build_dir: str, zip_path: str) -> None:
     """
     Assembles the required files in a temporary directory and creates a zip archive.
     """
@@ -63,7 +63,7 @@ def create_lambda_zip(setup_name: str, build_dir: str, zip_path: str):
     # Create the zip file
     shutil.make_archive(zip_path.replace('.zip', ''), 'zip', build_dir)
 
-def deploy_to_lambda(function_name: str, zip_path: str):
+def deploy_to_lambda(function_name: str, zip_path: str) -> None:
     try:
         print(f"Deploying to Lambda...")
         lambda_client = boto3.client('lambda')
@@ -85,7 +85,7 @@ def deploy_to_lambda(function_name: str, zip_path: str):
         sys.exit(1)
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description="Build and deploy a specific Blef CFR AI worker to AWS Lambda.")
     parser.add_argument("--hand-sizes", nargs=2, type=int, required=True, help="The number of cards per player (e.g. --hand-sizes 1 1)")
     args = parser.parse_args()

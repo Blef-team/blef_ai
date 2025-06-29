@@ -8,7 +8,7 @@ import time
 
 VERSION_CODE = 'TV-NR-SS-SD-MB'
 
-def main():
+def main() -> None:
     CLI = argparse.ArgumentParser(description="Train a CFR AI for Blef.")
     CLI.add_argument("--hand-sizes", nargs=2, type=int, required=True, help="The number of cards per player, sorted ascending.")
     CLI.add_argument("--num-iterations", type=int, default=5000000, help="Total number of training iterations. Default: 5,000,000")

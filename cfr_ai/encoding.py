@@ -30,7 +30,7 @@ def encode_probabilities(probabilities: np.ndarray) -> str:
     return concatenated
 
 
-def decode_number_part(character: chr) -> int:
+def decode_number_part(character: str) -> int:
     return [i for i in range(51) if encoding_characters[i] == character][0]
 
 

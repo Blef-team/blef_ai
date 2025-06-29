@@ -9,16 +9,22 @@ import importlib.util
 from tqdm import tqdm
 import math
 import inspect # New import to check function arguments
+from typing import List, Dict, Any, Tuple
 
 from cfr_ai.game import Game
 from cfr_ai.encoding import decode_probabilities
 
-def parse_metadata(model_folder_path: str, hand_sizes_sorted: list):
+Model = Dict[str, Any]
+Hand = Tuple[int]
+Hands = Tuple[Hand, Hand]
+
+
+def parse_metadata(model_folder_path: str, hand_sizes_sorted: List[int]) -> Dict[str, int]:
     """
     Parses the metadata.csv file for a specific setup.
     Returns a dictionary of found parameters.
     """
-    metadata = {'min_bet': 0} # Default value
+    metadata: Dict[str, int] = {'min_bet': 0} # 0 is the default
     
     setup_name = "_".join(str(x) for x in hand_sizes_sorted)
     metadata_path = os.path.join(model_folder_path, 'outputs', setup_name, 'metadata.csv')
@@ -38,7 +44,7 @@ def parse_metadata(model_folder_path: str, hand_sizes_sorted: list):
         print(f"Warning: Metadata file not found at '{metadata_path}'. Using default min_bet=0.", file=sys.stderr)
     return metadata
 
-def load_model_components(model_folder_path: str, hand_sizes_sorted: list):
+def load_model_components(model_folder_path: str, hand_sizes_sorted: List[int]) -> Tuple[Any, Dict[str, int]]:
     """
     Loads a model's information_set module and its metadata for a specific setup.
     """
@@ -61,7 +67,7 @@ def load_model_components(model_folder_path: str, hand_sizes_sorted: list):
     spec.loader.exec_module(info_set_module)
     return info_set_module, metadata
 
-def make_key_wrapper(module, my_hand, hand_abstractions, history, min_bet):
+def make_key_wrapper(module, my_hand: List[int], hand_abstractions: List[str], history: List[int], min_bet: int):
     """
     Calls make_key, passing min_bet only if the function supports it.
     """
@@ -72,7 +78,7 @@ def make_key_wrapper(module, my_hand, hand_abstractions, history, min_bet):
     else:
         return func(my_hand, hand_abstractions, history)
 
-def get_possible_actions_wrapper(module, history, min_bet):
+def get_possible_actions_wrapper(module, history: List[int], min_bet: int):
     """
     Calls get_possible_actions, passing min_bet only if the function supports it.
     """
@@ -83,12 +89,12 @@ def get_possible_actions_wrapper(module, history, min_bet):
     else:
         return func(history)
 
-def preload_all_strategies(model_folder, hand_sizes_sorted):
+def preload_all_strategies(model_folder: str, hand_sizes_sorted: List[int]) -> Dict[str, str]:
     """
     Reads all strategy files for a model into an in-memory dictionary.
     Returns a dict mapping {info_set_key: encoded_strategy_string}.
     """
-    strategies = {}
+    strategies: Dict[str, str] = {}
     setup_name = "_".join(str(x) for x in hand_sizes_sorted)
     outputs_path = os.path.join(model_folder, 'outputs', setup_name)
     
@@ -115,7 +121,7 @@ def preload_all_strategies(model_folder, hand_sizes_sorted):
     print(f"Loaded {len(strategies)} strategy entries from {model_folder}.")
     return strategies
 
-def load_strategy_from_files(model_folder: str, key: str, hand_sizes: list, num_possible_actions: int) -> np.ndarray:
+def load_strategy_from_files(model_folder: str, key: str, hand_sizes: List[int], num_possible_actions: int) -> np.ndarray:
     """
     Loads a single strategy from a CSV file.
     """
@@ -133,7 +139,7 @@ def load_strategy_from_files(model_folder: str, key: str, hand_sizes: list, num_
     strategy[-1] = 1.0
     return strategy
 
-def get_strategy(current_model, key, hand_sizes, possible_actions):
+def get_strategy(current_model: Model, key: str, hand_sizes: List[int], possible_actions: List[int]) -> np.ndarray:
     """Helper to get a strategy from pre-loaded dict or from file."""
     strategy = None
     num_actions = len(possible_actions)
@@ -155,7 +161,7 @@ def get_strategy(current_model, key, hand_sizes, possible_actions):
         strategy[-1] = 1.0
     return strategy / sum(strategy)
 
-def get_h2h_expected_value(models: tuple, hands: tuple, history: list, active_player_idx: int, hand_sizes: list, existence_array: np.ndarray) -> float:
+def get_h2h_expected_value(models: tuple, hands: tuple, history: List[int], active_player_idx: int, hand_sizes: List[int], existence_array: np.ndarray) -> float:
     """
     Recursively traverses the game tree to calculate expected value.
     """
@@ -192,7 +198,7 @@ def get_h2h_expected_value(models: tuple, hands: tuple, history: list, active_pl
             node_ev += strategy[i] * action_ev
     return node_ev
 
-def run_mc_playout(models: tuple, hands: tuple, starting_player_idx: int, hand_sizes: list, existence_array: np.ndarray) -> int:
+def run_mc_playout(models: Tuple[Model, Model], hands: Hands, starting_player_idx: int, hand_sizes: List[int], existence_array: np.ndarray) -> int:
     """
     Simulates a single game path based on sampling actions.
     """
@@ -234,7 +240,7 @@ def run_mc_playout(models: tuple, hands: tuple, starting_player_idx: int, hand_s
     else:
         return -payoff_for_checked_player
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description="Run a head-to-head comparison between two Blef CFR AIs.")
     parser.add_argument("--hand-sizes", nargs=2, type=int, required=True, help="The number of cards for each player (e.g., 1 2).")
     parser.add_argument("--model1-folder", type=str, required=True, help="Path to the folder for the first AI model (Model A).")

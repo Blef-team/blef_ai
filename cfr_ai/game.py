@@ -1,8 +1,6 @@
-from typing import List
-import random
+from typing import List, Generator
 import itertools
 import numpy as np
-from numba import njit
 
 BlefCards = np.arange(24, dtype=np.int64) 
 rng = np.random.default_rng()
@@ -13,7 +11,7 @@ class Game():
         return len(history) > 0 and history[-1] == 88
 
     @staticmethod
-    def precompute_set_existence(hands: list) -> np.ndarray:
+    def precompute_set_existence(hands: List[List[int]]) -> np.ndarray:
         """
         Calculates the outcome for all 88 possible bets at once for a given deal.
         Returns a boolean numpy array of size 88.
@@ -72,7 +70,7 @@ class Game():
         return existence_array
     
     @staticmethod
-    def deal_cards(hand_sizes: List[int]):
+    def deal_cards(hand_sizes: List[int]) -> List[List[int]]:
         all_cards = rng.choice(BlefCards, size=sum(hand_sizes), replace=False)
         hands = []
         for i in range(0, len(hand_sizes)):
@@ -83,7 +81,7 @@ class Game():
         return hands
 
     @staticmethod
-    def hand_combinations(hand_sizes: List[int]):
+    def hand_combinations(hand_sizes: List[int]) -> Generator[List[List[int]], None, None]:
         def generate(remaining_num_cards, possible_cards):
             if not remaining_num_cards:
                 yield []

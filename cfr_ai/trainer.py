@@ -1,7 +1,8 @@
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
 from cfr_ai.information_set import *
 from cfr_ai.game import *
 import numpy as np
+import random
 from tqdm import trange, tqdm
 
 class Trainer():
@@ -15,7 +16,7 @@ class Trainer():
         self.log_points = log_points
         self.min_bet = min_bet
 
-    def get_node_value(self, hands: List[np.ndarray], hand_abstractions: List[str], history: List[int], reach_probability: float, active_player: int, traverser: int, prune_feast: bool, existence_array, iter: int):
+    def get_node_value(self, hands: List[np.ndarray], hand_abstractions: List[str], history: List[int], reach_probability: float, active_player: int, traverser: int, prune_feast: bool, existence_array: np.ndarray, iter: int) -> float:
         if Game.check_finish(history):
             return 1 if existence_array[history[-2]] else -1
         
@@ -53,7 +54,7 @@ class Trainer():
             self.nodes_touched += 1
             return node_value
 
-    def train(self, num_iterations: int):
+    def train(self, num_iterations: int) -> Tuple[float, float, Dict[str, Any]]:
         utils = [0.0, 0.0]
         last_utils = [0.0, 0.0]
         utility_log: Dict[str, Any] = {}

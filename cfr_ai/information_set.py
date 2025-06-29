@@ -4,13 +4,13 @@ import numpy as np
 history_codes = np.genfromtxt('cfr_ai/history.csv', delimiter=',', dtype='|U5', skip_header=0)
 
 
-def get_possible_actions(history: List[int], min_bet: int):
+def get_possible_actions(history: List[int], min_bet: int) -> List[int]:
     if (len(history) == 0 or history[-1] < min_bet):
         return [a for a in range(min_bet, 88)]
     else: 
         return [a for a in range(history[-1] + 1, 89)]
 
-def get_hand_abstraction(hand: np.ndarray, hand_sizes: List[int]) -> str:
+def get_hand_abstraction(hand: List[int], hand_sizes: List[int]) -> List[str]:
     hand = [str(card // 4) + str(card % 4) for card in hand]
     # Rounds 1-5: get values
     if (sum(hand_sizes) <= 6):
@@ -102,7 +102,7 @@ def get_hand_abstraction(hand: np.ndarray, hand_sizes: List[int]) -> str:
     return out
 
 
-def make_key(hand: np.ndarray, hand_abstractions: str, history: List[int], min_bet: int) -> str:
+def make_key(hand: List[int], hand_abstractions: List[str], history: List[int], min_bet: int) -> str:
     key = str(len(hand))
     
     # History abstraction
@@ -145,7 +145,7 @@ class InformationSet():
         self.strategy_sum += reach_probability * strategy
         return strategy
 
-    def get_final_strategy(self) -> np.array:
+    def get_final_strategy(self) -> np.ndarray:
         if any(self.strategy_sum):
             return self.strategy_sum / sum(self.strategy_sum)
         else:
