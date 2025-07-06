@@ -203,7 +203,13 @@ For each setup, there's also a training metadata file (`metadata.csv`), which no
 
 The AI is meant to be deployed alongside the [game engine](https://github.com/Blef-team/blef_game_engine). The integration has two components:
 * the dispatcher lambda. The code in dispatcher/lambda_function.py needs to be copied over to the `blef-aiagent-cfr` lambda. This can be done through the UI or by zipping the function and executing `aws lambda update-function-code --function-name blef-aiagent-cfr --zip-file fileb://cfr_ai/dispatcher/lambda_function.zip`; and
-* a collection of agents, each serving a particular setup. To deploy them, you need to run the `deploy` script. For example, for the 1 vs 1 card setup, run `python -m cfr_ai.deploy --hand-sizes 1 1`
+* a collection of agents, each serving a particular setup.
+
+To create all necessary worker lambdas for the first time, use the `create_lambas` script in the deployment folder (needs configuring)
+
+To deploy an individual setup, you need to run the `deploy` script. For example, for the 1 vs 1 card setup, run `python -m cfr_ai.deployment.deploy --hand-sizes 1 1`
+
+To deploy all setups at once, run `python -m cfr_ai.deployment.deploy_all`
 
 ## Acknowledgements
 
