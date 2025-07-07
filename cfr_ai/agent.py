@@ -14,6 +14,7 @@ def determine_action(game_state):
     matching_hands = [hand for hand in game_state.get("hands", []) if hand.get("nickname") == agent_nickname]
     my_cards = [card["value"] * 4 + card["colour"] for card in matching_hands[0]["hand"]]
     
+    min_bet = 0 # Default. Can be deleted once all setups record the min_bet parameter in metadata
     with open('metadata.csv', 'r', encoding='utf-8') as f:
         reader = csv.reader(f)
         for row in reader:
