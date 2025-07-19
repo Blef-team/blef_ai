@@ -89,20 +89,24 @@ def calculate_win_probabilities():
     # Generate and save the heatmap
     plt.style.use('seaborn-v0_8-whitegrid')
     fig, ax = plt.subplots(figsize=(12, 10))
-    sns.heatmap(
+    heatmap = sns.heatmap(
         df_p1_starts,
         annot=True,
-        fmt=".2f",
+        fmt=".0%",
         cmap="viridis_r",
         linewidths=.5,
         ax=ax,
         vmin=0,
         vmax=1,
-        cbar_kws={'label': 'Player 1 Win Probability'}
+        cbar_kws={'label': 'Player 1 Win Probability'},
+        annot_kws={'fontsize': 15}
     )
-    ax.set_title("Expected Game Win Probability from Given Setup (P1 Starts Round)", fontsize=16, pad=20)
-    ax.set_xlabel("Player 2 Card Count", fontsize=12)
-    ax.set_ylabel("Player 1 Card Count", fontsize=12)
+    ax.set_title("Expected Game Win Probability from Given Setup (P1 Starts)", fontsize=20, pad=20)
+    ax.set_xlabel("Player 2 Card Count", fontsize=15)
+    ax.set_ylabel("Player 1 Card Count", fontsize=15)
+    cbar = heatmap.collections[0].colorbar
+    cbar.ax.yaxis.label.set_size(15)
+    cbar.ax.tick_params(labelsize=13)
     plt.tight_layout()
     
     heatmap_filename = "cfr_ai/outputs/win_probability_by_starting_setup.png"
