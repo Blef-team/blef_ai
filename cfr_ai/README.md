@@ -74,15 +74,15 @@ Evaluation is key to informed development of the algorithm. Usually in the case 
 
 To get an approximate idea of whether we are running enough iterations, we are logging utility at equal intervals across the training run. If there is no substantial trend beyond the first 30% of iterations, then the exploitability coming from insufficient iterations is likely to be low (however, exploitability coming from the abstraction may still be high).
 
-There is an `analysis.py` script that makes:
+There is an `analysis/training_analytics.py` script that makes:
 * a summary table showing key data for each setup trained;
 * charts of utility over time for each setup.
 
-To use it, run `python -m cfr_ai.analysis`.
+To use it, run `python -m cfr_ai.analysis.training_analytics`.
 
 ### Head-to-head comparison
 
-There is a `head_to_head.py` script that can be used to compare two versions of strategies for a single setup by making them play against each other. Using the Monte Carlo sampling, it runs within minutes for any setup. It is the best tool for evaluating modifications to the core algorithm.
+There is a `analysis/head_to_head.py` script that can be used to compare two versions of strategies for a single setup by making them play against each other. Using the Monte Carlo sampling, it runs within minutes for any setup. It is the best tool for evaluating modifications to the core algorithm.
 
 ## Resource limits and abstraction
 
