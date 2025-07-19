@@ -66,24 +66,6 @@ We have considered but ultimately not implemented:
 * some variance-reduction techniques with respect to opponent's sampled actions or cards, because of no noticeable benefit when trying them; and
 * discounting regrets, as we haven't found benefits.
 
-## Evaluation
-
-Evaluation is key to informed development of the algorithm. Usually in the case of CFR, it is done by computing exploitability. We have created optimised tools to compute the exploitability of this AI in the unabstracted game. However, we are unable to run them within 1 core-day beyond the 3rd round. Therefore, we use a suite of other tools to get a rough idea as to the performance of the algorithm. 
-
-### Utility logging
-
-To get an approximate idea of whether we are running enough iterations, we are logging utility at equal intervals across the training run. If there is no substantial trend beyond the first 30% of iterations, then the exploitability coming from insufficient iterations is likely to be low (however, exploitability coming from the abstraction may still be high).
-
-There is an `analysis/training_analytics.py` script that makes:
-* a summary table showing key data for each setup trained;
-* charts of utility over time for each setup.
-
-To use it, run `python -m cfr_ai.analysis.training_analytics`.
-
-### Head-to-head comparison
-
-There is a `analysis/head_to_head.py` script that can be used to compare two versions of strategies for a single setup by making them play against each other. Using the Monte Carlo sampling, it runs within minutes for any setup. It is the best tool for evaluating modifications to the core algorithm.
-
 ## Resource limits and abstraction
 
 Memory, storage and computation constraints force us to heavily abstract information sets. Unabstracted, they would contain an list of our cards and the list of all moves that have been played in the given round.
@@ -183,7 +165,11 @@ There is also a version of the strategy files with extra, diagnostic columns in 
 * for every infoset, it notes the iterations it was first and last touched and the number of times it was touched; and
 * we include probabilities below 1%, which are reset to 0% in the normal output file.
 
-For each setup, there's also a training metadata file (`metadata.csv`), which notes: 
+## Evaluation & analytics
+
+Evaluation is key to informed development of the algorithm. Usually in the case of CFR, it is done by computing exploitability. We have created optimised tools to compute the exploitability of this AI in the unabstracted game. However, we are unable to run them within 1 core-day beyond the 3rd round. Therefore, we use a suite of other tools to get a rough idea as to the performance of the algorithm. 
+
+Along each setup's outputs, there's a training metadata file (`metadata.csv`), which notes: 
 
 * the time the training finished;
 * training duration (Hours:Minutes);
@@ -198,6 +184,24 @@ For each setup, there's also a training metadata file (`metadata.csv`), which no
 * the game value of each player (e.g. if we're training the 2 cards vs 3 cards case, it's 1. the game value for the starting player when the 2-card player is starting and 2. the game value for the starting player when the 3-card player is starting);
 * the log of utilities along the training run; and
 * exploitability, if applicable.
+
+### Utility logging
+
+To get an approximate idea of whether we are running enough iterations, we are logging utility at equal intervals across the training run. If there is no substantial trend beyond the first 30% of iterations, then the exploitability coming from insufficient iterations is likely to be low (however, exploitability coming from the abstraction may still be high).
+
+There is an `analysis/training_analytics.py` script that makes:
+* a summary table showing key data for each setup trained;
+* charts of utility over time for each setup.
+
+To use it, run `python -m cfr_ai.analysis.training_analytics`.
+
+### Head-to-head comparison
+
+There is a `analysis/head_to_head.py` script that can be used to compare two versions of strategies for a single setup by making them play against each other. Using the Monte Carlo sampling, it takes in the order of 10 minutes to run 10,000 games for most setups. It is the best tool for evaluating modifications to the core algorithm.
+
+### Winning probabilities
+
+Using the game values noted down for each setup in the `summary_of_all_runs.csv`, we can compute the probabilities of winning the game starting from a specific setup and with a specific starting player within that setup. To compute those, use the `analysis/win_probabilities.py` script.
 
 ## Deployment
 
