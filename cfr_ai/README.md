@@ -109,7 +109,33 @@ Only the last 3 moves are remembered. Additionally, there is a complex hand-craf
 
 ### Hand abstraction
 
-In rounds 1-5, the AI only looks at card values and not suits. In further rounds, there is a complex hand-crafted abstraction for hands, which depends on the last bet. It's encoded in `get_hand_abstraction` in `information_set.py`. 
+The AI does not consider the exact cards in its hand. Instead, it uses a hand-crafted abstraction that extracts only the most strategically relevant features of the hand, which changes depending on the round and the last bet made. It's encoded in `get_hand_abstraction` in `information_set.py`.
+
+In rounds 1-5, the AI only looks at card values and completely ignores the suits. 
+
+In further rounds, there is a more complex hand-crafted abstraction. First, as the AI, we extract features:
+* we count the number of cards of each value and each suit it holds, for a total of 10 integers.
+* we identify the strongest features of our hand among these 10 integers. N cards of a given value are considered stronger than N+1 cards of a given suit, but weaker than N+2 cards of a given suit (so that four-of-a-kind on hand is considered stronger than a flush on hand). There is also an augmented version of these strengths, where each suit strength also contains information about whether we have the 9 and whether we have the Ace of that suit. 
+
+We then pick these numbers as identifiers of our hand, depending on the last bet (the one we are responding to):
+
+* For last best of a high card, pair or two pair or at the beginning of the round:
+    * If we have a flush or four of a kind on hand, only that feature is reported
+    * Else if we have a three of a kind on hand, the top 2 value-related strengths are considered
+    * Else, we look at card values and ignore suits
+* For the last best of any straight:
+    * If we have a flush or four of a kind on hand, only that feature is reported
+    * Else, report if we have a 9, how many distinct values between 10 and King we have, if we have an Ace, and what our top strength is 
+* For the last best of a three-of-a-kind:
+    * If we have a flush or four of a kind on hand, only that feature is reported
+    * Else, report how many of the value being bet on we have, and what our top strength is 
+* For the last best of a full house:
+    * If we have a flush or four of a kind on hand, only that feature is reported
+    * Else, report how many of the two values being bet on we have, and what our top strength is 
+* For the last best of a flush, report how many of the suit being bet on we have, and what our top augmented strength is 
+* For the last best of a four-of-a-kind, report how many of the value being bet on we have, and what our top augmented strength is, but ignore strenghts related to values lower than the one being bet on
+* For the last best of a small/big straight flush, report augmented information about the suit being bet on and our strongest suit 
+* For the last best of a great straight flush, report augmented information about the suit being bet on and our strongest suit among those that can still be bet on
 
 ### Action abstraction
 
@@ -218,3 +244,5 @@ To deploy all setups at once, run `python -m cfr_ai.deployment.deploy_all`
 ## Acknowledgements
 
 We thank [Thomas Trenner](https://github.com/tt293) for his writings on the CFR algorithm and its possible implementations, which inspired us to create this AI.
+
+## Appendix A: Hand abstraction
