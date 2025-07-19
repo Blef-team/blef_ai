@@ -105,7 +105,49 @@ We do not know the effects of this problem on convergence. We are currently not 
 
 ### History abstraction
 
-Only the last 3 moves are remembered. Additionally, there is a complex hand-crafed abstraction that groups some sets together, depending on the last move. It's stored in `history.csv`. The purpose is for bets that are irrelevant and vastly junior to the last one to not differentiate infromation sets. For example, if the last set that was bet on is 55, a bet on set 5 is represented in the history abstraction as a Z (row 55 column 5).  
+History is abstracted in two steps. 
+
+First, we only consider last 3 bets.
+
+Then, the second and the third previous bet are being independently compressed according to the same rules, which take the last bet into account:
+* If the last bet is a high card or a pair, they are recalled exactly
+* If the last bet is a two pair:
+    * Two pairs and pairs are recalled exactly
+    * High cards are remembered exactly if they're relevant or higher than the higher value of the current two pair bet. Other high cards are merged into a 'Z'
+* If the last bet is a straight:
+    * Two pairs and pairs are recalled exactly
+    * High cards are merged into one
+* If the last bet is a three-of-a-kind:
+    * Straights are recalled exactly
+    * The relevant two pairs are recalled exactly, otherwise as 'A'
+    * The relevant pair is recalled exactly, the rest as a 'B'
+    * The relevant high card is recalled exactly, the rest as a 'Z'
+* If the last bet is a full house:
+    * Other full houses are categorised by whether they contain the same primary value, the same secondary value, the current first value as their second value, or otherwise denoted by their primary value
+    * The two relevant three-of-a-kinds are recalled exactly, the rest as 'E'
+    * Straights are recalled as an 'F'
+    * Two pairs are categoried by whether they contain the primary value, the secondary value, both or neither
+    * Pairs are recalled exactly if they contain on of the two values, otherwise as a 'J' 
+    * High cards are merged into a 'Z'
+* If the last bet is a flush:
+    * Other flushes are recalled exactly
+    * Full houses and represented by their primary value and the same as the relevant three-of-a-kind (e.g. all Aces over ... and three-of-a-kind Ace are all represented as 'A5')
+    * Straights are recalled exactly
+    * Two pairs, pairs and high cards are merged into a 'Z'
+* If the last bet is a four-of-a-kind:
+    * Other four-of-a-kinds and flushes are recalled exactly
+    * The full houses with the relevant primary value are an 'A', the immediate next full house is a 'B', the other full houses are a 'C'
+    * The relevant three-of-a-kind is a 'D', others a 'Z'
+    * Relevant two pairs are an 'E', others a 'Z'
+    * The relevant pair is an 'F', others a 'Z'
+    * High cards are merged into a 'Z'
+* If the last bet is a straight flush:
+    * Other straight flushes, all flushes and four-of-a-kind of 9 or Ace are remembered exactly
+    * Other four-of-a-kinds are recalled as an 'A'
+    * All full houses are recalled as a 'B'
+    * All other bets are recalled as a 'Z'
+
+This abstraction tries not to differentiate between bets that are less relevant or very junior to the last one. It's stored in `history.csv`. For example, if the last bet was on set 55 (Full house, Queens over Aces), a bet on set 5 (High Card, Ace) is represented in the history abstraction as a Z (row 55 column 5 in `history.csv`). 
 
 ### Hand abstraction
 
@@ -244,5 +286,3 @@ To deploy all setups at once, run `python -m cfr_ai.deployment.deploy_all`
 ## Acknowledgements
 
 We thank [Thomas Trenner](https://github.com/tt293) for his writings on the CFR algorithm and its possible implementations, which inspired us to create this AI.
-
-## Appendix A: Hand abstraction
