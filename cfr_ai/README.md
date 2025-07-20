@@ -93,16 +93,6 @@ An average information set will only have 30-40 possible actions. Therefore, in 
 
 We have a mechanism for imposing a penalty (reduction of payoff) for the traversing player for betting instead of checking. Used as a last resort to make the compute and memory requirements manageable
 
-### History abstraction on convergence
-
-Because we only remember the last 3 bets (and imperfectly, too), a node in the game 'tree' might have more than 1 parent, which makes it not a tree. This is a departure from the vanilla CFR algorithm. 
-
-Whenever there are multiple ways to reach a node, we should be applying bigger regret updates to the node when we are reaching it via a way that's more likely to occur. However, the probability of each path depends not only on the opponent, whose reach probability we are reflecting by sampling, but also on us (the updating agent), and since we do not (and should not) make the regret update dependent on our own reach probability, we may apply too many regret updates to a node. 
-
-In other words, we may visit a node many times during an iteration (because the updating agent explores many possible moves, branching the tree) and update it as if its reach probability was more than 1, even though in actual gameplay an infoset can be only visited once during a round.
-
-We do not know the effects of this problem on convergence. We are currently not making any adjustments to the algorithm to try compensating for this. However, note that imposing a higher penalty on betting or using a more relaxed history abstraction will alleviate this problem.
-
 ### History abstraction
 
 History is abstracted in two steps. 
@@ -191,6 +181,21 @@ With 16 cards on the table, the great straight has 96% chance of existing (88%, 
 
 There is an encoding that highly compresses strategies so that they can be deployed on platforms with limited storage, such as within AWS Lambda functions.
 
+## History abstraction and convergence
+
+Because we only remember the last 3 bets (and imperfectly, too), a node in the game 'tree' might have more than 1 parent, which makes it not a tree. 
+
+Some nodes may have a very large number of possible paths from the root, which might be very similar from a strategic perspective, but will result in multiple updates to a node in an iteration. This is a problem for performance and/or convergence properties of the algorithm.
+
+We have evaluated three ways of dealing with that problem:
+* doing nothing, which means that a node will potentially get a large number of updates in an iteration. This will result in potentially much quicker changes of regret between the pruning threshold or the minimum value and 0. It will also result in much slower iterations
+* caching the last value of a node and recording the last iteration it was touched, and if it's the second time we're touching it in a given iteration, returning the cached value instead of (1) getting the strategy, (2) traversing its children, (3) updating cumulative regrets and (4) updating strategy sum again . This is the 'temporary value' solution. However, that biases the regret updates. For example, if a node has 200 possible paths leading to it, and each of them has 1% opponent reach probability when opponent has hand X and each of them has 2% opponent reach probability when opponent has hand Y, this will result in the node having a near 100% chance of geting one full-sized regret update in the iteration conditional on hand X as well as Y. This means that the CFR strategy will be prepared for a distribution of hands with higher entropy than the one it should be.
+* using the 'temporary values', but every point in history that was either (A) visited or (B) considered by the opponent but not visited (because of the external sampling algorithm) will be marked as having been last considered in this iteration. Downstream nodes are not marked as considered. When (and if) that node is finally visited in this iteration, its value is calculated and (some of) its downstream nodes are visited. However, if the node was not visited the first time it was considered in this iteration, it will not get regret updates or strategy sum updates. Thanks to this, regret updates will be lower the lower the opponent's chance of making the last move (on the first path from which we considered this node) that reaches this node. This is the 'considered nodes' solution.
+
+Although we expected the 'temporary value' solution to yield the worst results, for the setups we tested, we found the two otehr solutions to not improve the strategy at the same number of training iterations. These other solutions are typically 2-5 time slower than the temporary value solution. 
+
+That is why we have left the temporary solution as the only one available to use. However, to enable all three, follow the steps in `README_Appendix_A.md.
+
 ## Usage
 
 The training is done by setup, which is the ordered number of cards per player, no matter which player the AI is and who is starting. To train a model for a specific setup, execute `training.py`, specifying the number of hands. For example, the train the 1 card vs 1 card setup, run this from the project root:
@@ -214,6 +219,8 @@ python -m cfr_ai.training --hand-sizes 1 1
 `--log-points` (default: 25) specifies the number of points (at equal intervals) where utility will be measured.
 
 `--get-exploitability` computes exact exploitability in the unabstracted game, disaggregated by which player starts.
+
+`--convergence-resolution` specifies how converging paths should be handled. The default is to allow them.
 
 You will see a `tqdm` progress bar during training and exploitability calculations.
 
