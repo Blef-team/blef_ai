@@ -290,6 +290,12 @@ To deploy an individual setup, you need to run the `deploy` script. For example,
 
 To deploy all setups at once, run `python -m cfr_ai.deployment.deploy_all`
 
-## Acknowledgements
+## Performance
 
-We thank [Thomas Trenner](https://github.com/tt293) for his writings on the CFR algorithm and its possible implementations, which inspired us to create this AI.
+The core of the program, including `information_set.py`, `get_node_value` and `precompute_set_existence`, have gone through many rounds of optimisation. However, they would probably be much faster if they were written in a language like C++. We have tried using the `numba` package to compile a C++ version of some functions, like `precompute_set_existence`, but this actually worsened the performance. This is likely due to the frequent interface between Python and C++ (at least once per iteration, of which there are usually tens or hundreds in every second).
+
+## Other notes
+
+We thank [Thomas Trenner](https://github.com/tt293) for his writings on the CFR algorithm, which inspired us to create this AI.
+
+Strategy outputs for every setup are avaiable upon request.
