@@ -220,8 +220,6 @@ python -m cfr_ai.training --hand-sizes 1 1
 
 `--get-exploitability` computes exact exploitability in the unabstracted game, disaggregated by which player starts.
 
-`--convergence-resolution` specifies how converging paths should be handled. The default is to allow them.
-
 You will see a `tqdm` progress bar during training and exploitability calculations.
 
 ### Training outputs
