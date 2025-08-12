@@ -1,14 +1,12 @@
 import random
-from shared.probabilities import handler
 from shared.ai import agent
-
+from shared.probabilities import dynamic_probabilities
 
 def normalise(arr):
     sum_arr = sum(arr)
     if sum_arr:
         return [i/sum_arr for i in arr]
     return arr
-
 
 def elementwise_mul(first_array, second_array):
     return [a*b for a, b in zip(first_array, second_array)]
@@ -28,47 +26,45 @@ class ConservativeAgent(agent.Agent):
 
     @staticmethod
     def determine_action(game_state):
-        agent_nickname = game_state["cp_nickname"]
-        matching_hands = [hand for hand in game_state.get("hands", []) if hand.get("nickname") == agent_nickname]
-        if len(matching_hands) != 1:
-            raise ValueError("Can't get my hand from the game state.")
+        rules = game_state.get("rules", {})
+        deck_size = rules.get("deck_size", 24)
+        num_actions = 141 if deck_size == 32 else 89
+        check_action_id = num_actions - 1
 
-        hand = [(card["value"], card["colour"]) for card in matching_hands[0]["hand"]]
-        players = game_state.get("players", [])
-        others_card_num = sum([player.get("n_cards") for player in players if player.get("nickname", agent_nickname) != agent_nickname])
-        if not players or not others_card_num:
-            raise ValueError("Can't get my hand or other player's card numbers from the game state.")
+        # Probabilities are now calculated directly from the game_state
+        bet_probs_betting = dynamic_probabilities.get_bet_probabilities(game_state, for_betting=True)
+        bet_probs_checking = dynamic_probabilities.get_bet_probabilities(game_state, for_betting=False)
 
-        bet_probs = handler.Handler().get_probability_vector(hand, others_card_num)
         last_bet = None
         if game_state.get("history"):
             last_bet = game_state.get("history")[-1]["action_id"]
 
-        if last_bet is not None and last_bet in range(88):
-            for i in range(last_bet):
-                bet_probs[i] = 0.0
+        if last_bet is not None and last_bet < check_action_id:
+            for i in range(last_bet + 1):
+                bet_probs_betting[i] = 0.0
 
-            if bet_probs[last_bet] == 0:
-                return 88
+            if bet_probs_checking[last_bet] == 0:
+                return check_action_id
 
-            success_prob_of_check = 1 - bet_probs[last_bet]
-            bet_probs[last_bet] = 0.0
-            sampling_weights = compute_sampling_weights(bet_probs)
-            weighted_probs = elementwise_mul(sampling_weights, bet_probs)
-
+            success_prob_of_check = 1 - bet_probs_checking[last_bet]
+            sampling_weights = compute_sampling_weights(bet_probs_betting)
+            weighted_probs = elementwise_mul(sampling_weights, bet_probs_betting)
             success_prob_of_bet = sum(weighted_probs)
+
             check_vs_bet_probs = [success_prob_of_check, success_prob_of_bet * 1.2]
             check_vs_bet_probs = [i ** 3 for i in check_vs_bet_probs]  # Be conservative
             if sum(check_vs_bet_probs) == 0:
-                return 88
+                return check_action_id
 
             check = random.choices([True, False], weights=normalise(check_vs_bet_probs), k=1)[0]
             if check:
-                return 88
+                return check_action_id
 
-        sampling_weights = compute_sampling_weights(bet_probs)
+        sampling_weights = compute_sampling_weights(bet_probs_betting)
+        if not any(sampling_weights):
+            return check_action_id if last_bet is not None else 0
+
         sampled_action = random.choices(range(len(sampling_weights)), weights=sampling_weights, k=1)[0]
-
         return sampled_action
 
     def run(self):
@@ -96,7 +92,7 @@ class ConservativeAgent(agent.Agent):
             if game_state.get("cp_nickname") != self.nickname:
                 continue
 
-            sampled_action = determine_action(game_state, self.nickname)
+            sampled_action = self.determine_action(game_state)
             self.game_manager.play(sampled_action)
 
 
