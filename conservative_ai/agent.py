@@ -34,7 +34,15 @@ class ConservativeAgent(agent.Agent):
         if game_state.get("history"):
             last_bet = game_state.get("history")[-1]["action_id"]
 
-        bet_probs_betting = dynamic_probabilities.get_bet_probabilities(game_state, for_betting=True, last_bet=last_bet)
+        bet_probs_generic = dynamic_probabilities.get_generic_bet_probabilities(game_state, last_bet=last_bet)
+        bet_floor = 0
+        for i, prob in enumerate(bet_probs_generic):
+            if prob == 1.0:
+                bet_floor = i
+        
+        effective_last_bet = max(last_bet if last_bet is not None else -1, bet_floor - 1)
+
+        bet_probs_betting = dynamic_probabilities.get_bet_probabilities(game_state, for_betting=True, last_bet=effective_last_bet)
         sampling_weights = compute_sampling_weights(bet_probs_betting)
 
         if last_bet is not None and last_bet < check_action_id:
