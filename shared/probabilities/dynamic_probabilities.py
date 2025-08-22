@@ -1,49 +1,63 @@
 import math
 from itertools import combinations, product
 from collections import Counter
+from functools import lru_cache
+
+@lru_cache(maxsize=2)
+class GameRules:
+    """A cached class to hold and calculate game rule details once."""
+    def __init__(self, deck_size=24):
+        self.deck_size = deck_size
+        if deck_size == 24:
+            self.vals = 6
+            self.straight_types = {
+                "Small straight": list(range(5)),
+                "Big straight": list(range(1, 6)),
+                "Great straight": list(range(6)),
+            }
+        else:  # deck_size == 32
+            self.vals = 8
+            self.straight_types = {f"Straight {i+1}": list(range(i, i + 5)) for i in range(4)}
+        
+        self.flush_straight_types = self.straight_types
+        self._calculate_boundaries()
+        self.num_actions = self.boundaries["Straight flush"] + 1
+        self.check_action_id = self.num_actions - 1
+
+    def _calculate_boundaries(self):
+        vals = self.vals
+        current_boundary = 0
+        self.boundaries = {}
+        self.boundaries["High card"] = current_boundary + vals
+        current_boundary = self.boundaries["High card"]
+        self.boundaries["Pair"] = current_boundary + vals
+        current_boundary = self.boundaries["Pair"]
+        self.boundaries["Two pairs"] = current_boundary + (vals * (vals - 1)) // 2
+        current_boundary = self.boundaries["Two pairs"]
+        self.boundaries["Straight"] = current_boundary + len(self.straight_types)
+        current_boundary = self.boundaries["Straight"]
+        self.boundaries["Three of a kind"] = current_boundary + vals
+        current_boundary = self.boundaries["Three of a kind"]
+        self.boundaries["Full house"] = current_boundary + (vals * (vals - 1))
+        current_boundary = self.boundaries["Full house"]
+        self.boundaries["Flush"] = current_boundary + 4
+        current_boundary = self.boundaries["Flush"]
+        self.boundaries["Four of a kind"] = current_boundary + vals
+        current_boundary = self.boundaries["Four of a kind"]
+        self.boundaries["Straight flush"] = current_boundary + (len(self.flush_straight_types) * 4)
 
 def get_set_details_from_action_id(action_id, deck_size=24):
     """
     Determines the set type and details from the action_id and deck size.
     This is based on the documentation in the game engine's api/README.md.
     """
+    rules = GameRules(deck_size)
+    vals = rules.vals
+    boundaries = rules.boundaries
+    straight_types = rules.straight_types
+    flush_straight_types = rules.flush_straight_types
     action_id = int(action_id)
-    # Define base parameters based on deck size
-    if deck_size == 24:
-        vals = 6
-        straight_types = {
-            "Small straight": list(range(5)),
-            "Big straight": list(range(1, 6)),
-            "Great straight": list(range(6)),
-        }
-        flush_straight_types = straight_types
-    else:  # deck_size == 32
-        vals = 8
-        straight_types = {f"Straight {i+1}": list(range(i, i + 5)) for i in range(4)}
-        flush_straight_types = {f"Straight flush {i+1}": list(range(i, i + 5)) for i in range(4)}
-
-    # Dynamically calculate the boundaries for each set type
-    current_boundary = 0
-    boundaries = {}
-    boundaries["High card"] = current_boundary + vals
-    current_boundary = boundaries["High card"]
-    boundaries["Pair"] = current_boundary + vals
-    current_boundary = boundaries["Pair"]
-    boundaries["Two pairs"] = current_boundary + (vals * (vals - 1)) // 2
-    current_boundary = boundaries["Two pairs"]
-    boundaries["Straight"] = current_boundary + len(straight_types)
-    current_boundary = boundaries["Straight"]
-    boundaries["Three of a kind"] = current_boundary + vals
-    current_boundary = boundaries["Three of a kind"]
-    boundaries["Full house"] = current_boundary + (vals * (vals - 1))
-    current_boundary = boundaries["Full house"]
-    boundaries["Flush"] = current_boundary + 4
-    current_boundary = boundaries["Flush"]
-    boundaries["Four of a kind"] = current_boundary + vals
-    current_boundary = boundaries["Four of a kind"]
-    boundaries["Straight flush"] = current_boundary + (len(flush_straight_types) * 4)
-    current_boundary = boundaries["Straight flush"]
-
+    
     if action_id < boundaries["High card"]:
         return {"set_type": "High card", "detail_1": action_id}
     if action_id < boundaries["Pair"]:
@@ -337,33 +351,38 @@ def calculate_prob(action_id, hand, common_hand, unknown_cards_num, rules, for_b
 
     return 0.0
 
-def get_bet_probabilities(game_state, for_betting=False):
+def get_bet_probabilities(game_state, for_betting=False, last_bet=None, specific_action_id=None):
     rules = game_state.get("rules", {})
-    deck_size = rules.get("deck_size", 24)
-    num_actions = 141 if deck_size == 32 else 89
+    game_rules = GameRules(rules.get("deck_size", 24))
     
     players = game_state.get("players", [])
     agent_nickname = game_state["cp_nickname"]
 
     matching_hands = [h for h in game_state.get("hands", []) if h.get("nickname") == agent_nickname]
     if not matching_hands:
-        return [0.0] * (num_actions - 1)
+        return 0.0 if specific_action_id is not None else [0.0] * (game_rules.num_actions - 1)
     hand = [(card["value"], card["colour"]) for card in matching_hands[0]["hand"]]
 
     others_card_num = sum(p.get("n_cards", 0) for p in players if p.get("nickname") != agent_nickname)
     common_hand = [(card["value"], card["colour"]) for card in game_state.get("common_hand", [])]
     
-    bet_probs = []
-    for action_id in range(num_actions - 1):
+    # If a specific action is requested, calculate and return only that probability
+    if specific_action_id is not None:
+        return calculate_prob(specific_action_id, hand, common_hand, others_card_num, rules, for_betting)
+
+    # Otherwise, calculate the vector for legal betting moves
+    start_action_id = last_bet + 1 if last_bet is not None else 0
+    
+    bet_probs = [0.0] * start_action_id
+    for action_id in range(start_action_id, game_rules.check_action_id):
         prob = calculate_prob(action_id, hand, common_hand, others_card_num, rules, for_betting)
         bet_probs.append(prob)
         
     return bet_probs
 
-def get_generic_bet_probabilities(game_state):
+def get_generic_bet_probabilities(game_state, last_bet=None):
     rules = game_state.get("rules", {})
-    deck_size = rules.get("deck_size", 24)
-    num_actions = 141 if deck_size == 32 else 89
+    game_rules = GameRules(rules.get("deck_size", 24))
 
     players = game_state.get("players", [])
     agent_nickname = game_state["cp_nickname"]
@@ -373,9 +392,10 @@ def get_generic_bet_probabilities(game_state):
     common_hand = [(card["value"], card["colour"]) for card in game_state.get("common_hand", [])]
     unknown_cards_num = my_card_num + others_card_num
     
-    bet_probs = []
-    for action_id in range(num_actions - 1):
-        # We pass an empty hand because the "generic" perspective doesn't know our cards
+    start_action_id = last_bet + 1 if last_bet is not None else 0
+
+    bet_probs = [0.0] * start_action_id
+    for action_id in range(start_action_id, game_rules.check_action_id):
         prob = calculate_prob(action_id, [], common_hand, unknown_cards_num, rules, for_betting=True)
         bet_probs.append(prob)
         

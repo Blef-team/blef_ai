@@ -21,7 +21,6 @@ class ConservativeCrawlingAgent(agent.Agent):
         Autonomous AI Agent class to play Blef.
         A simple, conservative agent.
     """
-
     def __init__(self, base_url=None):
         super(ConservativeCrawlingAgent, self).__init__(base_url)
         self.nickname = "Porevit"
@@ -29,28 +28,25 @@ class ConservativeCrawlingAgent(agent.Agent):
     @staticmethod
     def determine_action(game_state):
         rules = game_state.get("rules", {})
-        deck_size = rules.get("deck_size", 24)
-        num_actions = 141 if deck_size == 32 else 89
-        check_action_id = num_actions - 1
-
-        # Probabilities are now calculated directly from the game_state
-        bet_probs_betting = dynamic_probabilities.get_bet_probabilities(game_state, for_betting=True)
-        bet_probs_checking = dynamic_probabilities.get_bet_probabilities(game_state, for_betting=False)
-        bet_probs_generic = dynamic_probabilities.get_generic_bet_probabilities(game_state)
-
+        game_rules = dynamic_probabilities.GameRules(rules.get("deck_size", 24))
+        check_action_id = game_rules.check_action_id
+        
         last_bet = None
         if game_state.get("history"):
             last_bet = game_state.get("history")[-1]["action_id"]
 
-        if last_bet is not None and last_bet < check_action_id:
-            for i in range(last_bet + 1):
-                bet_probs_betting[i] = 0.0
+        bet_probs_betting = dynamic_probabilities.get_bet_probabilities(game_state, for_betting=True, last_bet=last_bet)
+        bet_probs_generic = dynamic_probabilities.get_generic_bet_probabilities(game_state, last_bet=last_bet)
+        sampling_weights = compute_sampling_weights(bet_probs_betting, bet_probs_generic)
 
-            if bet_probs_checking[last_bet] == 0:
+        if last_bet is not None and last_bet < check_action_id:
+            prob_last_bet_exists = dynamic_probabilities.get_bet_probabilities(game_state, for_betting=False, specific_action_id=last_bet)
+
+            if prob_last_bet_exists == 0:
                 return check_action_id
 
-            success_prob_of_check = 1 - bet_probs_checking[last_bet]
-            sampling_weights = compute_sampling_weights(bet_probs_betting, bet_probs_generic)
+            success_prob_of_check = 1 - prob_last_bet_exists
+            
             weighted_probs = elementwise_mul(sampling_weights, bet_probs_betting)
             success_prob_of_bet = sum(weighted_probs)
 
@@ -63,7 +59,6 @@ class ConservativeCrawlingAgent(agent.Agent):
             if check:
                 return check_action_id
 
-        sampling_weights = compute_sampling_weights(bet_probs_betting, bet_probs_generic)
         if not any(sampling_weights):
             return check_action_id if last_bet is not None else 0
             
