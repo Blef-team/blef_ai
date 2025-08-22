@@ -155,56 +155,50 @@ def _calculate_prob_two_pairs(needed1, needed2, cards1_in_deck, cards2_in_deck, 
 
     return successful_outcomes / total_outcomes if total_outcomes > 0 else 0.0
 
-def _calculate_prob_straight(needed, cards_in_deck_counts, jokers_in_deck, other_cards_in_deck, unknown_cards_num):
+def _calculate_prob_straight(needed_card_values, cards_in_deck_counts, jokers_in_deck, other_cards_in_deck, unknown_cards_num):
     """
-    Calculates the exact probability of completing a straight using the Principle of Inclusion-Exclusion.
-
-    The function computes the probability of the complementary event: failing to acquire at least one
-    of the needed card values. This is done by summing the probabilities of failing to get one specific value,
-    subtracting the probabilities of failing to get two specific values, adding for three, and so on.
+    Calculates the exact probability of completing a straight by summing all successful outcomes.
+    This function iterates through all combinations of drawing the required cards and jokers.
     """
-    
-    # Total cards in the deck we don't know the location of.
     total_unknown_in_deck = sum(cards_in_deck_counts) + jokers_in_deck + other_cards_in_deck
-    
-    # The total number of ways to draw the unknown cards. This is our denominator.
+    if total_unknown_in_deck < unknown_cards_num:
+        return 0.0
+
+    successful_outcomes = 0
     total_outcomes = binom(total_unknown_in_deck, unknown_cards_num)
     if total_outcomes == 0:
         return 0.0
 
-    # This will store the total number of hands that are MISSING AT LEAST ONE of the required cards.
-    total_failing_outcomes = 0
+    # Create iterators for the number of cards to draw for each needed rank
+    iter_ranges = [range(min(unknown_cards_num, count) + 1) for count in cards_in_deck_counts]
 
-    # Loop through the number of card values we might be missing (from 1 up to 'needed').
-    # This corresponds to the terms in the Inclusion-Exclusion formula.
-    for k in range(1, needed + 1):
-        
-        # Get all combinations of 'k' card types to exclude.
-        # e.g., if we need a 9, 10, J, and k=2, this would be [(9,10), (9,J), (10,J)]
-        # We use indices to represent the card types for simplicity.
-        for excluded_indices in combinations(range(needed), k):
-            
-            # Sum the counts of the specific card values we are excluding in this iteration.
-            num_cards_to_exclude = sum(cards_in_deck_counts[i] for i in excluded_indices)
-            
-            # The "bad" pool of cards for this iteration consists of everything EXCEPT the excluded values and jokers.
-            pool_of_bad_cards = total_unknown_in_deck - num_cards_to_exclude - jokers_in_deck
-            
-            # Calculate the number of hands that can be formed using ONLY cards from this "bad" pool.
-            # These are the hands that are guaranteed to be missing the 'k' excluded card values.
-            num_hands_missing_k_values = binom(pool_of_bad_cards, unknown_cards_num)
-            
-            # Add or subtract from the total based on the Inclusion-Exclusion principle.
-            if (k - 1) % 2 == 0:  # For k=1, 3, 5... we add.
-                total_failing_outcomes += num_hands_missing_k_values
-            else:  # For k=2, 4, 6... we subtract.
-                total_failing_outcomes -= num_hands_missing_k_values
+    # Iterate through all combinations of counts for each needed rank
+    for rank_counts in product(*iter_ranges):
+        num_rank_cards_drawn = sum(rank_counts)
+        if num_rank_cards_drawn > unknown_cards_num:
+            continue
 
-    # The probability of failure is the total failing outcomes divided by all possible outcomes.
-    prob_of_failure = total_failing_outcomes / total_outcomes
-    
-    # The probability of success is 1 minus the probability of failure.
-    return 1 - prob_of_failure
+        # Count how many ranks we missed (i.e., drew 0 cards for)
+        num_ranks_missed = sum(1 for count in rank_counts if count == 0)
+
+        # Now, iterate through the number of jokers we could draw
+        max_jokers = min(jokers_in_deck, unknown_cards_num - num_rank_cards_drawn)
+        for num_jokers_drawn in range(max_jokers + 1):
+            
+            # Success condition: The number of jokers drawn is enough to cover the missing ranks
+            if num_jokers_drawn >= num_ranks_missed:
+                
+                num_other_cards_drawn = unknown_cards_num - num_rank_cards_drawn - num_jokers_drawn
+                if 0 <= num_other_cards_drawn <= other_cards_in_deck:
+                    
+                    # Calculate the number of ways this combination can happen
+                    term = binom(jokers_in_deck, num_jokers_drawn) * binom(other_cards_in_deck, num_other_cards_drawn)
+                    for i, rank_count in enumerate(rank_counts):
+                        term *= binom(cards_in_deck_counts[i], rank_count)
+                    
+                    successful_outcomes += term
+
+    return successful_outcomes / total_outcomes if total_outcomes > 0 else 0.0
 
 def _calculate_prob_full_house(needed3, needed2, cards3_in_deck, cards2_in_deck, jokers_in_deck, other_cards_in_deck, unknown_cards_num):
     """
@@ -246,10 +240,6 @@ def _calculate_prob_full_house(needed3, needed2, cards3_in_deck, cards2_in_deck,
     total_outcomes = binom(total_unknown_in_deck, unknown_cards_num)
 
     return successful_outcomes / total_outcomes if total_outcomes > 0 else 0.0
-
-def _calculate_prob_straight_flush(needed, cards_in_deck, jokers_in_deck, other_cards_in_deck, unknown_cards_num):
-    return _calculate_prob_simple_set(needed, len(cards_in_deck), jokers_in_deck, other_cards_in_deck, unknown_cards_num)
-
 
 def calculate_prob(action_id, hand, common_hand, unknown_cards_num, rules, for_betting):
     set_details = get_set_details_from_action_id(action_id, rules.get("deck_size", 24))
@@ -296,18 +286,20 @@ def calculate_prob(action_id, hand, common_hand, unknown_cards_num, rules, for_b
         
         return _calculate_prob_two_pairs(needed1, needed2, cards1_in_deck, cards2_in_deck, jokers_in_deck, other_cards_in_deck, unknown_cards_num)
 
-    if "Straight" in set_type and "flush" not in set_type:
+    if "straight" in set_type.lower() and "flush" not in set_type:
         required_values = set(set_details["details"])
         
         present_values = {c[0] for c in known_cards if c[0] in required_values}
-        needed = len(required_values) - len(present_values) - jokers_in_play
-        if needed <= 0: return 1.0
+        needed_values = list(required_values - present_values)
         
-        cards_in_deck_counts = [4 - known_cards_counter.get(v, 0) for v in required_values if v not in present_values]
+        jokers_needed = len(needed_values) - jokers_in_play
+        if jokers_needed <= 0: return 1.0
+        
+        cards_in_deck_counts = [4 - known_cards_counter.get(v, 0) for v in needed_values]
         jokers_in_deck = total_jokers - known_jokers
         other_cards_in_deck = deck_size + rules.get("blanks", 0) - len(known_cards) + known_jokers - sum(cards_in_deck_counts)
         
-        return _calculate_prob_straight(needed, cards_in_deck_counts, jokers_in_deck, other_cards_in_deck, unknown_cards_num)
+        return _calculate_prob_straight(needed_values, cards_in_deck_counts, jokers_in_deck, other_cards_in_deck, unknown_cards_num)
 
     if set_type == "Flush":
         color_to_check = set_details["detail_1"]
@@ -339,17 +331,18 @@ def calculate_prob(action_id, hand, common_hand, unknown_cards_num, rules, for_b
         required_values = set(set_details["details"])
         color_to_check = set_details["detail_1"]
         
-        present_cards = {c for c in known_cards if c[0] in required_values and c[1] == color_to_check}
-        needed = len(required_values) - len(present_cards) - jokers_in_play
+        required_cards = {(v, color_to_check) for v in required_values}
+        
+        present_cards = {c for c in known_cards if c in required_cards}
+        needed = len(required_cards) - len(present_cards) - jokers_in_play
         if needed <= 0: return 1.0
         
-        cards_in_deck = [c for v in required_values for c in product([v], [color_to_check]) if c not in present_cards]
+        # Each needed card for a straight flush is unique, so there is only 1 of each in the deck.
+        cards_of_value_in_deck = len(required_cards) - len(present_cards)
         jokers_in_deck = total_jokers - known_jokers
-        other_cards_in_deck = deck_size + rules.get("blanks", 0) - len(known_cards) + known_jokers - len(cards_in_deck)
+        other_cards_in_deck = deck_size + rules.get("blanks", 0) - len(known_cards) + known_jokers - cards_of_value_in_deck
         
-        return _calculate_prob_straight_flush(needed, cards_in_deck, jokers_in_deck, other_cards_in_deck, unknown_cards_num)
-
-    return 0.0
+        return _calculate_prob_simple_set(needed, cards_of_value_in_deck, jokers_in_deck, other_cards_in_deck, unknown_cards_num)
 
 def get_bet_probabilities(game_state, for_betting=False, last_bet=None, specific_action_id=None):
     rules = game_state.get("rules", {})
