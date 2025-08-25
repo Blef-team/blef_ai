@@ -127,3 +127,9 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# IDE settings
+.vscode
+
+# AI strategy output
+cfr_ai/outputs
