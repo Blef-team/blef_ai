@@ -1,4 +1,3 @@
-import random
 from shared.ai import agent, actions
 from shared.probabilities import dynamic_probabilities
 from shared.api import gpt

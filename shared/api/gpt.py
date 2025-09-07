@@ -8,8 +8,6 @@ load_dotenv()
 
 # Fetch the OpenAI API key from environment
 api_key = os.getenv("OPENAI_API_KEY")
-base_prompt_24_cards = os,getenv("BASE_PROMPT_24_CARDS")
-base_prompt_32_cards = os,getenv("BASE_PROMPT_32_CARDS")
 
 # Initialize OpenAI client
 client = OpenAI(api_key=api_key)
