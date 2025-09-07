@@ -12,7 +12,7 @@ def format_prompt_game_state(game_state):
     return "" #TODO implement
 
 def format_prompt_bet_floor(bet_floor):
-    return "" #TODO implement
+    return f"Don't bet anything lower than {bet_floor}\n"
 
 def format_prompt_bet_probs(probabilities, generic=False):
     """
