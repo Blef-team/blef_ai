@@ -121,8 +121,8 @@ class GPTAgent(agent.Agent):
         rules = game_state.get("rules", {})
         game_rules = GameRules(rules.get("deck_size", 24))
         check_action_id = game_rules.check_action_id
-        
-        last_bet = game_state.get("history", [{}])[-1].get("action_id", None)
+        history = game_state.get("history", [])
+        last_bet = history[-1].get("action_id", None) if history else None
 
         # Set the bet floor - skip bets up to the next 100% certain bet, if any such higher bet exists
         bet_probs_generic = dynamic_probabilities.get_generic_bet_probabilities(game_state, last_bet=last_bet)
