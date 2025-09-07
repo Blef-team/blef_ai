@@ -2,6 +2,7 @@ import random
 from shared.ai import agent, actions
 from shared.probabilities import dynamic_probabilities
 from shared.api import gpt
+from shared.game_utils import GameRules, get_set_details_from_action_id
 
 
 base_prompt_24_cards = os,getenv("BASE_PROMPT_24_CARDS")
@@ -75,7 +76,7 @@ class GPTAgent(agent.Agent):
     @staticmethod
     def determine_action(game_state):
         rules = game_state.get("rules", {})
-        game_rules = dynamic_probabilities.GameRules(rules.get("deck_size", 24))
+        game_rules = GameRules(rules.get("deck_size", 24))
         check_action_id = game_rules.check_action_id
         
         last_bet = game_state.get("history", [{}])[-1].get("action_id", None)
