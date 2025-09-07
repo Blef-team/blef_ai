@@ -1,5 +1,5 @@
 import math
-from itertools import combinations, product
+from itertools import product
 from collections import Counter
 from shared.game_utils import GameRules, get_set_details_from_action_id
 

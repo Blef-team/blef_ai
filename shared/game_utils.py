@@ -1,4 +1,5 @@
 from functools import lru_cache
+from itertools import combinations
 
 
 @lru_cache(maxsize=2)
