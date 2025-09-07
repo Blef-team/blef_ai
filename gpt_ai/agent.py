@@ -14,11 +14,21 @@ def format_prompt_game_state(game_state):
 def format_prompt_bet_floor(bet_floor):
     return "" #TODO implement
 
-def format_prompt_bet_probs_betting(probs):
-    return "" #TODO implement
+def format_prompt_bet_probs(probabilities, generic=False):
+    """
+    Formats action probabilities into a string, excluding values < 0.0001.
 
-def format_prompt_bet_probs_generic(probs):
-    return "" #TODO implement
+    Returns:
+        str: Formatted string of action IDs and their probabilities (in percentage).
+    """
+    formatted_string = "Probabilities of each legal action ID\n"
+    if generic:
+        formatted_string = "Probabilities of each legal action ID, if you don’t know your cards\n"
+    for i, prob in enumerate(probabilities):
+        if prob < 0.0001:
+            continue
+        formatted_string += f"{i} {prob*100:.2f}%\n"
+    return formatted_string
 
 def prompt_action(game_state, bet_probs_betting, bet_probs_generic, bet_floor=None, custom_prompt_postfix=""):
     """
@@ -38,8 +48,8 @@ def prompt_action(game_state, bet_probs_betting, bet_probs_generic, bet_floor=No
 
     prompt += format_prompt_game_state(game_state)
     prompt += format_prompt_bet_floor(bet_floor) if bet_floor else ""
-    prompt += format_prompt_bet_probs_betting(bet_probs_betting)
-    prompt += format_prompt_bet_probs_generic(bet_probs_generic)
+    prompt += format_prompt_bet_probs(bet_probs_betting)
+    prompt += format_prompt_bet_probs(bet_probs_generic, generic=True)
 
     response = gpt.get_response(prompt)
 
