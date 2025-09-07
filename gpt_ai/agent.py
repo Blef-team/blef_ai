@@ -8,12 +8,15 @@ from shared.game_utils import GameRules, get_set_details_from_action_id
 base_prompt_24_cards = os,getenv("BASE_PROMPT_24_CARDS")
 base_prompt_32_cards = os,getenv("BASE_PROMPT_32_CARDS")
 
+def format_set_details(action_id):
+    set_details = get_set_details_from_action_id(action_id)
+    return f"{set_details.get("set_type","")}, {set_details.get("detail_1","")}, {set_details.get("detail_2","")}"
 
 def format_prompt_game_state(game_state):
     return "" #TODO implement
 
 def format_prompt_bet_floor(bet_floor):
-    return f"Don't bet anything lower than {bet_floor}\n"
+    return f"Don't bet anything lower than {bet_floor}, which is {get_formatted_set_details(action_id)}\n"
 
 def format_prompt_bet_probs(probabilities, generic=False):
     """
