@@ -27,7 +27,7 @@ def get_safe_default(game_state):
 
 def is_legal(action, game_state):
     check = get_check_id(game_state)
-    history = game.get("history", [])
+    history = game_state.get("history", [])
 
     # First, ensure the action is within the valid range
     if action not in range(check + 1):
