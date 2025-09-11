@@ -13,7 +13,7 @@ api_key = os.getenv("OPENAI_API_KEY")
 client = OpenAI(api_key=api_key)
 
 
-def get_response(input_text, model="gpt-5"):
+def get_response(input_text, model="gpt-5-nano"):
     """
         Function to get a response from the OpenAI API.
 
