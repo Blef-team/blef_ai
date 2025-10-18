@@ -106,6 +106,8 @@ def load_indexation():
         if not header:
             header = line
             continue
+        if not line.strip():
+            continue
         action_id, set_type, detail_1, detail_2 = line.split(",")
         indexation.append({"action_id": action_id,
                            "set_type": set_type,
@@ -116,6 +118,23 @@ def load_indexation():
 
 INDEXATION = load_indexation()
 
+def get_set_details_from_action_id(action_id, deck_size=24):
+    """Return set details dict based on local INDEXATION for deck_size 24.
+    For future 32-card support, extend INDEXATION_CSV accordingly.
+    { 'set_type': str, 'detail_1': int|None, 'detail_2': int|None }
+    """
+    action_id = int(action_id)
+    if deck_size != 24:
+        raise ValueError("Only deck_size=24 supported in local manager mapping.")
+    if not (0 <= action_id < len(INDEXATION)):
+        if action_id == CHECK:
+            return {'set_type':'Check'}
+        raise ValueError(f"Invalid action_id {action_id}")
+    row = INDEXATION[action_id]
+    d1 = int(row['detail_1']) if str(row['detail_1']).strip() != '' else None
+    d2 = int(row['detail_2']) if str(row['detail_2']).strip() != '' else None
+    return {'set_type': row['set_type'], 'detail_1': d1, 'detail_2': d2}
+
 
 def save(game, dir="games"):
     state_id = game["game_uuid"] + "_" + str(int(game['round_number']))
@@ -124,90 +143,142 @@ def save(game, dir="games"):
         json.dump(game, filehandle)
 
 
-def determine_set_existence(cards, action_id):
-    try:
-        action_id = int(action_id)
-        set_row = INDEXATION[action_id]
-        set_type = set_row["set_type"]
-        detail_1 = int(set_row["detail_1"]) if set_row["detail_1"] else None
-        detail_2 = int(set_row["detail_2"]) if set_row["detail_2"] else None
-        card_values = [card["value"] for card in cards]
-        card_colours = [card["colour"] for card in cards]
+def determine_set_existence(all_cards, action_id, rules=None, num_jokers=0):
+    """Check if a claimed set exists in the combined cards, allowing for jokers.
+    - all_cards: list of card dicts with keys 'value' and 'colour'
+    - action_id: int from local indexation (0..87) or CHECK
+    - rules: optional dict; only 'deck_size' used (must be 24 here)
+    - num_jokers: usable jokers (value == -1) available to the *bettor* (their hand + common)
+    """
+    rules = rules or {'deck_size': 24}
+    if action_id == CHECK:
+        raise ValueError("determine_set_existence called with CHECK action_id")
+    details = get_set_details_from_action_id(action_id, rules.get('deck_size', 24))
+    set_type = details['set_type']
+    d1 = details.get('detail_1')
+    d2 = details.get('detail_2')
 
-        if set_type == "High card":
-            return card_values.count(detail_1) >= 1
-        elif set_type == "Pair":
-            return card_values.count(detail_1) >= 2
-        elif set_type == "Two pairs":
-            return card_values.count(detail_1) >= 2 and card_values.count(detail_2) >= 2
-        elif set_type == "Small straight":
-            return card_values.count(0) > 0 and card_values.count(1) > 0 and card_values.count(2) > 0 and card_values.count(3) > 0 and card_values.count(4) > 0
-        elif set_type == "Big straight":
-            return card_values.count(1) > 0 and card_values.count(2) > 0 and card_values.count(3) > 0 and card_values.count(4) > 0 and card_values.count(5) > 0
-        elif set_type == "Great straight":
-            return card_values.count(0) > 0 and card_values.count(1) > 0 and card_values.count(2) > 0 and card_values.count(3) > 0 and card_values.count(4) > 0 and card_values.count(5) > 0
-        elif set_type == "Three of a kind":
-            return card_values.count(detail_1) >= 3
-        elif set_type == "Full house":
-            return card_values.count(detail_1) >= 3 and card_values.count(detail_2) >= 2
-        elif set_type == "Colour":
-            return card_colours.count(detail_1) >= 5
-        elif set_type == "Four of a kind":
-            return card_values.count(detail_1) >= 4
-        elif set_type == "Small flush":
-            relevant_values = [card["value"] for card in cards if card["colour"] == detail_1]
-            if not relevant_values:
-                return False
-            return relevant_values.count(0) > 0 and relevant_values.count(1) > 0 and relevant_values.count(2) > 0 and relevant_values.count(3) > 0 and relevant_values.count(4) > 0
-        elif set_type == "Big flush":
-            relevant_values = [card["value"] for card in cards if card["colour"] == detail_1]
-            if not relevant_values:
-                return False
-            return relevant_values.count(1) > 0 and relevant_values.count(2) > 0 and relevant_values.count(3) > 0 and relevant_values.count(4) > 0 and relevant_values.count(5) > 0
-        elif set_type == "Great flush":
-            relevant_values = [card["value"] for card in cards if card["colour"] == detail_1]
-            if not relevant_values:
-                return False
-            return relevant_values.count(0) > 0 and relevant_values.count(1) > 0 and relevant_values.count(2) > 0 and relevant_values.count(3) > 0 and relevant_values.count(4) > 0 and relevant_values.count(5) > 0
+    # Extract values and suits ignoring jokers (-1)
+    values = [int(c['value']) for c in all_cards if int(c.get('value')) >= 0]
+    suits = [int(c['colour']) for c in all_cards if int(c.get('value')) >= 0]
 
-        return False
+    def count_value(v): return sum(1 for x in values if x == v)
+    def count_suit(s): return sum(1 for sc in suits if sc == s)
+    def need_n(target, have): return max(0, target - have)
 
-    except Exception as err:
-        raise type(err)(f"{err} \n Failed in determine_set_existence")
+    # Straight rank sets for 24-deck (values 0..5)
+    small = [0,1,2,3,4]
+    big = [1,2,3,4,5]
+    great = [0,1,2,3,4,5]
+
+    if set_type == 'High card':
+        return need_n(1, count_value(d1)) <= num_jokers
+
+    if set_type == 'Pair':
+        return need_n(2, count_value(d1)) <= num_jokers
+
+    if set_type == 'Two pairs':
+        miss1 = need_n(2, count_value(d1))
+        miss2 = need_n(2, count_value(d2))
+        return miss1 + miss2 <= num_jokers
+
+    if set_type == 'Three of a kind':
+        return need_n(3, count_value(d1)) <= num_jokers
+
+    if set_type == 'Full house':
+        miss_trips = need_n(3, count_value(d1))
+        miss_pair = need_n(2, count_value(d2))
+        return miss_trips + miss_pair <= num_jokers
+
+    if set_type in ('Colour','Flush'):
+        return need_n(5, count_suit(d1)) <= num_jokers
+
+    if set_type == 'Four of a kind':
+        return need_n(4, count_value(d1)) <= num_jokers
+
+    # Straights (any suits)
+    if set_type == 'Small straight':
+        present = set(v for v in values if v in small)
+        return len(set(small) - present) <= num_jokers
+
+    if set_type == 'Big straight':
+        present = set(v for v in values if v in big)
+        return len(set(big) - present) <= num_jokers
+
+    if set_type == 'Great straight':
+        present = set(v for v in values if v in great)
+        return len(set(great) - present) <= num_jokers
+
+    # Straight flushes (CSV names: Small/Big/Great flush) per suit d1
+    if set_type in ('Small flush','Straight flush (small)'):
+        suit_vals = [int(c['value']) for c in all_cards if int(c.get('value')) >= 0 and int(c['colour']) == d1]
+        present = set(v for v in suit_vals if v in small)
+        return len(set(small) - present) <= num_jokers
+
+    if set_type in ('Big flush','Straight flush (big)'):
+        suit_vals = [int(c['value']) for c in all_cards if int(c.get('value')) >= 0 and int(c['colour']) == d1]
+        present = set(v for v in suit_vals if v in big)
+        return len(set(big) - present) <= num_jokers
+
+    if set_type in ('Great flush','Straight flush'):
+        suit_vals = [int(c['value']) for c in all_cards if int(c.get('value')) >= 0 and int(c['colour']) == d1]
+        present = set(v for v in suit_vals if v in great)
+        return len(set(great) - present) <= num_jokers
+
+    return False
 
 
 def draw_cards(players):
-    possible_cards = product(range(6), range(4))
-    all_cards_raw = sample(list(possible_cards), sum(int(p["n_cards"]) for p in players))
-    all_cards = [{"value": tup[0], "colour": tup[1]} for tup in all_cards_raw]
-    card_iterator = iter(all_cards)
+    # Create 24-card deck: values 0..5 (6 ranks) x 4 suits (colours 0..3)
+    # If you want jokers locally, you can append {'value': -1, 'colour': -1} to the deck before shuffling.
+    deck = [{"value": v, "colour": c} for v, c in product(range(6), range(4))]
+    shuffle(deck)
     hands = []
-    for player in players:
-        player_hand = list(islice(card_iterator, 0, int(player["n_cards"])))
-        hands.append({"nickname": player['nickname'], "hand": player_hand})
+    for p in players:
+        if p["n_cards"] == 0:
+            continue
+        hand = list(islice(deck, p["n_cards"]))
+        del deck[:p["n_cards"]]
+        hands.append({"nickname": p["nickname"], "hand": hand})
     return hands
 
 
+def get_player_by_nickname(players, nickname):
+    filtered_players = [p for p in players if p["nickname"] == nickname]
+    if filtered_players:
+        return filtered_players[0]
+
+
+def find_next_active_player(players, nickname):
+    # Find the index of the current player
+    current_idx = next((i for i, p in enumerate(players) if p["nickname"] == nickname), None)
+    if current_idx is None:
+        return None
+    # Iterate through players to find the next with n_cards > 0
+    n = len(players)
+    for i in range(1, n + 1):
+        candidate = players[(current_idx + i) % n]
+        if candidate["n_cards"] > 0:
+            return candidate
+    return None
+
+
 def arrange_players(players):
-    """
-        Order the human and AI players
-        for optimal gameplay
-    """
-    num_total = len(players)
-    num_ais = sum(1 for p in players if p.get("ai_agent"))
-    offset = choice(range(num_total))
+    # First, include only active players
+    active_players = [p for p in players if p.get("n_cards", 0) > 0]
+    if not active_players:
+        return []
 
-    ai_positions_from_zero = [floor(i * num_total / num_ais) for i in range(num_ais)]
-    ai_positions = [(i + offset) % num_total for i in ai_positions_from_zero]
-    ai_players = [p for p in players if p.get("ai_agent")]
+    # Split human and AI players
+    human_players = [p for p in active_players if p.get("nickname", "").startswith("HUMAN")]
+    ai_players    = [p for p in active_players if not p.get("nickname", "").startswith("HUMAN")]
 
-    human_players = [p for p in players if not p.get("ai_agent")]
-    shuffle(human_players)
-
+    # Ensure alternating sequence starting with the most numerous type if needed
     players = []
-
-    for i in range(num_total):
-        if i in ai_positions and ai_players:
+    while human_players or ai_players:
+        if len(human_players) >= len(ai_players) and human_players:
+            players.append(human_players.pop(0))
+        elif ai_players:
             players.append(ai_players.pop(0))
         elif human_players:
             players.append(human_players.pop(0))
@@ -217,13 +288,17 @@ def arrange_players(players):
 def create_game(n_agents, verbose=False):
     if n_agents < 2:
         raise ValueError("n_agents < 2")
+    if n_agents > 8:
+        raise ValueError("n_agents > 8")
     game_uuid = str(uuid.uuid4())
     players = [{"nickname": str(i), "n_cards": 1} for i in range(n_agents)]
     return {
         "game_uuid": game_uuid,
         "status": "Running",
+        "rules": {"deck_size": 24},
+        "common_hand": [],
         "round_number": 1,
-        "max_cards": floor(24 / n_players) if len(players) > 2 else 11,
+        "max_cards": floor(24 / len(players)) if len(players) > 2 else 11,
         "hands": draw_cards(players),
         "players": players,
         "cp_nickname": players[0]["nickname"],
@@ -231,26 +306,28 @@ def create_game(n_agents, verbose=False):
     }
 
 
-def get_player_by_nickname(players, nickname):
-    filtered_players = [p for p in players if p["nickname"] == nickname]
-    if filtered_players:
-        return filtered_players[0]
-
-
-def find_next_active_player(players, cp_nickname):
-    active_players = [player for player in players if player["n_cards"] != 0 or player["nickname"] == cp_nickname]
-    current_player_order = [i for i, player in enumerate(active_players) if player["nickname"] == cp_nickname][0]
-    next_active_player = (active_players * 2)[current_player_order + 1]
-    return next_active_player
-
-
 def handle_check(game):
     cp_nickname = game["cp_nickname"]
-    cards = [card for hand in game["hands"] for card in hand["hand"]]
-    set_exists = determine_set_existence(cards, game["history"][-2]["action_id"])
+
+    # Identify bettor (the one being checked) = previous action
+    bettor_nickname = game["history"][-2]["player"]
+
+    # All cards in round = all players' hands + common hand
+    all_cards = [card for hand in game["hands"] for card in hand["hand"]]
+    all_cards.extend(game.get("common_hand", []))
+
+    # Count usable jokers: only from bettor's hand + common hand
+    bettor_hand = next((h["hand"] for h in game["hands"] if h["nickname"] == bettor_nickname), [])
+    num_jokers = sum(1 for c in bettor_hand if int(c.get("value")) == -1)
+    num_jokers += sum(1 for c in game.get("common_hand", []) if int(c.get("value")) == -1)
+
+    set_exists = determine_set_existence(all_cards, game["history"][-2]["action_id"], game.get("rules", {}), num_jokers)
+
     if set_exists:
+        # Checker loses
         losing_player = get_player_by_nickname(game["players"], game["history"][-1]["player"])
     else:
+        # Bettor loses
         losing_player = get_player_by_nickname(game["players"], game["history"][-2]["player"])
 
     game["history"].append({"player": losing_player["nickname"], "action_id": 89})
@@ -259,24 +336,25 @@ def handle_check(game):
     # Store the last round separately
     save(game)
 
+    # Penalize loser
     losing_player["n_cards"] += 1
-    # If a player surpasses max cards, make them inactive (set their n_cards to 0) and either finish the game or set up next round
+    # Elimination if exceeding max_cards
     if losing_player["n_cards"] > game["max_cards"]:
         losing_player["n_cards"] = 0
         # Check if game is finished
         if sum(p["n_cards"] > 0 for p in game["players"]) == 1:
             game["status"] = "Finished"
         else:
-            # If the checking player was eliminated, figure out the next player
-            # Otherwise the current player doesn't change
+            # If the checking player was eliminated, figure out the next player; otherwise keep CP
             if losing_player["nickname"] == cp_nickname:
                 game["cp_nickname"] = find_next_active_player(game["players"], cp_nickname)["nickname"]
             else:
                 game["cp_nickname"] = cp_nickname
     else:
-        # If no one is kicked out, picking the next player is easier
+        # If no one is kicked out, next player is the loser (as they take first in next round)
         game["cp_nickname"] = losing_player["nickname"]
 
+    # New round: reset history, re-deal
     game["round_number"] += 1
     game["history"] = []
     game["hands"] = draw_cards(game["players"])
@@ -285,15 +363,37 @@ def handle_check(game):
 
 
 def play(game, action_id, verbose=False):
+    # Validate action_id
+    try:
+        action_id = int(action_id)
+    except (TypeError, ValueError):
+        raise ValueError(f"action_id must be int, got {action_id}")
+    # Legality checks
+    if action_id == CHECK:
+        if not game["history"]:
+            raise ValueError("Cannot CHECK as first action; no bet to check.")
+        last = game["history"][-1]["action_id"]
+        if last == CHECK:
+            raise ValueError("Consecutive CHECK not allowed.")
+    else:
+        if not (0 <= action_id < CHECK):
+            raise ValueError(f"Bet action_id out of range: {action_id}")
+        if game["history"]:
+            last = game["history"][-1]["action_id"]
+            if last == CHECK:
+                raise ValueError("Cannot bet immediately after a CHECK within the same unresolved round.")
+            if action_id <= last:
+                raise ValueError(f"Illegal bet {action_id}: must be strictly greater than previous bet {last}.")
+    # Append to history
     game["history"].append({"player": game["cp_nickname"], "action_id": action_id})
 
-    if action_id != 88:
+    if action_id != CHECK:
         move_name = INDEXATION[action_id]['set_type']
         if verbose:
             print(f"player {game['cp_nickname']} plays {move_name}")
         game["cp_nickname"] = find_next_active_player(game["players"], game["cp_nickname"])["nickname"]
 
-    if action_id == 88:
+    if action_id == CHECK:
         if verbose:
             print(f"player {game['cp_nickname']} checks")
         handle_check(game)
