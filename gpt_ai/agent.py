@@ -5,8 +5,8 @@ from shared.api import gpt
 from shared.game_utils import GameRules, get_set_details_from_action_id
 
 
-base_prompt_24_cards = os,getenv("BASE_PROMPT_24_CARDS")
-base_prompt_32_cards = os,getenv("BASE_PROMPT_32_CARDS")
+base_prompt_24_cards = os.getenv("BASE_PROMPT_24_CARDS")
+base_prompt_32_cards = os.getenv("BASE_PROMPT_32_CARDS")
 
 def format_card(card, deck_size=24):
     values_24 = {i: v for i, v in enumerate(["9", "10", "J", "Q", "K", "A"])}
@@ -15,7 +15,7 @@ def format_card(card, deck_size=24):
     suits = {0: "♣", 1: "♦", 2: "♥", 3: "♠"}
     return f"{values.get(card['value'], '?')}{suits.get(card['colour'], '?')}"
 
-def format_set_details(action_id):
+def get_formatted_set_details(action_id):
     set_details = get_set_details_from_action_id(action_id)
     return f"{set_details.get('set_type','')}, {set_details.get('detail_1','')}, {set_details.get('detail_2','')}"
 
@@ -53,10 +53,10 @@ def format_prompt_game_state(game_state):
     else:
         lines.append("Action History: None")
 
-    return "\n".join(lines)
+    return "\n".join(lines)+"\n"
 
 def format_prompt_bet_floor(bet_floor):
-    return f"Don't bet anything lower than {bet_floor}, which is {get_formatted_set_details(action_id)}\n"
+    return f"Don't bet anything lower than {bet_floor}, which is {get_formatted_set_details(bet_floor)}\n"
 
 def format_prompt_bet_probs(probabilities, generic=False):
     """
@@ -74,7 +74,7 @@ def format_prompt_bet_probs(probabilities, generic=False):
         formatted_string += f"{i} {prob*100:.2f}%\n"
     return formatted_string
 
-def prompt_action(game_state, bet_probs_betting, bet_probs_generic, bet_floor=None, custom_prompt_postfix=""):
+def prompt_action(game_state, bet_probs_betting, bet_probs_generic, last_bet, prob_last_bet_exists, bet_floor=None, custom_prompt_postfix=""):
     """
         Prompt GPT and return a valid action ID.
         
@@ -94,7 +94,7 @@ def prompt_action(game_state, bet_probs_betting, bet_probs_generic, bet_floor=No
     prompt += format_prompt_bet_floor(bet_floor) if bet_floor else ""
     prompt += format_prompt_bet_probs(bet_probs_betting)
     prompt += format_prompt_bet_probs(bet_probs_generic, generic=True)
-
+    prompt += f"Last bet {last_bet} ({format_set_details(last_bet)}) probability: {prob_last_bet_exists*100:.2f}%\n"
     response = gpt.get_response(prompt)
 
     action_id = None
@@ -130,8 +130,9 @@ class GPTAgent(agent.Agent):
         effective_last_bet = max(last_bet if last_bet is not None else -1, bet_floor - 1)
 
         bet_probs_betting = dynamic_probabilities.get_bet_probabilities(game_state, for_betting=True, last_bet=effective_last_bet)
+        prob_last_bet_exists = dynamic_probabilities.get_bet_probabilities(game_state, for_betting=False, specific_action_id=last_bet)
 
-        return prompt_action(game_state, bet_probs_betting, bet_probs_generic, bet_floor=bet_floor)
+        return prompt_action(game_state, bet_probs_betting, bet_probs_generic, last_bet, prob_last_bet_exists, bet_floor=bet_floor)
 
     def run(self):
         """
