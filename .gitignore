@@ -26,6 +26,7 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+python/
 
 # PyInstaller
 #  Usually these files are written by a python script from a template
@@ -133,3 +134,6 @@ dmypy.json
 
 # AI strategy output
 cfr_ai/outputs
+
+# Game orchestration
+games/
