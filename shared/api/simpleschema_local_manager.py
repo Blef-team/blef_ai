@@ -306,7 +306,7 @@ def create_game(n_agents, verbose=False):
     }
 
 
-def handle_check(game):
+def handle_check(game, save_dir="games"):
     cp_nickname = game["cp_nickname"]
 
     # Identify bettor (the one being checked) = previous action
@@ -334,7 +334,7 @@ def handle_check(game):
     game["cp_nickname"] = None
 
     # Store the last round separately
-    save(game)
+    save(game, dir=save_dir)
 
     # Penalize loser
     losing_player["n_cards"] += 1
@@ -359,10 +359,10 @@ def handle_check(game):
     game["history"] = []
     game["hands"] = draw_cards(game["players"])
 
-    save(game)
+    save(game, dir=save_dir)
 
 
-def play(game, action_id, verbose=False):
+def play(game, action_id, save_dir="games", verbose=False):
     # Validate action_id
     try:
         action_id = int(action_id)
@@ -396,4 +396,4 @@ def play(game, action_id, verbose=False):
     if action_id == CHECK:
         if verbose:
             print(f"player {game['cp_nickname']} checks")
-        handle_check(game)
+        handle_check(game, save_dir=save_dir)

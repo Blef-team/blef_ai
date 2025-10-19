@@ -3,6 +3,8 @@
 # RUN FROM REPOSITORY ROOT /
 
 # Adapter for NFSP <-> simpleschema_local_manager with legality, jokers, and common cards.
+import os
+from datetime import datetime
 import math
 from typing import Tuple, Dict, List
 
@@ -309,7 +311,7 @@ class MyEnv:
         self._last_obs, self._last_mask = obs, mask
         return obs, mask, pid
 
-    def step(self, action: int):
+    def step(self, action: int, game_save_dir="games"):
         """
         Apply action for the current player.
         - If action is illegal (shouldn't happen if mask is used), return same state + small penalty.
@@ -322,7 +324,7 @@ class MyEnv:
 
         # Try to act; catch and handle illegal attempts gracefully.
         try:
-            gm.play(self.game, int(action), verbose=self.verbose)
+            gm.play(self.game, int(action), save_dir=game_save_dir, verbose=self.verbose)
         except Exception as e:
             # Return same obs/mask/pid with a penalty; do NOT advance player.
             obs = self._last_obs.clone()
@@ -386,9 +388,18 @@ agent = NFSPAgent(
     ),
 )
 
+
+# Get the current timestamp and format it
+postfix = datetime.now().strftime("%Y%m%d%H%M%S")
+model_save_path = f"nfsp_blef_{postfix}.pt"
+game_save_dir = f"games_{postfix}"
+if not os.path.exists(game_save_dir):
+    os.makedirs(game_save_dir)
+
 agent.train_from_selfplay(
     env,
-    total_steps=2_000,  # 200,000   # start smaller to validate the loop
-    log_every=5,      # 5,000
-    save_path="nfsp_blef.pt",
+    total_steps=200_000,   # start smaller to validate the loop
+    log_every=5_000,
+    save_path=model_save_path,
+    game_save_dir=game_save_dir
 )

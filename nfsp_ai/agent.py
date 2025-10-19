@@ -282,7 +282,7 @@ class NFSPAgent:
         frac = min(1.0, s / max(1, self.cfg.eps_decay_steps))
         return self.cfg.eps_end + (1.0 - frac) * (self.cfg.eps_start - self.cfg.eps_end)
 
-    def train_from_selfplay(self, env: TurnEnvAdapter, total_steps: int = 2_000_000, log_every: int = 10000, save_path: str = "nfsp_blef.pt"):
+    def train_from_selfplay(self, env: TurnEnvAdapter, total_steps: int = 2_000_000, log_every: int = 10000, save_path: str = "nfsp_blef.pt", game_save_dir="games"):
         obs, mask, pid = env.reset()
         obs, mask = obs.to(self.device), mask.to(self.device)
 
@@ -291,7 +291,7 @@ class NFSPAgent:
             eps = self._epsilon()
 
             action = self.act(obs, mask, use_br=use_br, epsilon=eps)
-            nobs, nmask, reward, done, _ = env.step(action)
+            nobs, nmask, reward, done, _ = env.step(action, game_save_dir=game_save_dir)
             nobs, nmask = nobs.to(self.device), nmask.to(self.device)
 
             # RL buffer: BR transitions only

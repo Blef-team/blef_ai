@@ -136,4 +136,7 @@ dmypy.json
 cfr_ai/outputs
 
 # Game orchestration
-games/
+games*/
+
+# pytorch models
+*.pt
