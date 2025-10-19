@@ -10,6 +10,7 @@ import numpy as np
 import torch
 
 import shared.api.simpleschema_local_manager as gm                 # local manager
+from shared.probabilities.dynamic_probabilities import get_bet_probabilities, get_generic_bet_probabilities
 from nfsp_ai.agent import NFSPAgent, NFSPConfig          # your NFSP implementation
 
 CHECK = gm.CHECK
@@ -83,64 +84,195 @@ def _legal_action_mask(game: dict) -> torch.Tensor:
 
 # ---------- Observation encoding ----------
 
+HIST_DIM = ACT_DIM - 1  # 88 (0..87), exclude CHECK channel for history & priors per your spec
+
+def _seat_index(players: List[dict], nick: str) -> int:
+    for i, p in enumerate(players or []):
+        if p.get("nickname") == nick:
+            return i
+    return 0
+
+def _rotate_list(xs: List[int], k: int) -> List[int]:
+    if not xs:
+        return xs
+    k %= len(xs)
+    return xs[k:] + xs[:k]
+
+def _rules_total_jokers(rules: dict) -> int:
+    """
+    Total possible jokers per rules (not just seen on table).
+    Accepts either:
+      - rules["jokers"] as int, or
+      - rules["jokers"] as dict with "num"
+    Fallback: 0
+    """
+    j = rules.get("jokers", 0)
+    if isinstance(j, dict):
+        return int(j.get("num", 0))
+    return int(j)
+
+def _rules_total_blanks(rules: dict) -> int:
+    """Total possible blanks per rules (not just seen on table)."""
+    return int(rules.get("blanks", 0))
+
+def _card_idx_24(value: int, colour: int) -> int:
+    """
+    Map (value, colour) to [0..23] = value*4 + colour.
+    Ignore jokers (-1,-1) and blanks (-2,-2) by returning -1.
+    """
+    if value < 0 or colour < 0:
+        return -1
+    if value >= N_VALUES or colour >= N_COLOURS:
+        return -1
+    return value * N_COLOURS + colour
+
+def _multi_hot_cards24_from_ints(cards: List[dict]) -> np.ndarray:
+    vec = np.zeros((HAND_VEC_DIM,), dtype=np.float32)
+    for c in cards or []:
+        v = int(c.get("value", -2))
+        s = int(c.get("colour", -2))
+        idx = _card_idx_24(v, s)
+        if idx >= 0:
+            vec[idx] = 1.0
+    return vec
+
+def _count_jokers_from_ints(cards: List[dict]) -> int:
+    return sum(1 for c in (cards or []) if int(c.get("value", -2)) == -1)
+
+def _count_blanks_from_ints(cards: List[dict]) -> int:
+    return sum(1 for c in (cards or []) if int(c.get("value", -2)) == -2)
+
+def _current_hand_int(game: dict, nick: str) -> List[dict]:
+    for h in game.get("hands", []) or []:
+        if h.get("nickname") == nick:
+            return h.get("hand", []) or []
+    return []
+
+def _common_hand_int(game: dict) -> List[dict]:
+    return game.get("common_hand", []) or []
+
+def _round_history_action_ids_88(game: dict) -> List[int]:
+    """
+    Return action_ids in this round, clipped to [0..87].
+    We assume game['history'] contains current round only (as in your example).
+    """
+    ids = []
+    for ev in game.get("history", []) or []:
+        try:
+            a = int(ev.get("action_id"))
+            if 0 <= a < HIST_DIM:
+                ids.append(a)
+        except Exception:
+            continue
+    return ids
+
 def vectorize_obs(game: dict, nick: str) -> torch.Tensor:
     """
-    Observation for current player:
-      - 24-dim one-hot for private hand ranks*suits (ignores jokers)
-      - 1-dim private joker count
-      - 1-dim common-hand size
+    Updated observation for current player (nick):
+      - 24-dim multi-hot for private hand ranks*suits (ignores jokers & blanks)
+      - 1-dim total joker count (possible by rules, not just seen)
+      - 1-dim private joker count (in my hand)
       - 1-dim common-hand joker count
-      - 8-dim public n_cards per seat (padded)
-      - 1-dim round number (scaled)
-      - 1-dim max_cards (scaled)
-      - 1-dim deck_size (scaled; 24 default)
-      - 1-dim current-player seat index (scaled)
-      - 1-dim last bet action_id (scaled -1..87 -> 0..1)
-      - 1-dim my hand size / 11
-    Total dim = 24 + 1 + 1 + 1 + 8 + 6 = 41
+      - 24-dim multi-hot common-hand ranks*suits (ignores jokers & blanks)
+      - 8-dim public n_cards per seat (padded/rotated so this player is seat 0)
+      - 1-dim round number (scaled by rules.get('max_rounds', 4))
+      - 88-dim multi-hot of actions taken in THIS round
+      - 88-dim prior probabilities: p(action exists | private hand, rules)
+      - 88-dim prior probabilities: p(action exists | public counts/common hand/rules)
+      - 1-dim total blanks (possible by rules, not just seen)
+
+    Total dim = 24 + 1 + 1 + 1 + 24 + 8 + 1 + 88 + 88 + 88 + 1 = 325
     """
-    rules = game.get("rules", {"deck_size": 24})
-    deck_size = float(rules.get("deck_size", 24))
+    rules = game.get("rules", {}) or {}
+    players = game.get("players", []) or []
 
-    # Private hand (24 ignoring jokers)
-    hand = _current_hand(game, nick)
-    hand_vec = np.zeros((HAND_VEC_DIM,), dtype=np.float32)
-    for c in hand:
-        v, col = int(c["value"]), int(c["colour"])
-        if v >= 0:
-            hand_vec[v * N_COLOURS + col] = 1.0
+    # Hands
+    my_hand = _current_hand_int(game, nick)
+    common  = _common_hand_int(game)
 
-    # Joker & common stats
-    my_jokers = float(_count_jokers(hand))
-    common = game.get("common_hand", []) or []
-    common_size = float(len(common))
-    common_jokers = float(_count_jokers(common))
+    my_vec24      = _multi_hot_cards24_from_ints(my_hand)     # 24
+    common_vec24  = _multi_hot_cards24_from_ints(common)      # 24
+    my_jokers     = float(_count_jokers_from_ints(my_hand))   # 1
+    common_jokers = float(_count_jokers_from_ints(common))    # 1
+    total_jokers  = float(_rules_total_jokers(rules))         # 1
+    total_blanks  = float(_rules_total_blanks(rules))         # 1
 
-    # Public per-seat counts (padded to 8)
-    counts = [int(p["n_cards"]) for p in game.get("players", [])]
-    counts = (counts + [0] * (MAX_PLAYERS - len(counts)))[:MAX_PLAYERS]
-    counts = np.array(counts, dtype=np.float32)
+    # Seat counts rotated so current player is seat 0
+    my_seat = _seat_index(players, game.get("cp_nickname", nick))
+    counts  = [int(p.get("n_cards", 0)) for p in players]
+    counts  = (counts + [0] * (MAX_PLAYERS - len(counts)))[:MAX_PLAYERS]
+    counts  = _rotate_list(counts, my_seat)
+    counts8 = np.asarray(counts[:MAX_PLAYERS], dtype=np.float32)     # 8
 
-    # Meta scalars
-    round_num = float(game.get("round_number", 1))
-    max_cards = float(game.get("max_cards", 11))
-    cp_idx = float(_nickname_to_idx(game["players"], game.get("cp_nickname", "")))
-    last_bet = _last_bet_action_id(game)  # -1 if none
-    meta = np.array([
-        my_jokers / 4.0,                 # safe small scale
-        common_size / 6.0,
-        common_jokers / 4.0,
-        round_num / 40.0,
-        max_cards / 20.0,
-        deck_size / 40.0,                # 24 -> 0.6
-        cp_idx / max(1, len(game.get("players", [])) - 1),
-        (last_bet + 1.0) / ACT_DIM,      # -1..88 -> 0..1
-        float(len(hand)) / 11.0,
-    ], dtype=np.float32)
+    # Round scaling (fallback to 1 if not present)
+    cur_round  = int(game.get("round_number", 1))
+    max_rounds = int(rules.get("max_rounds", 4))
+    round_scaled = np.float32(min(max(cur_round / max(1, max_rounds), 0.0), 1.0))  # 1
 
-    obs = np.concatenate([hand_vec, counts, meta], axis=0)
+    # History (88)
+    hist_ids = _round_history_action_ids_88(game)
+    hist88 = np.zeros((HIST_DIM,), dtype=np.float32)
+    if hist_ids:
+        hist88[np.unique(hist_ids)] = 1.0
+
+    # Private prior: depends on my hand and rules (for_betting=True)
+    pvt_prior = get_bet_probabilities(
+        game_state=game,
+        for_betting=True,
+        last_bet=_last_bet_action_id(game),
+    )
+    pvt_prior = np.asarray(pvt_prior, dtype=np.float32)
+
+    # Public prior: depends only on public information
+    pub_prior = get_generic_bet_probabilities(
+        game_state=game,
+        last_bet=_last_bet_action_id(game),
+    )
+    pub_prior = np.asarray(pub_prior, dtype=np.float32)
+
+    # --- Strict checks ---
+    if pvt_prior.shape != (HIST_DIM,):
+        raise ValueError(
+            f"get_bet_probabilities() returned shape {pvt_prior.shape}, expected {(HIST_DIM,)}"
+        )
+    if pub_prior.shape != (HIST_DIM,):
+        raise ValueError(
+            f"get_generic_bet_probabilities() returned shape {pub_prior.shape}, expected {(HIST_DIM,)}"
+        )
+
+    # Validate that all values are finite and in [0, 1]
+    if not np.isfinite(pvt_prior).all():
+        raise ValueError("get_bet_probabilities() returned non-finite values")
+    if not np.isfinite(pub_prior).all():
+        raise ValueError("get_generic_bet_probabilities() returned non-finite values")
+
+    if not ((0.0 <= pvt_prior).all() and (pvt_prior <= 1.0).all()):
+        raise ValueError("get_bet_probabilities() returned values outside [0, 1]")
+    if not ((0.0 <= pub_prior).all() and (pub_prior <= 1.0).all()):
+        raise ValueError("get_generic_bet_probabilities() returned values outside [0, 1]")
+
+
+    parts = [
+        my_vec24,                                 # 24
+        np.asarray([total_jokers], dtype=np.float32),    # 1
+        np.asarray([my_jokers], dtype=np.float32),       # 1
+        np.asarray([common_jokers], dtype=np.float32),   # 1
+        common_vec24,                             # 24
+        counts8,                                  # 8
+        np.asarray([round_scaled], dtype=np.float32),    # 1
+        hist88,                                   # 88
+        pvt_prior,                                # 88
+        pub_prior,                                # 88
+        np.asarray([total_blanks], dtype=np.float32),    # 1
+    ]
+
+    obs = np.concatenate(parts, axis=0).astype(np.float32)
+
+    # Hard assert schema to catch drift early
+    if obs.shape[0] != 325:
+        raise ValueError(f"vectorize_obs produced dim {obs.shape[0]}, expected 325")
+
     return torch.from_numpy(obs)
-
 
 # ---------- Environment Adapter ----------
 
