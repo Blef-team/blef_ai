@@ -355,7 +355,6 @@ class MyEnv:
 
             loser = loser_candidates[0] if loser_candidates else None
             reward = 1.0 if (loser is not None and loser != actor_nick) else -1.0
-            done = True
 
         # Game finished? Mark terminal regardless of action.
         if self.game.get("status") == "Finished" and status_before != "Finished":
