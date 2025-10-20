@@ -23,6 +23,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+# Baseline strategy for evaluation
+from conservative_ai.agent import ConservativeAgent
+
+
 # Logging, metrics
 
 def _masked_entropy(logits: torch.Tensor, mask: torch.Tensor) -> float:
@@ -34,31 +38,40 @@ def _masked_entropy(logits: torch.Tensor, mask: torch.Tensor) -> float:
     return float(ent.mean().item())
 
 @torch.no_grad()
+@torch.no_grad()
 def _evaluate_policy(agent, env_source, episodes: int = 200) -> dict:
-    """
-    Eval with average policy, greedy (no exploration).
-    env_source can be a TurnEnvAdapter instance or a callable returning one.
-    """
-    total_reward, total_len, wins = 0.0, 0, 0
+    wins = total_r = total_len = 0
     for _ in range(episodes):
-        env = env_source() if callable(env_source) else env_source
+        env = env_source()
         obs, mask, pid = env.reset()
-        done = False
-        ep_reward, steps = 0.0, 0
+        done, ep_r, steps = False, 0.0, 0
+
         while not done:
-            a = agent.select_action(obs, mask, use_average_policy=True, greedy=True)
-            obs, mask, r, done, info = env.step(a)
-            ep_reward += r
+            cp = env.game["cp_nickname"]
+            if cp == env._ref_nick:
+                a = agent.select_action(obs, mask, use_average_policy=True, greedy=True)
+            else:
+                # baseline acts
+                a = ConservativeAgent.determine_action(env.game)
+                # fallback for illegal/None
+                if a is None or mask[int(a)] == 0:
+                    legal = mask.nonzero(as_tuple=False).view(-1).tolist()
+                    a = random.choice(legal) if legal else 0
+
+            obs, mask, r, done, _ = env.step(int(a))
+            ep_r += r
             steps += 1
-        total_reward += ep_reward
+
+        total_r += ep_r
         total_len += steps
-        # If Blef is zero-sum and reward>0 implies a "win" for the learning player:
-        wins += (ep_reward > 0)
+        wins += (ep_r > 0)
+
     return {
-        "avg_reward": total_reward / episodes,
+        "avg_reward": total_r / episodes,
         "avg_len": total_len / episodes,
-        "win_rate": wins / episodes
+        "win_rate": wins / episodes,
     }
+
 
 class _CsvLogger:
     def __init__(self, path: str, header: list[str]):
