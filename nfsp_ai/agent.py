@@ -201,6 +201,41 @@ class ReplayBuffer:
         return (self.obs[idx], self.mask[idx], self.act[idx], self.rew[idx],
                 self.nobs[idx], self.nmsk[idx], self.done[idx])
 
+    def state_dict(self) -> dict:
+        filled = int(self.size)
+        return {
+            "capacity": self.capacity,
+            "ptr": int(self.ptr),
+            "size": filled,
+            "obs": self.obs[:filled].cpu(),
+            "mask": self.mask[:filled].cpu(),
+            "act": self.act[:filled].cpu(),
+            "rew": self.rew[:filled].cpu(),
+            "nobs": self.nobs[:filled].cpu(),
+            "nmsk": self.nmsk[:filled].cpu(),
+            "done": self.done[:filled].cpu(),
+        }
+
+    def load_state_dict(self, state: dict):
+        self.ptr = int(state.get("ptr", 0))
+        self.size = min(int(state.get("size", 0)), self.capacity)
+        filled = self.size
+        for name, tensor in (
+            ("obs", self.obs),
+            ("mask", self.mask),
+            ("act", self.act),
+            ("rew", self.rew),
+            ("nobs", self.nobs),
+            ("nmsk", self.nmsk),
+            ("done", self.done),
+        ):
+            src = state.get(name)
+            if src is None or filled == 0:
+                tensor.zero_()
+            else:
+                tensor.zero_()
+                tensor[:filled] = src.to(self.device)
+
 class ReservoirSL:
     """True reservoir sampling (Vitter) for empirical average policy (one-hot actions)."""
     def __init__(self, capacity: int, obs_dim: int, act_dim: int, device):
@@ -219,7 +254,9 @@ class ReservoirSL:
             if j > self.capacity:
                 return
             i = j - 1
-        self.obs[i], self.mask[i], self.ta[i] = obs, mask, one_hot_action
+        self.obs[i] = obs.to(self.device)
+        self.mask[i] = mask.to(self.device)
+        self.ta[i] = one_hot_action.to(self.device)
 
     def sample(self, batch_size: int):
         if self.size == 0:
@@ -227,6 +264,26 @@ class ReservoirSL:
         n = min(self.size, self.capacity)
         idx = torch.randint(0, n, (batch_size,), device=self.device)
         return self.obs[idx], self.mask[idx], self.ta[idx]
+
+    def state_dict(self) -> dict:
+        filled = min(self.size, self.capacity)
+        return {
+            "capacity": self.capacity,
+            "seen": int(self.size),
+            "filled": filled,
+            "obs": self.obs[:filled].cpu(),
+            "mask": self.mask[:filled].cpu(),
+            "ta": self.ta[:filled].cpu(),
+        }
+
+    def load_state_dict(self, state: dict):
+        self.size = int(state.get("seen", 0))
+        filled = min(int(state.get("filled", 0)), self.capacity)
+        for name, tensor in (("obs", self.obs), ("mask", self.mask), ("ta", self.ta)):
+            tensor.zero_()
+            src = state.get(name)
+            if src is not None and filled > 0:
+                tensor[:filled] = src.to(self.device)
 
 
 # =========================
@@ -567,6 +624,16 @@ class NFSPAgent:
             if eval_every and (self.total_env_steps % eval_every == 0):
                 eval_source = eval_env_factory if eval_env_factory is not None else env
                 eval_stats = _evaluate_policy(self, eval_source, episodes=eval_episodes)
+                print(
+                    "EVALUATION:\n"
+                    f"[steps={self.total_env_steps}] "
+                    f"avgR={eval_stats["avg_reward"]:.4f} win={eval_stats["win_rate"]:.3f} len={avg_len:.1f} "
+                    f"Qloss={ql:.5f} SLloss={sll:.5f} H(pi)={pent:.3f} "
+                    f"illegal={illegal_rt:.3f} eps={eps:.3f} "
+                    f"RL_buf={self.rl_buf.size} SL_buf≈{min(self.sl_buf.size, self.sl_buf.capacity)} "
+                    f"RL_upd={self.rl_updates} SL_upd={self.sl_updates} "
+                    f"episodes_tracked={episodes_logged}"
+                )
                 if writer:
                     writer.add_scalar("Eval/avg_reward", eval_stats["avg_reward"], self.total_env_steps)
                     writer.add_scalar("Eval/win_rate",   eval_stats["win_rate"],  self.total_env_steps)
@@ -616,7 +683,13 @@ class NFSPAgent:
             "q_tgt": self.q_tgt.state_dict(),
             "pi": self.pi.state_dict(),
             "cfg": self.cfg.__dict__,
-            "steps": self.total_env_steps
+            "steps": self.total_env_steps,
+            "opt_q": self.opt_q.state_dict(),
+            "opt_pi": self.opt_pi.state_dict(),
+            "rl_buf": self.rl_buf.state_dict(),
+            "sl_buf": self.sl_buf.state_dict(),
+            "rl_updates": getattr(self, "rl_updates", 0),
+            "sl_updates": getattr(self, "sl_updates", 0),
         }, path)
 
     def load(self, path: str, map_location=None):
@@ -625,6 +698,16 @@ class NFSPAgent:
         self.q_tgt.load_state_dict(ckpt["q_tgt"])
         self.pi.load_state_dict(ckpt["pi"])
         self.total_env_steps = ckpt.get("steps", 0)
+        if "opt_q" in ckpt:
+            self.opt_q.load_state_dict(ckpt["opt_q"])
+        if "opt_pi" in ckpt:
+            self.opt_pi.load_state_dict(ckpt["opt_pi"])
+        if "rl_buf" in ckpt:
+            self.rl_buf.load_state_dict(ckpt["rl_buf"])
+        if "sl_buf" in ckpt:
+            self.sl_buf.load_state_dict(ckpt["sl_buf"])
+        self.rl_updates = ckpt.get("rl_updates", getattr(self, "rl_updates", 0))
+        self.sl_updates = ckpt.get("sl_updates", getattr(self, "sl_updates", 0))
 
 
 # =========================
