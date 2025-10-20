@@ -40,7 +40,7 @@ def _masked_entropy(logits: torch.Tensor, mask: torch.Tensor) -> float:
 @torch.no_grad()
 @torch.no_grad()
 def _evaluate_policy(agent, env_source, episodes: int = 200) -> dict:
-    wins = total_r = total_len = 0
+    wins = losses = total_r = total_len = 0
     for _ in range(episodes):
         env = env_source()
         obs, mask, pid = env.reset()
@@ -59,17 +59,18 @@ def _evaluate_policy(agent, env_source, episodes: int = 200) -> dict:
                     a = random.choice(legal) if legal else 0
 
             obs, mask, r, done, _ = env.step(int(a))
+            wins += (r > 0)
+            losses += (r < 0)
             ep_r += r
             steps += 1
 
         total_r += ep_r
         total_len += steps
-        wins += (ep_r > 0)
 
     return {
         "avg_reward": total_r / episodes,
         "avg_len": total_len / episodes,
-        "win_rate": wins / episodes,
+        "win_rate": wins / (wins + losses),
     }
 
 
