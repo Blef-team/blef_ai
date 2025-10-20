@@ -9,7 +9,7 @@
 from __future__ import annotations
 import random
 from dataclasses import dataclass
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Callable
 
 from collections import deque
 import csv, os, math, time
@@ -34,10 +34,14 @@ def _masked_entropy(logits: torch.Tensor, mask: torch.Tensor) -> float:
     return float(ent.mean().item())
 
 @torch.no_grad()
-def _evaluate_policy(agent, env: "TurnEnvAdapter", episodes: int = 200) -> dict:
-    """Eval with average policy, greedy (no exploration)."""
+def _evaluate_policy(agent, env_source, episodes: int = 200) -> dict:
+    """
+    Eval with average policy, greedy (no exploration).
+    env_source can be a TurnEnvAdapter instance or a callable returning one.
+    """
     total_reward, total_len, wins = 0.0, 0, 0
     for _ in range(episodes):
+        env = env_source() if callable(env_source) else env_source
         obs, mask, pid = env.reset()
         done = False
         ep_reward, steps = 0.0, 0
@@ -237,8 +241,8 @@ class TurnEnvAdapter:
 @dataclass
 class NFSPConfig:
     gamma: float = 0.995
-    lr_q: float = 1e-3
-    lr_pi: float = 5e-4
+    lr_q: float = 5e-5                 # q net learning rate
+    lr_pi: float = 3e-4                # pi net learning rate
     batch_rl: int = 1024
     batch_sl: int = 2048
     target_tau: float = 0.005          # Polyak; set to 0 for hard updates
@@ -252,7 +256,7 @@ class NFSPConfig:
     train_rl_every: int = 1            # Q update cadence
     train_sl_every: int = 10           # pi update cadence
     warmup_steps: int = 10_000
-    max_grad_norm: float = 1.0
+    max_grad_norm: float = 10.0        # For nn.utils.clip_grad_norm_
     hidden: int = 256
     use_double_dqn: bool = True
 
@@ -299,39 +303,59 @@ class NFSPAgent:
     def _train_rl_step(self):
         if self.rl_buf.size < self.cfg.batch_rl:
             return
-        obs, mask, act, rew, nobs, nmask, done = self.rl_buf.sample(self.cfg.batch_rl)
 
-        q = self.q(obs)                          # [B, A]
-        q_sa = q.gather(1, act.view(-1, 1)).squeeze(1)
+        obs, mask, act, rew, nobs, nmask, done = self.rl_buf.sample(self.cfg.batch_rl)
+        # dtypes/shapes
+        act  = act.view(-1, 1).long()
+        done = done.float().view(-1)
+        rew  = rew.float().view(-1)
+
+        # Q(s,a)
+        q = self.q(obs)                                   # [B, A]
+        q_sa = q.gather(1, act).squeeze(1)                # [B]
 
         with torch.no_grad():
-            q_next_main = self.q(nobs)           # [B, A]
-            q_next_tgt  = self.q_tgt(nobs)       # [B, A]
+            q_next_main = self.q(nobs)                    # [B, A]
+            q_next_tgt  = self.q_tgt(nobs)                # [B, A]
+
             if self.cfg.use_double_dqn:
-                next_a = masked_random_argmax(q_next_main, nmask).view(-1, 1)
-                q_next = q_next_tgt.gather(1, next_a).squeeze(1)
+                # legal argmax using the online net
+                next_a = masked_random_argmax(q_next_main, nmask).view(-1, 1)  # [B,1]
+                q_next = q_next_tgt.gather(1, next_a).squeeze(1)               # [B]
             else:
-                neg_inf = torch.finfo(q.dtype).min
-                q_next = q_next_tgt.masked_fill(nmask == 0, neg_inf).max(dim=1).values
+                # mask illegal actions; guard all-masked rows
+                neg_inf = torch.finfo(q_next_tgt.dtype).min
+                q_masked = q_next_tgt.masked_fill(nmask == 0, neg_inf)
+                q_next = q_masked.max(dim=1).values                              # [B]
+                # if a row was all masked, set q_next=0 for that row
+                all_masked = (nmask.sum(dim=1) == 0)
+                if all_masked.any():
+                    q_next = q_next.clone()
+                    q_next[all_masked] = 0.0
 
-            # zero bootstrap at terminal or forced-end states (done=1)
-            target = rew + (1.0 - done) * self.cfg.gamma * q_next
+            target = rew + (1.0 - done) * self.cfg.gamma * q_next               # [B]
 
-        loss = F.smooth_l1_loss(q_sa, target)    # Huber
+        loss = F.smooth_l1_loss(q_sa, target)  # Huber
+
         self.opt_q.zero_grad(set_to_none=True)
         loss.backward()
-        nn.utils.clip_grad_norm_(self.q.parameters(), self.cfg.max_grad_norm)
+        torch.nn.utils.clip_grad_norm_(self.q.parameters(), self.cfg.max_grad_norm)
         self.opt_q.step()
 
-        # Target updates
-        if self.cfg.hard_target_interval and (self.total_env_steps % self.cfg.hard_target_interval == 0):
+        # Target updates: prefer RL-update-based cadence
+        self.rl_updates = getattr(self, "rl_updates", 0) + 1
+        if self.cfg.hard_target_interval and (self.rl_updates % self.cfg.hard_target_interval == 0):
             self.q_tgt.load_state_dict(self.q.state_dict())
         else:
-            with torch.no_grad():
-                tau = self.cfg.target_tau
-                if tau > 0:
+            # Polyak / EMA
+            tau = self.cfg.target_tau
+            if tau and tau > 0:
+                with torch.no_grad():
                     for p, pt in zip(self.q.parameters(), self.q_tgt.parameters()):
                         pt.data.mul_(1 - tau).add_(tau * p.data)
+
+        return {"q_loss": float(loss.detach().item())}
+
 
     # -------- SL (policy imitation of empirical average) --------
     def _train_sl_step(self):
@@ -347,6 +371,8 @@ class NFSPAgent:
         loss.backward()
         nn.utils.clip_grad_norm_(self.pi.parameters(), self.cfg.max_grad_norm)
         self.opt_pi.step()
+
+        return {"sl_loss": float(loss.detach().item())}
 
     # -------- Orchestration (online self-play) --------
     def _epsilon(self) -> float:
@@ -366,10 +392,15 @@ class NFSPAgent:
         csv_path: str | None = "./logs/nfsp_blef.csv",
         eval_every: int = 50_000,
         eval_episodes: int = 200,
+        eval_env_factory: Optional[Callable[[], "TurnEnvAdapter"]] = None,
     ):
         # --- setup ---
         obs, mask, pid = env.reset()
         obs, mask = obs.to(self.device), mask.to(self.device)
+
+        # track update counters across runs
+        self.rl_updates = getattr(self, "rl_updates", 0)
+        self.sl_updates = getattr(self, "sl_updates", 0)
 
         # rolling gameplay stats
         recent_rewards = deque(maxlen=5_000)
@@ -435,15 +466,19 @@ class NFSPAgent:
                 if self.total_env_steps % self.cfg.train_rl_every == 0:
                     # Expect dict or scalar; handle None gracefully.
                     out = self._train_rl_step()
+                    performed_rl_update = out is not None
                     if isinstance(out, dict):
                         q_loss = out.get("q_loss", None)
                     else:
                         q_loss = float(out) if out is not None else None
                     if q_loss is not None and math.isfinite(q_loss):
                         recent_q_loss.append(q_loss)
+                    if performed_rl_update:
+                        self.rl_updates += 1
 
                 if self.total_env_steps % self.cfg.train_sl_every == 0:
                     out = self._train_sl_step()
+                    performed_sl_update = out is not None
                     if isinstance(out, dict):
                         sl_loss = out.get("sl_loss", None)
                     else:
@@ -457,6 +492,8 @@ class NFSPAgent:
                         ent = _masked_entropy(logits, mask.unsqueeze(0).to(self.device))
                         if math.isfinite(ent):
                             recent_pi_ent.append(ent)
+                    if performed_sl_update:
+                        self.sl_updates += 1
 
             # Episode handling
             if done:
@@ -478,13 +515,16 @@ class NFSPAgent:
                 sll        = float(np.mean(recent_sl_loss)) if recent_sl_loss else float("nan")
                 pent       = float(np.mean(recent_pi_ent)) if recent_pi_ent else float("nan")
                 illegal_rt = float(np.mean(recent_illegal)) if recent_illegal else 0.0
+                episodes_logged = len(recent_rewards)
 
                 print(
                     f"[steps={self.total_env_steps}] "
                     f"avgR={avg_reward:.4f} win={win_rate:.3f} len={avg_len:.1f} "
                     f"Qloss={ql:.5f} SLloss={sll:.5f} H(pi)={pent:.3f} "
                     f"illegal={illegal_rt:.3f} eps={eps:.3f} "
-                    f"RL_buf={self.rl_buf.size} SL_buf≈{min(self.sl_buf.size, self.sl_buf.capacity)}"
+                    f"RL_buf={self.rl_buf.size} SL_buf≈{min(self.sl_buf.size, self.sl_buf.capacity)} "
+                    f"RL_upd={self.rl_updates} SL_upd={self.sl_updates} "
+                    f"episodes_tracked={episodes_logged}"
                 )
 
                 if writer:
@@ -511,7 +551,8 @@ class NFSPAgent:
 
             # Periodic evaluation (no exploration, greedy avg policy)
             if eval_every and (self.total_env_steps % eval_every == 0):
-                eval_stats = _evaluate_policy(self, env, episodes=eval_episodes)
+                eval_source = eval_env_factory if eval_env_factory is not None else env
+                eval_stats = _evaluate_policy(self, eval_source, episodes=eval_episodes)
                 if writer:
                     writer.add_scalar("Eval/avg_reward", eval_stats["avg_reward"], self.total_env_steps)
                     writer.add_scalar("Eval/win_rate",   eval_stats["win_rate"],  self.total_env_steps)
@@ -527,6 +568,11 @@ class NFSPAgent:
                         float("nan"), eps,
                         self.rl_buf.size, min(self.sl_buf.size, self.sl_buf.capacity)
                     ])
+                if eval_env_factory is None:
+                    # Evaluation mutated the training env; reset so gameplay resumes cleanly
+                    ep_reward, ep_len = 0.0, 0
+                    obs, mask, pid = env.reset()
+                    obs, mask = obs.to(self.device), mask.to(self.device)
 
         if save_path:
             self.save(save_path)

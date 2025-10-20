@@ -4,9 +4,10 @@
 
 # Adapter for NFSP <-> simpleschema_local_manager with legality, jokers, and common cards.
 import os
+import random
 from datetime import datetime
 import math
-from typing import Tuple, Dict, List
+from typing import Tuple, Dict, List, Optional
 
 import numpy as np
 import torch
@@ -292,26 +293,34 @@ class MyEnv:
       reset() -> (obs, mask, pid)
       step(action) -> (obs, mask, reward, done, pid)
 
-    reward: ±1 only on CHECK resolution (from perspective of the actor who issued CHECK);
+    reward: ±1 on CHECK resolution, measured from a fixed reference player's perspective.
             0 otherwise.
-    done: True when a ROUND ends (i.e., when the actor plays CHECK), or if game finishes.
+    done: True only when the game finishes or after the reference player is eliminated.
     """
 
-    def __init__(self, n_agents: int = 2, verbose: bool = False, illegal_penalty: float = -0.25):
+    def __init__(self, n_agents: int = 2, max_cards: int = 11, verbose: bool = False, illegal_penalty: float = -0.01):
         if n_agents < 2 or n_agents > 8:
             raise ValueError("n_agents must be in [2, 8]")
         self.n_agents = n_agents
+        self.max_cards = max_cards
         self.verbose = verbose
         self.illegal_penalty = float(illegal_penalty)
         self.game: Dict = {}
         self._last_obs = None
         self._last_mask = None
+        self._ref_nick: Optional[str] = None
+        self.rounds_since_reset = 0
 
     def _pid(self) -> int:
         return _nickname_to_idx(self.game["players"], self.game.get("cp_nickname", ""))
 
     def reset(self) -> Tuple[torch.Tensor, torch.Tensor, int]:
-        self.game = gm.create_game(self.n_agents, verbose=self.verbose)
+        self.game = gm.create_game(self.n_agents, max_cards=self.max_cards, verbose=self.verbose)
+        self.rounds_since_reset = 0
+        players = self.game.get("players", []) or []
+        if not players:
+            raise RuntimeError("Game manager returned no players")
+        self._ref_nick = random.choice([p["nickname"] for p in players])
         cp = self.game["cp_nickname"]
         obs = vectorize_obs(self.game, cp).float()
         mask = _legal_action_mask(self.game).float()
@@ -353,6 +362,7 @@ class MyEnv:
         if int(action) == CHECK:
             # Round has been resolved by the manager, and a new round likely started.
             # Identify loser by delta in n_cards (one player +1, possibly -> 0 on elimination).
+            self.rounds_since_reset += 1
             after_counts = {p["nickname"]: int(p["n_cards"]) for p in self.game.get("players", [])}
             loser_candidates = []
             for nick, before in before_counts.items():
@@ -364,11 +374,28 @@ class MyEnv:
                     loser_candidates.append(nick)
 
             loser = loser_candidates[0] if loser_candidates else None
-            reward = 1.0 if (loser is not None and loser != actor_nick) else -1.0
+            ref = self._ref_nick
+            if ref is None:
+                reward = 0.0
+            elif loser is None:
+                reward = 0.0
+            elif loser == ref:
+                reward = -1.0
+            else:
+                reward = 1.0
 
         # Game finished? Mark terminal regardless of action.
         if self.game.get("status") == "Finished" and status_before != "Finished":
             done = True
+        else:
+            # If the reference player has been eliminated from the table, we treat the episode as done.
+            players_now = {p["nickname"] for p in self.game.get("players", []) if p["n_cards"] > 0}
+            if self._ref_nick is not None and self._ref_nick not in players_now:
+                done = True
+
+        # safety cap to avoid non-terminating matches
+        MAX_ROUNDS = 50
+        assert done or self.rounds_since_reset < MAX_ROUNDS
 
         self._last_obs, self._last_mask = obs, mask
         return obs, mask, float(reward), bool(done), pid
@@ -377,25 +404,30 @@ class MyEnv:
 # ---------- Train (example) ----------
 # RUN FROM REPOSITORY ROOT /
 if __name__ == "__main__":
-    env = MyEnv(n_agents=2, verbose=False)
+    env = MyEnv(n_agents=2, max_cards=3, verbose=False)
     obs0, mask0, _ = env.reset()
 
 agent = NFSPAgent(
     obs_dim=obs0.numel(),
     act_dim=mask0.numel(),
     cfg=NFSPConfig(
-        # You can tune these; below are conservative to get learning started
-        anticipatory_eta=0.1,
+        anticipatory_eta=0.25,
+        batch_rl=64,            # Use batch_rl for RL batch size
+        train_rl_every=64,      # Simple cadence for a small batch
+        batch_sl=256,           # Use batch_sl for supervised learning batch size
+        train_sl_every=8,
+        lr_q=1e-4,
+        lr_pi=3e-4,
+        target_tau=0.01,
+        hard_target_interval=0,
+        warmup_steps=5_000,
+        max_grad_norm=10.0,
+        gamma=0.995,
+        use_double_dqn=True,
         rl_capacity=200_000,
         sl_capacity=200_000,
-        batch_rl=256,   # Use batch_rl for RL batch size
-        batch_sl=512,   # Use batch_sl for supervised learning batch size
-        train_rl_every=4,
-        train_sl_every=4,
-        warmup_steps=5_000,
-    ),
+        ),
 )
-
 
 # Get the current timestamp and format it
 postfix = datetime.now().strftime("%Y%m%d%H%M%S")
@@ -409,5 +441,10 @@ agent.train_from_selfplay(
     total_steps=200_000,   # start smaller to validate the loop
     log_every=5_000,
     save_path=model_save_path,
-    game_save_dir=game_save_dir
+    game_save_dir=game_save_dir,
+    eval_env_factory=lambda: MyEnv(
+        n_agents=env.n_agents,
+        verbose=env.verbose,
+        illegal_penalty=env.illegal_penalty
+    )
 )

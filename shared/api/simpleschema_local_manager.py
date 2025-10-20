@@ -285,20 +285,27 @@ def arrange_players(players):
 
     return players
 
-def create_game(n_agents, verbose=False):
+def create_game(n_agents, max_cards=None, verbose=False):
     if n_agents < 2:
         raise ValueError("n_agents < 2")
     if n_agents > 8:
         raise ValueError("n_agents > 8")
     game_uuid = str(uuid.uuid4())
     players = [{"nickname": str(i), "n_cards": 1} for i in range(n_agents)]
+    default_max_cards = floor(24 / len(players)) if len(players) > 2 else 11
+    
+    rules = {"deck_size": 24}
+    
+    max_cards_value = default_max_cards
+    if max_cards is not None and max_cards > 0:
+        max_cards_value = min(max_cards, default_max_cards)
     return {
         "game_uuid": game_uuid,
         "status": "Running",
-        "rules": {"deck_size": 24},
+        "rules": rules,
         "common_hand": [],
         "round_number": 1,
-        "max_cards": floor(24 / len(players)) if len(players) > 2 else 11,
+        "max_cards": max_cards_value,
         "hands": draw_cards(players),
         "players": players,
         "cp_nickname": players[0]["nickname"],
