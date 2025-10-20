@@ -11,9 +11,81 @@ import random
 from dataclasses import dataclass
 from typing import Tuple, Optional
 
+from collections import deque
+import csv, os, math, time
+import numpy as np
+try:
+    from torch.utils.tensorboard import SummaryWriter
+except Exception:
+    SummaryWriter = None
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+# Logging, metrics
+
+def _masked_entropy(logits: torch.Tensor, mask: torch.Tensor) -> float:
+    # logits: [B, A], mask: [B, A]
+    # returns scalar mean entropy over batch after masked softmax
+    mlog = masked_softmax_logits(logits, mask)
+    probs = torch.softmax(mlog, dim=-1)
+    ent = -(probs * torch.log(probs.clamp_min(1e-12))).sum(dim=-1)
+    return float(ent.mean().item())
+
+@torch.no_grad()
+def _evaluate_policy(agent, env: "TurnEnvAdapter", episodes: int = 200) -> dict:
+    """Eval with average policy, greedy (no exploration)."""
+    total_reward, total_len, wins = 0.0, 0, 0
+    for _ in range(episodes):
+        obs, mask, pid = env.reset()
+        done = False
+        ep_reward, steps = 0.0, 0
+        while not done:
+            a = agent.select_action(obs, mask, use_average_policy=True, greedy=True)
+            obs, mask, r, done, info = env.step(a)
+            ep_reward += r
+            steps += 1
+        total_reward += ep_reward
+        total_len += steps
+        # If Blef is zero-sum and reward>0 implies a "win" for the learning player:
+        wins += (ep_reward > 0)
+    return {
+        "avg_reward": total_reward / episodes,
+        "avg_len": total_len / episodes,
+        "win_rate": wins / episodes
+    }
+
+class _CsvLogger:
+    def __init__(self, path: str, header: list[str]):
+        self.path = path
+        self._exists = os.path.exists(path)
+        self.header = header
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        if not self._exists:
+            with open(self.path, "w", newline="") as f:
+                csv.writer(f).writerow(self.header)
+    def row(self, values: list):
+        with open(self.path, "a", newline="") as f:
+            csv.writer(f).writerow(values)
+
+def plot_csv_progress(csv_path="./logs/nfsp_blef.csv"):
+    import pandas as pd
+    import matplotlib.pyplot as plt
+
+    df = pd.read_csv(csv_path)
+    fig, ax = plt.subplots()
+    ax.plot(df["step"], df["avg_reward"], label="avg_reward")
+    if "q_loss" in df.columns:
+        ax.plot(df["step"], df["q_loss"], label="Q loss")
+    if "sl_loss" in df.columns:
+        ax.plot(df["step"], df["sl_loss"], label="SL loss")
+    if "policy_entropy" in df.columns:
+        ax.plot(df["step"], df["policy_entropy"], label="policy entropy")
+    ax.set_xlabel("env steps")
+    ax.set_title("NFSP Self-Play Progress")
+    ax.legend()
+    plt.show()
 
 
 # =========================
@@ -282,16 +354,57 @@ class NFSPAgent:
         frac = min(1.0, s / max(1, self.cfg.eps_decay_steps))
         return self.cfg.eps_end + (1.0 - frac) * (self.cfg.eps_start - self.cfg.eps_end)
 
-    def train_from_selfplay(self, env: TurnEnvAdapter, total_steps: int = 2_000_000, log_every: int = 10000, save_path: str = "nfsp_blef.pt", game_save_dir="games"):
+    def train_from_selfplay(
+        self,
+        env: "TurnEnvAdapter",
+        total_steps: int = 2_000_000,
+        log_every: int = 10_000,
+        save_path: str = "nfsp_blef.pt",
+        game_save_dir: str = "games",
+        # NEW:
+        tb_logdir: str | None = "./runs/nfsp_blef",
+        csv_path: str | None = "./logs/nfsp_blef.csv",
+        eval_every: int = 50_000,
+        eval_episodes: int = 200,
+    ):
+        # --- setup ---
         obs, mask, pid = env.reset()
         obs, mask = obs.to(self.device), mask.to(self.device)
 
+        # rolling gameplay stats
+        recent_rewards = deque(maxlen=5_000)
+        recent_lens    = deque(maxlen=5_000)
+        recent_illegal  = deque(maxlen=20_000)  # if env reports illegal flags in info
+
+        # rolling training stats (store last N non-None values)
+        recent_q_loss  = deque(maxlen=5_000)
+        recent_sl_loss = deque(maxlen=5_000)
+        recent_pi_ent  = deque(maxlen=5_000)
+
+        # TensorBoard
+        writer = None
+        if tb_logdir and SummaryWriter is not None:
+            os.makedirs(tb_logdir, exist_ok=True)
+            writer = SummaryWriter(log_dir=tb_logdir)
+
+        # CSV
+        csv_header = [
+            "step","avg_reward","win_rate","avg_len",
+            "q_loss","sl_loss","policy_entropy",
+            "illegal_rate","epsilon","rl_buf","sl_buf"
+        ]
+        csv_logger = _CsvLogger(csv_path, csv_header) if csv_path else None
+
+        # episode accumulators
+        ep_reward, ep_len = 0.0, 0
+
+        # main loop
         while self.total_env_steps < total_steps:
             use_br = (random.random() < self.cfg.anticipatory_eta)
             eps = self._epsilon()
 
             action = self.act(obs, mask, use_br=use_br, epsilon=eps)
-            nobs, nmask, reward, done, _ = env.step(action, game_save_dir=game_save_dir)
+            nobs, nmask, reward, done, info = env.step(action, game_save_dir=game_save_dir)
             nobs, nmask = nobs.to(self.device), nmask.to(self.device)
 
             # RL buffer: BR transitions only
@@ -307,30 +420,118 @@ class NFSPAgent:
             one_hot[action] = 1.0
             self.sl_buf.add(obs.detach().cpu(), mask.detach().cpu(), one_hot)
 
+            # gameplay accumulators
+            ep_reward += float(reward)
+            ep_len    += 1
+            if info and isinstance(info, dict):
+                # If your env reports illegal moves attempted & corrected:
+                illegal = int(info.get("illegal", 0))
+                recent_illegal.append(illegal)
+
             self.total_env_steps += 1
 
             # Online updates (after warmup)
             if self.total_env_steps > self.cfg.warmup_steps:
                 if self.total_env_steps % self.cfg.train_rl_every == 0:
-                    self._train_rl_step()
+                    # Expect dict or scalar; handle None gracefully.
+                    out = self._train_rl_step()
+                    if isinstance(out, dict):
+                        q_loss = out.get("q_loss", None)
+                    else:
+                        q_loss = float(out) if out is not None else None
+                    if q_loss is not None and math.isfinite(q_loss):
+                        recent_q_loss.append(q_loss)
+
                 if self.total_env_steps % self.cfg.train_sl_every == 0:
-                    self._train_sl_step()
+                    out = self._train_sl_step()
+                    if isinstance(out, dict):
+                        sl_loss = out.get("sl_loss", None)
+                    else:
+                        sl_loss = float(out) if out is not None else None
+                    if sl_loss is not None and math.isfinite(sl_loss):
+                        recent_sl_loss.append(sl_loss)
+
+                    # Track policy entropy from current π on the current state (cheap proxy)
+                    with torch.no_grad():
+                        logits = self.pi(obs.unsqueeze(0).to(self.device))
+                        ent = _masked_entropy(logits, mask.unsqueeze(0).to(self.device))
+                        if math.isfinite(ent):
+                            recent_pi_ent.append(ent)
 
             # Episode handling
             if done:
+                recent_rewards.append(ep_reward)
+                recent_lens.append(ep_len)
+                ep_reward, ep_len = 0.0, 0
                 obs, mask, pid = env.reset()
                 obs, mask = obs.to(self.device), mask.to(self.device)
             else:
                 obs, mask = nobs, nmask
 
-            # Logging / checkpoints
+            # --- Logging / checkpoints ---
             if self.total_env_steps % log_every == 0:
-                print(f"[steps={self.total_env_steps}] RL_buf={self.rl_buf.size} SL_buf≈{min(self.sl_buf.size, self.sl_buf.capacity)} eps={eps:.3f}")
+                avg_reward = float(np.mean(recent_rewards)) if recent_rewards else 0.0
+                avg_len    = float(np.mean(recent_lens)) if recent_lens else 0.0
+                # If positive reward means “win”
+                win_rate   = float(np.mean([r > 0 for r in recent_rewards])) if recent_rewards else 0.0
+                ql         = float(np.mean(recent_q_loss)) if recent_q_loss else float("nan")
+                sll        = float(np.mean(recent_sl_loss)) if recent_sl_loss else float("nan")
+                pent       = float(np.mean(recent_pi_ent)) if recent_pi_ent else float("nan")
+                illegal_rt = float(np.mean(recent_illegal)) if recent_illegal else 0.0
+
+                print(
+                    f"[steps={self.total_env_steps}] "
+                    f"avgR={avg_reward:.4f} win={win_rate:.3f} len={avg_len:.1f} "
+                    f"Qloss={ql:.5f} SLloss={sll:.5f} H(pi)={pent:.3f} "
+                    f"illegal={illegal_rt:.3f} eps={eps:.3f} "
+                    f"RL_buf={self.rl_buf.size} SL_buf≈{min(self.sl_buf.size, self.sl_buf.capacity)}"
+                )
+
+                if writer:
+                    writer.add_scalar("Game/avg_reward", avg_reward, self.total_env_steps)
+                    writer.add_scalar("Game/win_rate",  win_rate,  self.total_env_steps)
+                    writer.add_scalar("Game/avg_len",   avg_len,   self.total_env_steps)
+                    writer.add_scalar("Loss/Q",         ql,        self.total_env_steps)
+                    writer.add_scalar("Loss/SL",        sll,       self.total_env_steps)
+                    writer.add_scalar("Policy/entropy", pent,      self.total_env_steps)
+                    writer.add_scalar("Env/illegal_rate", illegal_rt, self.total_env_steps)
+                    writer.add_scalar("Exploration/epsilon", eps,   self.total_env_steps)
+                    writer.add_scalar("Buffers/RL_size", self.rl_buf.size, self.total_env_steps)
+                    writer.add_scalar("Buffers/SL_size", min(self.sl_buf.size, self.sl_buf.capacity), self.total_env_steps)
+
+                if csv_logger:
+                    csv_logger.row([
+                        self.total_env_steps, avg_reward, win_rate, avg_len,
+                        ql, sll, pent, illegal_rt, eps,
+                        self.rl_buf.size, min(self.sl_buf.size, self.sl_buf.capacity)
+                    ])
+
             if save_path and (self.total_env_steps % (10 * log_every) == 0):
                 self.save(save_path)
 
+            # Periodic evaluation (no exploration, greedy avg policy)
+            if eval_every and (self.total_env_steps % eval_every == 0):
+                eval_stats = _evaluate_policy(self, env, episodes=eval_episodes)
+                if writer:
+                    writer.add_scalar("Eval/avg_reward", eval_stats["avg_reward"], self.total_env_steps)
+                    writer.add_scalar("Eval/win_rate",   eval_stats["win_rate"],  self.total_env_steps)
+                    writer.add_scalar("Eval/avg_len",    eval_stats["avg_len"],   self.total_env_steps)
+                if csv_logger:
+                    # Write a “synthetic” row carrying eval stats (loss fields left as NaN)
+                    csv_logger.row([
+                        self.total_env_steps,
+                        eval_stats["avg_reward"],
+                        eval_stats["win_rate"],
+                        eval_stats["avg_len"],
+                        float("nan"), float("nan"), float("nan"),
+                        float("nan"), eps,
+                        self.rl_buf.size, min(self.sl_buf.size, self.sl_buf.capacity)
+                    ])
+
         if save_path:
             self.save(save_path)
+        if writer:
+            writer.flush(); writer.close()
 
     # -------- Inference (usually average policy) --------
     @torch.no_grad()
