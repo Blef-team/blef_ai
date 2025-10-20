@@ -3,6 +3,7 @@
 # RUN FROM REPOSITORY ROOT /
 
 # Adapter for NFSP <-> simpleschema_local_manager with legality, jokers, and common cards.
+import argparse
 import os
 import random
 from datetime import datetime
@@ -401,50 +402,94 @@ class MyEnv:
         return obs, mask, float(reward), bool(done), pid
 
 
-# ---------- Train (example) ----------
-# RUN FROM REPOSITORY ROOT /
-if __name__ == "__main__":
-    env = MyEnv(n_agents=2, max_cards=3, verbose=False)
+def main():
+    parser = argparse.ArgumentParser(description="Run NFSP Blef self-play locally.")
+    parser.add_argument(
+        "--load-model-path",
+        dest="load_model_path",
+        type=str,
+        default=None,
+        help="Optional path to an NFSP checkpoint (.pt) to resume from.",
+    )
+    parser.add_argument(
+        "--total-steps",
+        dest="total_steps",
+        type=int,
+        default=5_000_000,
+        help="Number of environment steps to train for (default: 5,000,000).",
+    )
+    parser.add_argument(
+        "--n-agents",
+        dest="n_agents",
+        type=int,
+        default=2,
+        help="Number of seated agents in self-play (default: 2).",
+    )
+    parser.add_argument(
+        "--max-cards",
+        dest="max_cards",
+        type=int,
+        default=3,
+        help="Maximum cards per player for Blef variant (default: 3).",
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Enable verbose logging from the game manager.",
+    )
+    args = parser.parse_args()
+
+    env = MyEnv(
+        n_agents=args.n_agents,
+        max_cards=args.max_cards,
+        verbose=args.verbose,
+    )
     obs0, mask0, _ = env.reset()
 
-agent = NFSPAgent(
-    obs_dim=obs0.numel(),
-    act_dim=mask0.numel(),
-    cfg=NFSPConfig(
-        anticipatory_eta=0.25,
-        batch_rl=64,            # Use batch_rl for RL batch size
-        train_rl_every=64,      # Simple cadence for a small batch
-        batch_sl=256,           # Use batch_sl for supervised learning batch size
-        train_sl_every=8,
-        lr_q=1e-4,
-        lr_pi=3e-4,
-        target_tau=0.01,
-        hard_target_interval=0,
-        warmup_steps=5_000,
-        max_grad_norm=10.0,
-        gamma=0.995,
-        use_double_dqn=True,
-        rl_capacity=200_000,
-        sl_capacity=200_000,
+    agent = NFSPAgent(
+        obs_dim=obs0.numel(),
+        act_dim=mask0.numel(),
+        cfg=NFSPConfig(
+            anticipatory_eta=0.25,
+            batch_rl=64,
+            train_rl_every=64,
+            batch_sl=256,
+            train_sl_every=8,
+            lr_q=1e-4,
+            lr_pi=3e-4,
+            target_tau=0.01,
+            hard_target_interval=0,
+            warmup_steps=5_000,
+            max_grad_norm=10.0,
+            gamma=0.995,
+            use_double_dqn=True,
+            rl_capacity=200_000,
+            sl_capacity=200_000,
         ),
-)
-
-# Get the current timestamp and format it
-postfix = datetime.now().strftime("%Y%m%d%H%M%S")
-model_save_path = f"nfsp_blef_{postfix}.pt"
-game_save_dir = f"games_{postfix}"
-if not os.path.exists(game_save_dir):
-    os.makedirs(game_save_dir)
-
-agent.train_from_selfplay(
-    env,
-    total_steps=200_000,   # start smaller to validate the loop
-    log_every=5_000,
-    save_path=model_save_path,
-    game_save_dir=game_save_dir,
-    eval_env_factory=lambda: MyEnv(
-        n_agents=env.n_agents,
-        verbose=env.verbose,
-        illegal_penalty=env.illegal_penalty
     )
-)
+
+    if args.load_model_path:
+        agent.load(args.load_model_path)
+
+    postfix = datetime.now().strftime("%Y%m%d%H%M%S")
+    model_save_path = f"nfsp_blef_{postfix}.pt"
+    game_save_dir = f"games_{postfix}"
+    os.makedirs(game_save_dir, exist_ok=True)
+
+    agent.train_from_selfplay(
+        env,
+        total_steps=args.total_steps,
+        log_every=50_000,
+        save_path=model_save_path,
+        game_save_dir=game_save_dir,
+        eval_env_factory=lambda: MyEnv(
+            n_agents=env.n_agents,
+            max_cards=env.max_cards,
+            verbose=env.verbose,
+            illegal_penalty=env.illegal_penalty,
+        ),
+    )
+
+
+if __name__ == "__main__":
+    main()
