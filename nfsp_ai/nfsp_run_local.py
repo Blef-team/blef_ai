@@ -217,6 +217,13 @@ def vectorize_obs(game: dict, nick: str) -> torch.Tensor:
     if hist_ids:
         hist88[np.unique(hist_ids)] = 1.0
 
+    # Last bet probability, to evaluate checking it
+    prob_last_bet_exists = get_bet_probabilities(
+        game_state=game,
+        for_betting=False,
+        specific_action_id=_last_bet_action_id(game),
+    )
+
     # Private prior: depends on my hand and rules (for_betting=True)
     pvt_prior = get_bet_probabilities(
         game_state=game,
@@ -263,6 +270,7 @@ def vectorize_obs(game: dict, nick: str) -> torch.Tensor:
         counts8,                                  # 8
         np.asarray([round_scaled], dtype=np.float32),    # 1
         hist88,                                   # 88
+        np.asarray([prob_last_bet_exists], dtype=np.float32),    # 1
         pvt_prior,                                # 88
         pub_prior,                                # 88
         np.asarray([total_blanks], dtype=np.float32),    # 1
@@ -271,7 +279,7 @@ def vectorize_obs(game: dict, nick: str) -> torch.Tensor:
     obs = np.concatenate(parts, axis=0).astype(np.float32)
 
     # Hard assert schema to catch drift early
-    if obs.shape[0] != 325:
+    if obs.shape[0] != 326:
         raise ValueError(f"vectorize_obs produced dim {obs.shape[0]}, expected 325")
 
     return torch.from_numpy(obs)
