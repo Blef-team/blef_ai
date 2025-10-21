@@ -1,7 +1,7 @@
 import math
 from itertools import product
 from functools import lru_cache
-from typing import Iterable, Tuple
+from typing import Iterable, Tuple, NamedTuple
 
 from shared.game_utils import GameRules, get_set_details_from_action_id
 
@@ -171,32 +171,79 @@ def _rebuild_rules(rules_key: Tuple[int, int, int]) -> dict:
     return {"deck_size": deck_size, "jokers": jokers, "blanks": blanks}
 
 
-def _calculate_prob_no_cache(action_id, hand, common_hand, unknown_cards_num, rules, for_betting):
-    set_details = get_set_details_from_action_id(action_id, rules.get("deck_size", 24))
-    if not set_details: return 0.0
+class ProbContext(NamedTuple):
+    hand_cards: Tuple[Tuple[int, int], ...]
+    common_cards: Tuple[Tuple[int, int], ...]
+    known_cards: Tuple[Tuple[int, int], ...]
+    value_counts: Tuple[int, ...]
+    colour_counts: Tuple[int, ...]
+    my_jokers: int
+    common_jokers: int
+    deck_size: int
+    total_jokers: int
+    total_blanks: int
 
-    known_cards = hand + common_hand
+
+@lru_cache(maxsize=50000)
+def _prepare_prob_context(hand_key: Tuple[Tuple[int, int], ...], common_key: Tuple[Tuple[int, int], ...], rules_key: Tuple[int, int, int]) -> ProbContext:
+    deck_size, total_jokers, total_blanks = rules_key
+    hand_cards = tuple((int(v), int(c)) for v, c in hand_key)
+    common_cards = tuple((int(v), int(c)) for v, c in common_key)
+    known_cards = hand_cards + common_cards
+
     value_counts = [0] * 6
     colour_counts = [0] * 4
-    known_jokers = 0
-    for value, colour in known_cards:
-        value = int(value)
-        colour = int(colour)
+    my_jokers = 0
+    common_jokers = 0
+
+    for value, colour in hand_cards:
         if value >= 0:
             value_counts[value] += 1
             if colour >= 0:
                 colour_counts[colour] += 1
         elif value == -1:
-            known_jokers += 1
+            my_jokers += 1
 
-    my_jokers = sum(1 for value, _ in hand if int(value) == -1)
-    common_jokers = sum(1 for value, _ in common_hand if int(value) == -1)
+    for value, colour in common_cards:
+        if value >= 0:
+            value_counts[value] += 1
+            if colour >= 0:
+                colour_counts[colour] += 1
+        elif value == -1:
+            common_jokers += 1
+
+    return ProbContext(
+        hand_cards=hand_cards,
+        common_cards=common_cards,
+        known_cards=known_cards,
+        value_counts=tuple(value_counts),
+        colour_counts=tuple(colour_counts),
+        my_jokers=my_jokers,
+        common_jokers=common_jokers,
+        deck_size=int(deck_size),
+        total_jokers=int(total_jokers),
+        total_blanks=int(total_blanks),
+    )
+
+
+def _calculate_prob_with_context(action_id: int, ctx: ProbContext, unknown_cards_num: int, for_betting: bool) -> float:
+    rules = {"deck_size": ctx.deck_size, "jokers": ctx.total_jokers, "blanks": ctx.total_blanks}
+    set_details = get_set_details_from_action_id(action_id, rules.get("deck_size", 24))
+    if not set_details: return 0.0
+
+    known_cards = ctx.known_cards
+    value_counts = list(ctx.value_counts)
+    colour_counts = list(ctx.colour_counts)
+    my_jokers = ctx.my_jokers
+    common_jokers = ctx.common_jokers
+    known_jokers = my_jokers + common_jokers
 
     jokers_in_play = my_jokers + common_jokers if for_betting else common_jokers
-    
-    deck_size = rules.get("deck_size", 24)
-    total_jokers = rules.get("jokers", 0)
-    
+
+    deck_size = ctx.deck_size
+    total_jokers = ctx.total_jokers
+    total_blanks = ctx.total_blanks
+
     set_type = set_details.get("set_type")
 
     if set_type in ["High card", "Pair", "Three of a kind", "Four of a kind"]:
@@ -279,31 +326,49 @@ def _calculate_prob_no_cache(action_id, hand, common_hand, unknown_cards_num, ru
         # Each needed card for a straight flush is unique, so there is only 1 of each in the deck.
         cards_of_value_in_deck = len(required_cards) - len(present_cards)
         jokers_in_deck = total_jokers - known_jokers
-        other_cards_in_deck = deck_size + rules.get("blanks", 0) - len(known_cards) + known_jokers - cards_of_value_in_deck
+        other_cards_in_deck = deck_size + total_blanks - len(known_cards) + known_jokers - cards_of_value_in_deck
         
         return _calculate_prob_simple_set(needed, cards_of_value_in_deck, jokers_in_deck, other_cards_in_deck, unknown_cards_num)
 
-@lru_cache(maxsize=50000)
-def _calculate_prob_cached(action_id, hand_key, common_key, unknown_cards_num, rules_key, for_betting):
-    hand = [tuple(card) for card in hand_key]
-    common_hand = [tuple(card) for card in common_key]
-    rules = _rebuild_rules(rules_key)
-    return _calculate_prob_no_cache(action_id, hand, common_hand, unknown_cards_num, rules, for_betting)
-
-
-def calculate_prob(action_id, hand, common_hand, unknown_cards_num, rules, for_betting):
+def _calculate_prob_no_cache(action_id, hand, common_hand, unknown_cards_num, rules, for_betting):
     hand_key = _normalize_cards(hand)
     common_key = _normalize_cards(common_hand)
     rules_key = _normalize_rules(rules)
-    for_betting_flag = bool(for_betting)
-    return _calculate_prob_cached(
+    ctx = _prepare_prob_context(hand_key, common_key, rules_key)
+    return _calculate_prob_with_context(
         int(action_id),
-        hand_key,
-        common_key,
+        ctx,
         int(unknown_cards_num),
-        rules_key,
-        for_betting_flag,
+        bool(for_betting),
     )
+
+
+def calculate_prob(action_id, hand, common_hand, unknown_cards_num, rules, for_betting):
+    return _calculate_prob_no_cache(
+        action_id,
+        hand,
+        common_hand,
+        unknown_cards_num,
+        rules,
+        for_betting,
+    )
+
+
+@lru_cache(maxsize=20000)
+def _probability_vector_cached(
+    hand_key: Tuple[Tuple[int, int], ...],
+    common_key: Tuple[Tuple[int, int], ...],
+    rules_key: Tuple[int, int, int],
+    unknown_cards_num: int,
+    for_betting_flag: bool,
+) -> Tuple[float, ...]:
+    ctx = _prepare_prob_context(hand_key, common_key, rules_key)
+    game_rules = GameRules(rules_key[0])
+    vector = [
+        _calculate_prob_with_context(action_id, ctx, unknown_cards_num, for_betting_flag)
+        for action_id in range(game_rules.check_action_id)
+    ]
+    return tuple(vector)
 
 
 def get_bet_probabilities(game_state, for_betting=False, last_bet=None, specific_action_id=None):
@@ -320,20 +385,29 @@ def get_bet_probabilities(game_state, for_betting=False, last_bet=None, specific
 
     others_card_num = sum(p.get("n_cards", 0) for p in players if p.get("nickname") != agent_nickname)
     common_hand = [(card["value"], card["colour"]) for card in game_state.get("common_hand", [])]
-    
-    # If a specific action is requested, calculate and return only that probability
-    if specific_action_id is not None:
-        return calculate_prob(specific_action_id, hand, common_hand, others_card_num, rules, for_betting)
 
-    # Otherwise, calculate the vector for legal betting moves
+    hand_key = _normalize_cards(hand)
+    common_key = _normalize_cards(common_hand)
+    rules_key = _normalize_rules(rules)
+
+    vector = list(
+        _probability_vector_cached(
+            hand_key,
+            common_key,
+            rules_key,
+            int(others_card_num),
+            bool(for_betting),
+        )
+    )
+
+    if specific_action_id is not None:
+        action_id_int = int(specific_action_id)
+        return vector[action_id_int] if 0 <= action_id_int < game_rules.check_action_id else 0.0
+
     start_action_id = last_bet + 1 if last_bet is not None else 0
-    
-    bet_probs = [0.0] * start_action_id
-    for action_id in range(start_action_id, game_rules.check_action_id):
-        prob = calculate_prob(action_id, hand, common_hand, others_card_num, rules, for_betting)
-        bet_probs.append(prob)
-        
-    return bet_probs
+    for i in range(min(start_action_id, len(vector))):
+        vector[i] = 0.0
+    return vector[:game_rules.check_action_id]
 
 def get_generic_bet_probabilities(game_state, last_bet=None):
     rules = game_state.get("rules", {})
@@ -346,12 +420,22 @@ def get_generic_bet_probabilities(game_state, last_bet=None):
     
     common_hand = [(card["value"], card["colour"]) for card in game_state.get("common_hand", [])]
     unknown_cards_num = my_card_num + others_card_num
-    
-    start_action_id = last_bet + 1 if last_bet is not None else 0
 
-    bet_probs = [0.0] * start_action_id
-    for action_id in range(start_action_id, game_rules.check_action_id):
-        prob = calculate_prob(action_id, [], common_hand, unknown_cards_num, rules, for_betting=True)
-        bet_probs.append(prob)
-        
-    return bet_probs
+    hand_key: Tuple[Tuple[int, int], ...] = ()
+    common_key = _normalize_cards(common_hand)
+    rules_key = _normalize_rules(rules)
+
+    vector = list(
+        _probability_vector_cached(
+            hand_key,
+            common_key,
+            rules_key,
+            int(unknown_cards_num),
+            True,
+        )
+    )
+
+    start_action_id = last_bet + 1 if last_bet is not None else 0
+    for i in range(min(start_action_id, len(vector))):
+        vector[i] = 0.0
+    return vector[:game_rules.check_action_id]
