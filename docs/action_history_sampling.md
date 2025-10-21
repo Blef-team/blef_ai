@@ -38,16 +38,19 @@ The NFSP runner now emits lightweight action-history snippets so you can inspect
 --history-sample-every <steps>
 --history-sample-limit <count>
 --history-sample-path <file>
+--save-game-every <games>
 ```
 Example:
 ```
 python nfsp_run_local.py --control-plane control_plane.json \
     --history-sample-every 50000 \
     --history-sample-limit 200 \
-    --history-sample-path logs/history_samples_run42.jsonl
+    --history-sample-path logs/history_samples_run42.jsonl \
+    --save-game-every 5000
 ```
 
 ## Notes
 - Histories capture the actions taken *before* the CHECK that resolved the round so you can reconstruct the decisive sequence.
 - The `round_result` field summarizes the outcome from the reference player's perspective (which player lost, before/after card counts).
 - Each record also includes the current exploration and control-plane pin state, enabling correlation with schedule overrides.
+- Full game JSON dumps are now sampled (default: 1 in 5,000); adjust `--save-game-every` if you need denser coverage for debugging.
