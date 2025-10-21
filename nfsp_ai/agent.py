@@ -395,6 +395,11 @@ class NFSPAgent:
         mask = mask.unsqueeze(0).to(self.device) # [1, A]
 
         if use_br:
+            check_prob = getattr(self, "_check_explore_prob", 0.0)
+            if check_prob > 0.0:
+                check_idx = mask.shape[-1] - 1
+                if mask[0, check_idx] > 0 and random.random() < check_prob:
+                    return int(check_idx)
             q = self.q(obs)                      # [1, A]
             # epsilon-greedy over legal actions
             if random.random() < epsilon:
@@ -507,6 +512,8 @@ class NFSPAgent:
             self._nstep_weight_scale = 0.5
         if not hasattr(self, "_nstep_terminal_boost"):
             self._nstep_terminal_boost = 0.5
+        if not hasattr(self, "_check_explore_prob"):
+            self._check_explore_prob = 0.0
 
     def _set_lr(self, optimizer, lr: float):
         lr = float(lr)
@@ -524,13 +531,50 @@ class NFSPAgent:
     def _apply_phase_schedules(self, step: int):
         self._ensure_schedule_state()
 
-        # Buffer growth at 5M
+        if step < 5_000_000:
+            # Early curriculum (bootstrapping learning signal)
+            self.cfg.anticipatory_eta = 0.25
+
+            if step < 1_500_000:
+                eps = self._interp(step, 0, 1_500_000, 0.20, 0.12)
+            elif step < 3_500_000:
+                eps = self._interp(step, 1_500_000, 3_500_000, 0.12, 0.07)
+            else:
+                eps = self._interp(step, 3_500_000, 5_000_000, 0.07, 0.05)
+            self._eps_current = max(0.05, min(1.0, eps))
+
+            self._set_lr(self.opt_q, 1e-4)
+            self.cfg.target_tau = 0.01
+            self.cfg.hard_target_interval = 0
+
+            self.cfg.train_rl_every = 32
+            self.cfg.batch_rl = 64
+
+            target_n = 5
+            if target_n != self._active_n_step:
+                self._flush_nstep(force=True)
+                self._active_n_step = target_n
+            self.cfg.n_step = target_n
+
+            self.cfg.lr_pi = 1e-4
+            self._set_lr(self.opt_pi, self.cfg.lr_pi)
+            self.cfg.train_sl_every = 16
+            self.cfg.batch_sl = 256
+
+            if step < 3_000_000:
+                self._check_explore_prob = self._interp(step, 0, 3_000_000, 0.05, 0.0)
+            else:
+                self._check_explore_prob = 0.0
+            return
+
+        # From 5M onwards follow long-horizon curriculum
+        self._check_explore_prob = 0.0
+
         if step >= 5_000_000 and "buffers_1m" not in self._schedule_flags:
             self.rl_buf.resize(1_000_000)
             self.sl_buf.resize(1_000_000)
             self._schedule_flags.add("buffers_1m")
 
-        # Anticipatory eta
         if step < 10_000_000:
             eta = 0.25
         elif step < 15_000_000:
@@ -541,10 +585,7 @@ class NFSPAgent:
             eta = 0.10
         self.cfg.anticipatory_eta = eta
 
-        # Epsilon schedule
-        if step < 5_000_000:
-            eps = 0.05
-        elif step < 10_000_000:
+        if step < 10_000_000:
             eps = self._interp(step, 5_000_000, 10_000_000, 0.05, 0.04)
         elif step < 15_000_000:
             eps = self._interp(step, 10_000_000, 15_000_000, 0.04, 0.03)
@@ -554,10 +595,7 @@ class NFSPAgent:
             eps = self._interp(step, 20_000_000, 25_000_000, 0.025, 0.02)
         self._eps_current = max(0.0, min(1.0, eps))
 
-        # Q learning rate schedule
-        if step < 5_000_000:
-            lr_q = 1e-4
-        elif step < 10_000_000:
+        if step < 10_000_000:
             lr_q = self._interp(step, 5_000_000, 10_000_000, 1e-4, 7e-5)
         elif step < 15_000_000:
             lr_q = self._interp(step, 10_000_000, 15_000_000, 7e-5, 5e-5)
@@ -567,7 +605,6 @@ class NFSPAgent:
             lr_q = self._interp(step, 23_000_000, 25_000_000, 5e-5, 3e-5)
         self._set_lr(self.opt_q, lr_q)
 
-        # RL cadence to keep reuse manageable
         if step < 10_000_000:
             self.cfg.train_rl_every = 32
         elif step < 12_000_000:
@@ -579,7 +616,6 @@ class NFSPAgent:
         else:
             self.cfg.train_rl_every = 64
 
-        # n-step schedule
         if step < 12_000_000:
             target_n = 5
         elif step < 20_000_000:
@@ -588,10 +624,14 @@ class NFSPAgent:
             target_n = 10
         target_n = max(1, target_n)
         if target_n != self._active_n_step:
-            # flush pending transitions under previous n-step before switching
             self._flush_nstep(force=True)
             self._active_n_step = target_n
-            self.cfg.n_step = target_n
+        self.cfg.n_step = target_n
+
+        self.cfg.lr_pi = 3e-4
+        self._set_lr(self.opt_pi, self.cfg.lr_pi)
+        self.cfg.train_sl_every = 8
+        self.cfg.batch_sl = max(256, self.cfg.batch_sl)
 
     def _store_transition(self, obs, mask, action_idx: int, reward: float, nobs, nmask, done: bool, is_br: bool):
         action_tensor = torch.tensor(action_idx, dtype=torch.long, device=self.device)
@@ -729,7 +769,7 @@ class NFSPAgent:
         csv_header = [
             "step","avg_reward","win_rate","avg_len",
             "q_loss","sl_loss","policy_entropy",
-            "illegal_rate","epsilon","anticipatory_eta","lr_q","n_step","train_rl_every",
+            "illegal_rate","epsilon","anticipatory_eta","lr_q","n_step","train_rl_every","check_explore_prob",
             "rl_buf","sl_buf"
         ]
         csv_logger = _CsvLogger(csv_path, csv_header) if csv_path else None
@@ -863,6 +903,7 @@ class NFSPAgent:
                 lr_q_val = float(self.opt_q.param_groups[0]["lr"])
                 n_step_active = int(self._active_n_step)
                 rl_every = int(self.cfg.train_rl_every)
+                check_prob = float(getattr(self, "_check_explore_prob", 0.0))
 
                 print(
                     f"[steps={self.total_env_steps}] "
@@ -872,6 +913,7 @@ class NFSPAgent:
                     f"RL_buf={self.rl_buf.size} SL_buf≈{min(self.sl_buf.size, self.sl_buf.capacity)} "
                     f"RL_upd={self.rl_updates} SL_upd={self.sl_updates} "
                     f"eta={eta_val:.3f} lr_q={lr_q_val:.2e} n_step={n_step_active} rl_every={rl_every} "
+                    f"chk_p={check_prob:.3f} "
                     f"episodes_tracked={episodes_logged}"
                 )
 
@@ -884,6 +926,7 @@ class NFSPAgent:
                     writer.add_scalar("Policy/entropy", pent,      self.total_env_steps)
                     writer.add_scalar("Env/illegal_rate", illegal_rt, self.total_env_steps)
                     writer.add_scalar("Exploration/epsilon", eps,   self.total_env_steps)
+                    writer.add_scalar("Exploration/check_prob", check_prob, self.total_env_steps)
                     writer.add_scalar("Exploration/eta", eta_val, self.total_env_steps)
                     writer.add_scalar("Optimization/lr_q", lr_q_val, self.total_env_steps)
                     writer.add_scalar("Optimization/n_step", n_step_active, self.total_env_steps)
@@ -895,7 +938,7 @@ class NFSPAgent:
                     csv_logger.row([
                         self.total_env_steps, avg_reward, win_rate, avg_len,
                         ql, sll, pent, illegal_rt, eps,
-                        eta_val, lr_q_val, n_step_active, rl_every,
+                        eta_val, lr_q_val, n_step_active, rl_every, check_prob,
                         self.rl_buf.size, min(self.sl_buf.size, self.sl_buf.capacity)
                     ])
 
