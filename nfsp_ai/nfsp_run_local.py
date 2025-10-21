@@ -26,6 +26,7 @@ N_VALUES = 6
 N_COLOURS = 4
 HAND_VEC_DIM = N_VALUES * N_COLOURS  # 24
 ACT_DIM = CHECK + 1                  # 0..87 plus CHECK(88) => 89
+OBS_DIM = 326                        # Flattened observation size
 
 
 # ---------- Utilities ----------
@@ -173,117 +174,107 @@ def _round_history_action_ids_88(game: dict) -> List[int]:
 
 def vectorize_obs(game: dict, nick: str) -> torch.Tensor:
     """
-    Updated observation for current player (nick):
-      - 24-dim multi-hot for private hand ranks*suits (ignores jokers & blanks)
-      - 1-dim total joker count (possible by rules, not just seen)
-      - 1-dim private joker count (in my hand)
-      - 1-dim common-hand joker count
-      - 24-dim multi-hot common-hand ranks*suits (ignores jokers & blanks)
-      - 8-dim public n_cards per seat (padded/rotated so this player is seat 0)
-      - 1-dim round number (scaled by rules.get('max_rounds', 4))
-      - 88-dim multi-hot of actions taken in THIS round
-      - 88-dim prior probabilities: p(action exists | private hand, rules)
-      - 88-dim prior probabilities: p(action exists | public counts/common hand/rules)
-      - 1-dim total blanks (possible by rules, not just seen)
-
-    Total dim = 24 + 1 + 1 + 1 + 24 + 8 + 1 + 88 + 88 + 88 + 1 = 325
+    Updated observation for current player (nick) with minimal allocations.
     """
     rules = game.get("rules", {}) or {}
     players = game.get("players", []) or []
 
-    # Hands
-    my_hand = _current_hand_int(game, nick)
-    common  = _common_hand_int(game)
+    obs = np.zeros((OBS_DIM,), dtype=np.float32)
+    idx = 0
 
-    my_vec24      = _multi_hot_cards24_from_ints(my_hand)     # 24
-    common_vec24  = _multi_hot_cards24_from_ints(common)      # 24
-    my_jokers     = float(_count_jokers_from_ints(my_hand))   # 1
-    common_jokers = float(_count_jokers_from_ints(common))    # 1
-    total_jokers  = float(_rules_total_jokers(rules))         # 1
-    total_blanks  = float(_rules_total_blanks(rules))         # 1
+    # Private hand multi-hot
+    my_hand = _current_hand_int(game, nick)
+    for card in my_hand or []:
+        pos = _card_idx_24(int(card.get("value", -2)), int(card.get("colour", -2)))
+        if pos >= 0:
+            obs[idx + pos] = 1.0
+    idx += HAND_VEC_DIM
+
+    # Totals & joker counts
+    obs[idx] = float(_rules_total_jokers(rules)); idx += 1
+    obs[idx] = float(_count_jokers_from_ints(my_hand)); idx += 1
+    common_hand = _common_hand_int(game)
+    obs[idx] = float(_count_jokers_from_ints(common_hand)); idx += 1
+
+    # Common cards multi-hot
+    common_base = idx
+    for card in common_hand or []:
+        pos = _card_idx_24(int(card.get("value", -2)), int(card.get("colour", -2)))
+        if pos >= 0:
+            obs[common_base + pos] = 1.0
+    idx += HAND_VEC_DIM
 
     # Seat counts rotated so current player is seat 0
     my_seat = _seat_index(players, game.get("cp_nickname", nick))
-    counts  = [int(p.get("n_cards", 0)) for p in players]
-    counts  = (counts + [0] * (MAX_PLAYERS - len(counts)))[:MAX_PLAYERS]
-    counts  = _rotate_list(counts, my_seat)
-    counts8 = np.asarray(counts[:MAX_PLAYERS], dtype=np.float32)     # 8
+    counts = [int(p.get("n_cards", 0)) for p in players]
+    counts = (counts + [0] * (MAX_PLAYERS - len(counts)))[:MAX_PLAYERS]
+    counts = _rotate_list(counts, my_seat)
+    obs[idx:idx + MAX_PLAYERS] = counts[:MAX_PLAYERS]
+    idx += MAX_PLAYERS
 
-    # Round scaling (fallback to 1 if not present)
-    cur_round  = int(game.get("round_number", 1))
+    # Round scaling
+    cur_round = int(game.get("round_number", 1))
     max_rounds = int(rules.get("max_rounds", 4))
-    round_scaled = np.float32(min(max(cur_round / max(1, max_rounds), 0.0), 1.0))  # 1
+    obs[idx] = float(min(max(cur_round / max(1, max_rounds), 0.0), 1.0))
+    idx += 1
 
-    # History (88)
+    # Action history multi-hot
     hist_ids = _round_history_action_ids_88(game)
-    hist88 = np.zeros((HIST_DIM,), dtype=np.float32)
     if hist_ids:
-        hist88[np.unique(hist_ids)] = 1.0
+        obs[idx + np.unique(hist_ids)] = 1.0
+    idx += HIST_DIM
 
-    # Last bet probability, to evaluate checking it
+    # Last bet probability
+    last_bet_id = _last_bet_action_id(game)
     prob_last_bet_exists = get_bet_probabilities(
         game_state=game,
         for_betting=False,
-        specific_action_id=_last_bet_action_id(game),
+        specific_action_id=last_bet_id,
     )
+    obs[idx] = float(prob_last_bet_exists)
+    idx += 1
 
-    # Private prior: depends on my hand and rules (for_betting=True)
+    # Private priors (depends on my hand)
+    pvt_slice = slice(idx, idx + HIST_DIM)
     pvt_prior = get_bet_probabilities(
         game_state=game,
         for_betting=True,
-        last_bet=_last_bet_action_id(game),
+        last_bet=last_bet_id,
     )
-    pvt_prior = np.asarray(pvt_prior, dtype=np.float32)
+    obs[pvt_slice] = pvt_prior
+    idx += HIST_DIM
 
-    # Public prior: depends only on public information
+    # Public priors
+    pub_slice = slice(idx, idx + HIST_DIM)
     pub_prior = get_generic_bet_probabilities(
         game_state=game,
-        last_bet=_last_bet_action_id(game),
+        last_bet=last_bet_id,
     )
-    pub_prior = np.asarray(pub_prior, dtype=np.float32)
+    obs[pub_slice] = pub_prior
+    idx += HIST_DIM
 
-    # --- Strict checks ---
-    if pvt_prior.shape != (HIST_DIM,):
-        raise ValueError(
-            f"get_bet_probabilities() returned shape {pvt_prior.shape}, expected {(HIST_DIM,)}"
-        )
-    if pub_prior.shape != (HIST_DIM,):
-        raise ValueError(
-            f"get_generic_bet_probabilities() returned shape {pub_prior.shape}, expected {(HIST_DIM,)}"
-        )
+    # Total blanks
+    obs[idx] = float(_rules_total_blanks(rules))
+    idx += 1
 
-    # Validate that all values are finite and in [0, 1]
-    if not np.isfinite(pvt_prior).all():
+    if idx != OBS_DIM:
+        raise ValueError(f"vectorize_obs produced dim {idx}, expected {OBS_DIM}")
+
+    # Validations on probability slices
+    if len(pvt_prior) != HIST_DIM:
+        raise ValueError(f"get_bet_probabilities() returned length {len(pvt_prior)}, expected {HIST_DIM}")
+    if len(pub_prior) != HIST_DIM:
+        raise ValueError(f"get_generic_bet_probabilities() returned length {len(pub_prior)}, expected {HIST_DIM}")
+
+    if not np.isfinite(obs[pvt_slice]).all():
         raise ValueError("get_bet_probabilities() returned non-finite values")
-    if not np.isfinite(pub_prior).all():
+    if not np.isfinite(obs[pub_slice]).all():
         raise ValueError("get_generic_bet_probabilities() returned non-finite values")
 
-    if not ((0.0 <= pvt_prior).all() and (pvt_prior <= 1.0).all()):
+    if not ((0.0 <= obs[pvt_slice]).all() and (obs[pvt_slice] <= 1.0).all()):
         raise ValueError("get_bet_probabilities() returned values outside [0, 1]")
-    if not ((0.0 <= pub_prior).all() and (pub_prior <= 1.0).all()):
+    if not ((0.0 <= obs[pub_slice]).all() and (obs[pub_slice] <= 1.0).all()):
         raise ValueError("get_generic_bet_probabilities() returned values outside [0, 1]")
-
-
-    parts = [
-        my_vec24,                                 # 24
-        np.asarray([total_jokers], dtype=np.float32),    # 1
-        np.asarray([my_jokers], dtype=np.float32),       # 1
-        np.asarray([common_jokers], dtype=np.float32),   # 1
-        common_vec24,                             # 24
-        counts8,                                  # 8
-        np.asarray([round_scaled], dtype=np.float32),    # 1
-        hist88,                                   # 88
-        np.asarray([prob_last_bet_exists], dtype=np.float32),    # 1
-        pvt_prior,                                # 88
-        pub_prior,                                # 88
-        np.asarray([total_blanks], dtype=np.float32),    # 1
-    ]
-
-    obs = np.concatenate(parts, axis=0).astype(np.float32)
-
-    # Hard assert schema to catch drift early
-    if obs.shape[0] != 326:
-        raise ValueError(f"vectorize_obs produced dim {obs.shape[0]}, expected 325")
 
     return torch.from_numpy(obs)
 
