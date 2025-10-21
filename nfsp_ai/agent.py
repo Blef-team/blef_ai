@@ -394,15 +394,14 @@ class NFSPAgent:
         obs = obs.unsqueeze(0).to(self.device)   # [1, D]
         mask = mask.unsqueeze(0).to(self.device) # [1, A]
 
-        if use_br:
+        # Manual override: here we force it to pick CHECK (for early exposure)
+        check_prob = getattr(self, "_check_explore_prob", 0.0)
+        if check_prob > 0.0:
+            check_idx = mask.shape[-1] - 1
+            if mask[0, check_idx] > 0 and random.random() < check_prob:
+                return int(check_idx)
 
-            # Manual override: here we force it to pick CHECK (for early exposure)
-            check_prob = getattr(self, "_check_explore_prob", 0.0)
-            if check_prob > 0.0:
-                check_idx = mask.shape[-1] - 1
-                if mask[0, check_idx] > 0 and random.random() < check_prob:
-                    return int(check_idx)
-            
+        if use_br:
             q = self.q(obs)                      # [1, A]
             # epsilon-greedy over legal actions
             if random.random() < epsilon:
