@@ -145,12 +145,13 @@ def save(game, dir="games"):
         json.dump(game, filehandle)
 
 
-def determine_set_existence(all_cards, action_id, rules=None, num_jokers=0):
+def determine_set_existence(all_cards, action_id, rules=None, num_jokers=None, num_blanks=None):
     """Check if a claimed set exists in the combined cards, allowing for jokers.
     - all_cards: list of card dicts with keys 'value' and 'colour'
     - action_id: int from local indexation (0..87) or CHECK
     - rules: optional dict; only 'deck_size' used (must be 24 here)
-    - num_jokers: usable jokers (value == -1) available to the *bettor* (their hand + common)
+    - num_jokers: usable jokers (value == -1) available to the *bettor* (their hand + common). If None, inferred from all_cards.
+    - num_blanks: blanks (value == -2) carried by the bettor. Inert in current rules; default None infers from all_cards.
     """
     rules = rules or {'deck_size': 24}
     if action_id == CHECK:
@@ -160,9 +161,20 @@ def determine_set_existence(all_cards, action_id, rules=None, num_jokers=0):
     d1 = details.get('detail_1')
     d2 = details.get('detail_2')
 
-    # Extract values and suits ignoring jokers (-1)
-    values = [int(c['value']) for c in all_cards if int(c.get('value')) >= 0]
-    suits = [int(c['colour']) for c in all_cards if int(c.get('value')) >= 0]
+    # Count special cards.
+    total_jokers = sum(1 for c in all_cards if int(c.get('value', 0)) == -1)
+    total_blanks = sum(1 for c in all_cards if int(c.get('value', 0)) == -2)
+    if num_jokers is None:
+        num_jokers = total_jokers
+    num_jokers = max(0, int(num_jokers))
+    if num_blanks is None:
+        num_blanks = total_blanks
+    # Blanks are inert today, but keep the count handy for future rules.
+    num_blanks = max(0, int(num_blanks))
+
+    # Extract values and suits ignoring jokers (-1) and blanks (-2)
+    values = [int(c['value']) for c in all_cards if int(c.get('value', 0)) >= 0]
+    suits = [int(c['colour']) for c in all_cards if int(c.get('value', 0)) >= 0]
 
     def count_value(v): return sum(1 for x in values if x == v)
     def count_suit(s): return sum(1 for sc in suits if sc == s)
