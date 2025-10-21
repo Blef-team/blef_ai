@@ -1,139 +1,41 @@
 import uuid
+from functools import lru_cache
 from math import floor
-from random import shuffle, sample, choice
+from random import shuffle
 from itertools import islice, product
 import json
 import os
 
-
-CHECK = 88
-
-INDEXATION_CSV = """action_id,set_type,detail_1,detail_2
-0,High card,0,
-1,High card,1,
-2,High card,2,
-3,High card,3,
-4,High card,4,
-5,High card,5,
-6,Pair,0,
-7,Pair,1,
-8,Pair,2,
-9,Pair,3,
-10,Pair,4,
-11,Pair,5,
-12,Two pairs,1,0
-13,Two pairs,2,0
-14,Two pairs,2,1
-15,Two pairs,3,0
-16,Two pairs,3,1
-17,Two pairs,3,2
-18,Two pairs,4,0
-19,Two pairs,4,1
-20,Two pairs,4,2
-21,Two pairs,4,3
-22,Two pairs,5,0
-23,Two pairs,5,1
-24,Two pairs,5,2
-25,Two pairs,5,3
-26,Two pairs,5,4
-27,Small straight,,
-28,Big straight,,
-29,Great straight,,
-30,Three of a kind,0,
-31,Three of a kind,1,
-32,Three of a kind,2,
-33,Three of a kind,3,
-34,Three of a kind,4,
-35,Three of a kind,5,
-36,Full house,0,1
-37,Full house,0,2
-38,Full house,0,3
-39,Full house,0,4
-40,Full house,0,5
-41,Full house,1,0
-42,Full house,1,2
-43,Full house,1,3
-44,Full house,1,4
-45,Full house,1,5
-46,Full house,2,0
-47,Full house,2,1
-48,Full house,2,3
-49,Full house,2,4
-50,Full house,2,5
-51,Full house,3,0
-52,Full house,3,1
-53,Full house,3,2
-54,Full house,3,4
-55,Full house,3,5
-56,Full house,4,0
-57,Full house,4,1
-58,Full house,4,2
-59,Full house,4,3
-60,Full house,4,5
-61,Full house,5,0
-62,Full house,5,1
-63,Full house,5,2
-64,Full house,5,3
-65,Full house,5,4
-66,Colour,0,
-67,Colour,1,
-68,Colour,2,
-69,Colour,3,
-70,Four of a kind,0,
-71,Four of a kind,1,
-72,Four of a kind,2,
-73,Four of a kind,3,
-74,Four of a kind,4,
-75,Four of a kind,5,
-76,Small flush,0,
-77,Small flush,1,
-78,Small flush,2,
-79,Small flush,3,
-80,Big flush,0,
-81,Big flush,1,
-82,Big flush,2,
-83,Big flush,3,
-84,Great flush,0,
-85,Great flush,1,
-86,Great flush,2,
-87,Great flush,3,"""
+from shared.game_utils import GameRules, get_set_details_from_action_id as _shared_get_set_details
 
 
-def load_indexation():
-    header = None
-    indexation = []
-    for line in INDEXATION_CSV.split("\n"):
-        if not header:
-            header = line
-            continue
-        if not line.strip():
-            continue
-        action_id, set_type, detail_1, detail_2 = line.split(",")
-        indexation.append({"action_id": action_id,
-                           "set_type": set_type,
-                           "detail_1": detail_1,
-                           "detail_2": detail_2
-                           })
-    return indexation
+DEFAULT_DECK_SIZE = 24
 
-INDEXATION = load_indexation()
 
-def get_set_details_from_action_id(action_id, deck_size=24):
-    """Return set details dict based on local INDEXATION for deck_size 24.
-    For future 32-card support, extend INDEXATION_CSV accordingly.
-    { 'set_type': str, 'detail_1': int|None, 'detail_2': int|None }
-    """
-    action_id = int(action_id)
-    if deck_size != 24:
-        raise ValueError("Only deck_size=24 supported in local manager mapping.")
-    if not (0 <= action_id < len(INDEXATION)):
-        if action_id == CHECK:
-            return {'set_type':'Check'}
-        raise ValueError(f"Invalid action_id {action_id}")
-    row = INDEXATION[action_id]
-    d1 = int(row['detail_1']) if str(row['detail_1']).strip() != '' else None
-    d2 = int(row['detail_2']) if str(row['detail_2']).strip() != '' else None
-    return {'set_type': row['set_type'], 'detail_1': d1, 'detail_2': d2}
+def _resolve_deck_size(rules: dict) -> int:
+    return int(rules.get("deck_size", DEFAULT_DECK_SIZE))
+
+
+@lru_cache(maxsize=4)
+def _get_rules_cache(deck_size: int) -> GameRules:
+    return GameRules(deck_size)
+
+
+def _get_game_rules(rules: dict) -> GameRules:
+    return _get_rules_cache(_resolve_deck_size(rules))
+
+
+def _get_check_action_id(rules: dict) -> int:
+    return _get_game_rules(rules).check_action_id
+
+
+def _get_num_actions(rules: dict) -> int:
+    return _get_game_rules(rules).num_actions
+
+
+def _get_set_details(action_id: int, rules: dict) -> dict:
+    deck_size = _resolve_deck_size(rules)
+    return _shared_get_set_details(action_id, deck_size)
 
 
 def save(game, dir="games"):
@@ -146,106 +48,113 @@ def save(game, dir="games"):
 
 
 def determine_set_existence(all_cards, action_id, rules=None, num_jokers=None, num_blanks=None):
-    """Check if a claimed set exists in the combined cards, allowing for jokers.
-    - all_cards: list of card dicts with keys 'value' and 'colour'
-    - action_id: int from local indexation (0..87) or CHECK
-    - rules: optional dict; only 'deck_size' used (must be 24 here)
-    - num_jokers: usable jokers (value == -1) available to the *bettor* (their hand + common). If None, inferred from all_cards.
-    - num_blanks: blanks (value == -2) carried by the bettor. Inert in current rules; default None infers from all_cards.
-    """
-    rules = rules or {'deck_size': 24}
-    if action_id == CHECK:
+    """Check if a claimed set exists in the combined cards, allowing for jokers."""
+    rules = rules or {"deck_size": DEFAULT_DECK_SIZE}
+    check_action_id = _get_check_action_id(rules)
+    if action_id == check_action_id:
         raise ValueError("determine_set_existence called with CHECK action_id")
-    details = get_set_details_from_action_id(action_id, rules.get('deck_size', 24))
-    set_type = details['set_type']
-    d1 = details.get('detail_1')
-    d2 = details.get('detail_2')
 
-    # Count special cards.
-    total_jokers = sum(1 for c in all_cards if int(c.get('value', 0)) == -1)
-    total_blanks = sum(1 for c in all_cards if int(c.get('value', 0)) == -2)
+    deck_size = _resolve_deck_size(rules)
+    num_values = deck_size // 4
+    details = _get_set_details(action_id, rules)
+    set_type = details.get("set_type", "")
+    detail_1 = details.get("detail_1")
+    detail_2 = details.get("detail_2")
+    required_values = details.get("details", [])
+
+    value_counts = [0] * num_values
+    suit_counts = [0] * 4
+    value_suit_counts = [[0] * 4 for _ in range(num_values)]
+    total_jokers = 0
+    total_blanks = 0
+
+    for card in all_cards:
+        value = int(card.get("value", -3))
+        colour = int(card.get("colour", -1))
+        if value >= 0:
+            if not (0 <= value < num_values):
+                raise ValueError(f"Card value {value} incompatible with deck size {deck_size}")
+            value_counts[value] += 1
+            if 0 <= colour < 4:
+                suit_counts[colour] += 1
+                value_suit_counts[value][colour] += 1
+        elif value == -1:
+            total_jokers += 1
+        elif value == -2:
+            total_blanks += 1
+
     if num_jokers is None:
         num_jokers = total_jokers
     num_jokers = max(0, int(num_jokers))
+
     if num_blanks is None:
         num_blanks = total_blanks
-    # Blanks are inert today, but keep the count handy for future rules.
-    num_blanks = max(0, int(num_blanks))
+    num_blanks = max(0, int(num_blanks))  # currently unused but retained for future rules
 
-    # Extract values and suits ignoring jokers (-1) and blanks (-2)
-    values = [int(c['value']) for c in all_cards if int(c.get('value', 0)) >= 0]
-    suits = [int(c['colour']) for c in all_cards if int(c.get('value', 0)) >= 0]
+    def need(target: int, have: int) -> int:
+        return max(0, target - have)
 
-    def count_value(v): return sum(1 for x in values if x == v)
-    def count_suit(s): return sum(1 for sc in suits if sc == s)
-    def need_n(target, have): return max(0, target - have)
+    if set_type in {"High card", "Pair", "Three of a kind", "Four of a kind"}:
+        required = {"High card": 1, "Pair": 2, "Three of a kind": 3, "Four of a kind": 4}[set_type]
+        if detail_1 is None:
+            return False
+        missing = need(required, value_counts[detail_1])
+        return missing <= num_jokers
 
-    # Straight rank sets for 24-deck (values 0..5)
-    small = [0,1,2,3,4]
-    big = [1,2,3,4,5]
-    great = [0,1,2,3,4,5]
+    if set_type == "Two pairs":
+        if detail_1 is None or detail_2 is None:
+            return False
+        missing = need(2, value_counts[detail_1]) + need(2, value_counts[detail_2])
+        return missing <= num_jokers
 
-    if set_type == 'High card':
-        return need_n(1, count_value(d1)) <= num_jokers
+    if set_type == "Three of a kind":  # already handled above, but keep for safety
+        if detail_1 is None:
+            return False
+        missing = need(3, value_counts[detail_1])
+        return missing <= num_jokers
 
-    if set_type == 'Pair':
-        return need_n(2, count_value(d1)) <= num_jokers
+    if set_type == "Full house":
+        if detail_1 is None or detail_2 is None:
+            return False
+        missing = need(3, value_counts[detail_1]) + need(2, value_counts[detail_2])
+        return missing <= num_jokers
 
-    if set_type == 'Two pairs':
-        miss1 = need_n(2, count_value(d1))
-        miss2 = need_n(2, count_value(d2))
-        return miss1 + miss2 <= num_jokers
+    if set_type == "Flush":
+        if detail_1 is None:
+            return False
+        missing = need(5, suit_counts[detail_1])
+        return missing <= num_jokers
 
-    if set_type == 'Three of a kind':
-        return need_n(3, count_value(d1)) <= num_jokers
+    if set_type == "Four of a kind":  # redundancy guard
+        if detail_1 is None:
+            return False
+        missing = need(4, value_counts[detail_1])
+        return missing <= num_jokers
 
-    if set_type == 'Full house':
-        miss_trips = need_n(3, count_value(d1))
-        miss_pair = need_n(2, count_value(d2))
-        return miss_trips + miss_pair <= num_jokers
+    if set_type == "Straight flush":
+        suit = detail_1
+        if suit is None or not required_values:
+            return False
+        missing = sum(1 for v in required_values if value_suit_counts[v][suit] == 0)
+        return missing <= num_jokers
 
-    if set_type in ('Colour','Flush'):
-        return need_n(5, count_suit(d1)) <= num_jokers
-
-    if set_type == 'Four of a kind':
-        return need_n(4, count_value(d1)) <= num_jokers
-
-    # Straights (any suits)
-    if set_type == 'Small straight':
-        present = set(v for v in values if v in small)
-        return len(set(small) - present) <= num_jokers
-
-    if set_type == 'Big straight':
-        present = set(v for v in values if v in big)
-        return len(set(big) - present) <= num_jokers
-
-    if set_type == 'Great straight':
-        present = set(v for v in values if v in great)
-        return len(set(great) - present) <= num_jokers
-
-    # Straight flushes (CSV names: Small/Big/Great flush) per suit d1
-    if set_type in ('Small flush','Straight flush (small)'):
-        suit_vals = [int(c['value']) for c in all_cards if int(c.get('value')) >= 0 and int(c['colour']) == d1]
-        present = set(v for v in suit_vals if v in small)
-        return len(set(small) - present) <= num_jokers
-
-    if set_type in ('Big flush','Straight flush (big)'):
-        suit_vals = [int(c['value']) for c in all_cards if int(c.get('value')) >= 0 and int(c['colour']) == d1]
-        present = set(v for v in suit_vals if v in big)
-        return len(set(big) - present) <= num_jokers
-
-    if set_type in ('Great flush','Straight flush'):
-        suit_vals = [int(c['value']) for c in all_cards if int(c.get('value')) >= 0 and int(c['colour']) == d1]
-        present = set(v for v in suit_vals if v in great)
-        return len(set(great) - present) <= num_jokers
+    if "Straight" in set_type:
+        if not required_values:
+            return False
+        missing = sum(1 for v in required_values if value_counts[v] == 0)
+        return missing <= num_jokers
 
     return False
 
 
-def draw_cards(players):
-    # Create 24-card deck: values 0..5 (6 ranks) x 4 suits (colours 0..3)
-    # If you want jokers locally, you can append {'value': -1, 'colour': -1} to the deck before shuffling.
-    deck = [{"value": v, "colour": c} for v, c in product(range(6), range(4))]
+def draw_cards(players, rules):
+    deck_size = _resolve_deck_size(rules)
+    num_values = deck_size // 4
+    deck = [{"value": v, "colour": c} for v, c in product(range(num_values), range(4))]
+    for _ in range(int(rules.get("jokers", 0))):
+        deck.append({"value": -1, "colour": -1})
+    for _ in range(int(rules.get("blanks", 0))):
+        deck.append({"value": -2, "colour": -1})
     shuffle(deck)
     hands = []
     for p in players:
@@ -299,16 +208,19 @@ def arrange_players(players):
 
     return players
 
-def create_game(n_agents, max_cards=None, verbose=False):
+def create_game(n_agents, deck_size=DEFAULT_DECK_SIZE, max_cards=None, jokers=0, blanks=0, verbose=False):
     if n_agents < 2:
         raise ValueError("n_agents < 2")
     if n_agents > 8:
         raise ValueError("n_agents > 8")
     game_uuid = str(uuid.uuid4())
     players = [{"nickname": str(i), "n_cards": 1} for i in range(n_agents)]
-    default_max_cards = floor(24 / len(players)) if len(players) > 2 else 11
-    
-    rules = {"deck_size": 24}
+    if len(players) > 2:
+        default_max_cards = floor(deck_size / len(players))
+    else:
+        default_max_cards = max(1, deck_size // 2 - 1)
+
+    rules = {"deck_size": int(deck_size), "jokers": int(jokers), "blanks": int(blanks)}
     
     max_cards_value = default_max_cards
     if max_cards is not None and max_cards > 0:
@@ -320,7 +232,7 @@ def create_game(n_agents, max_cards=None, verbose=False):
         "common_hand": [],
         "round_number": 1,
         "max_cards": max_cards_value,
-        "hands": draw_cards(players),
+        "hands": draw_cards(players, rules),
         "players": players,
         "cp_nickname": players[0]["nickname"],
         "history": []
@@ -341,8 +253,16 @@ def handle_check(game, save_dir="games"):
     bettor_hand = next((h["hand"] for h in game["hands"] if h["nickname"] == bettor_nickname), [])
     num_jokers = sum(1 for c in bettor_hand if int(c.get("value")) == -1)
     num_jokers += sum(1 for c in game.get("common_hand", []) if int(c.get("value")) == -1)
+    num_blanks = sum(1 for c in bettor_hand if int(c.get("value")) == -2)
+    num_blanks += sum(1 for c in game.get("common_hand", []) if int(c.get("value")) == -2)
 
-    set_exists = determine_set_existence(all_cards, game["history"][-2]["action_id"], game.get("rules", {}), num_jokers)
+    set_exists = determine_set_existence(
+        all_cards,
+        game["history"][-2]["action_id"],
+        game.get("rules", {}),
+        num_jokers,
+        num_blanks,
+    )
 
     if set_exists:
         # Checker loses
@@ -351,7 +271,8 @@ def handle_check(game, save_dir="games"):
         # Bettor loses
         losing_player = get_player_by_nickname(game["players"], game["history"][-2]["player"])
 
-    game["history"].append({"player": losing_player["nickname"], "action_id": 89})
+    elimination_action_id = _get_num_actions(game["rules"])
+    game["history"].append({"player": losing_player["nickname"], "action_id": elimination_action_id})
     game["cp_nickname"] = None
 
     # Store the last round separately
@@ -378,7 +299,7 @@ def handle_check(game, save_dir="games"):
     # New round: reset history, re-deal
     game["round_number"] += 1
     game["history"] = []
-    game["hands"] = draw_cards(game["players"])
+    game["hands"] = draw_cards(game["players"], game["rules"])
 
     save(game, dir=save_dir)
 
@@ -389,32 +310,34 @@ def play(game, action_id, save_dir="games", verbose=False):
         action_id = int(action_id)
     except (TypeError, ValueError):
         raise ValueError(f"action_id must be int, got {action_id}")
+    rules = game.get("rules", {})
+    check_action_id = _get_check_action_id(rules)
     # Legality checks
-    if action_id == CHECK:
+    if action_id == check_action_id:
         if not game["history"]:
             raise ValueError("Cannot CHECK as first action; no bet to check.")
         last = game["history"][-1]["action_id"]
-        if last == CHECK:
+        if last == check_action_id:
             raise ValueError("Consecutive CHECK not allowed.")
     else:
-        if not (0 <= action_id < CHECK):
+        if not (0 <= action_id < check_action_id):
             raise ValueError(f"Bet action_id out of range: {action_id}")
         if game["history"]:
             last = game["history"][-1]["action_id"]
-            if last == CHECK:
+            if last == check_action_id:
                 raise ValueError("Cannot bet immediately after a CHECK within the same unresolved round.")
             if action_id <= last:
                 raise ValueError(f"Illegal bet {action_id}: must be strictly greater than previous bet {last}.")
     # Append to history
     game["history"].append({"player": game["cp_nickname"], "action_id": action_id})
 
-    if action_id != CHECK:
-        move_name = INDEXATION[action_id]['set_type']
+    if action_id != check_action_id:
+        move_name = _get_set_details(action_id, rules)['set_type']
         if verbose:
             print(f"player {game['cp_nickname']} plays {move_name}")
         game["cp_nickname"] = find_next_active_player(game["players"], game["cp_nickname"])["nickname"]
 
-    if action_id == CHECK:
+    if action_id == check_action_id:
         if verbose:
             print(f"player {game['cp_nickname']} checks")
         handle_check(game, save_dir=save_dir)
