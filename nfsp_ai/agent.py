@@ -1028,7 +1028,7 @@ class NFSPAgent:
             "step","avg_reward","win_rate","avg_len",
             "q_loss","sl_loss","policy_entropy",
             "illegal_rate","epsilon","anticipatory_eta","lr_q","n_step","train_rl_every","check_explore_prob","max_cards",
-            "rl_buf","sl_buf"
+            "rl_buf","sl_buf","pinned_overrides","pinned_env"
         ]
         csv_logger = _CsvLogger(csv_path, csv_header) if csv_path else None
 
@@ -1041,6 +1041,9 @@ class NFSPAgent:
                 self._apply_phase_schedules(self.total_env_steps)
             eps = self._epsilon()
             if control_plane is not None:
+                self._ensure_override_state()
+                pinned_override_keys = sorted(self._pinned_overrides.keys())
+                pinned_env_keys = sorted(self._pinned_env_overrides.keys())
                 metrics_snapshot = {
                     "step": self.total_env_steps,
                     "eta": float(self.cfg.anticipatory_eta),
@@ -1058,6 +1061,8 @@ class NFSPAgent:
                     "burst_rl_updates_on_reward": int(self.cfg.burst_rl_updates_on_reward),
                     "burst_reward_threshold": float(self.cfg.burst_reward_threshold),
                     "check_prob": float(getattr(self, "_check_explore_prob", 0.0)),
+                    "pinned_overrides": pinned_override_keys,
+                    "pinned_env": pinned_env_keys,
                     "rho_est": float(
                         self.cfg.batch_rl
                         / max(1.0, self.cfg.train_rl_every)
@@ -1195,6 +1200,11 @@ class NFSPAgent:
                 rl_every = int(self.cfg.train_rl_every)
                 check_prob = float(getattr(self, "_check_explore_prob", 0.0))
                 current_max_cards = int(getattr(env, "max_cards", desired_max_cards))
+                self._ensure_override_state()
+                pinned_override_keys = sorted(self._pinned_overrides.keys())
+                pinned_env_keys = sorted(self._pinned_env_overrides.keys())
+                pin_summary = ",".join(pinned_override_keys) if pinned_override_keys else "-"
+                env_pin_summary = ",".join(pinned_env_keys) if pinned_env_keys else "-"
 
                 print(
                     f"[steps={self.total_env_steps}] "
@@ -1205,6 +1215,7 @@ class NFSPAgent:
                     f"RL_upd={self.rl_updates} SL_upd={self.sl_updates} "
                     f"eta={eta_val:.3f} lr_q={lr_q_val:.2e} n_step={n_step_active} rl_every={rl_every} "
                     f"chk_p={check_prob:.3f} max_cards={current_max_cards} "
+                    f"pins={pin_summary} env_pins={env_pin_summary} "
                     f"episodes_tracked={episodes_logged}"
                 )
 
@@ -1225,13 +1236,17 @@ class NFSPAgent:
                     writer.add_scalar("Env/max_cards", current_max_cards, self.total_env_steps)
                     writer.add_scalar("Buffers/RL_size", self.rl_buf.size, self.total_env_steps)
                     writer.add_scalar("Buffers/SL_size", min(self.sl_buf.size, self.sl_buf.capacity), self.total_env_steps)
+                    writer.add_scalar("Control/pinned_override_count", len(pinned_override_keys), self.total_env_steps)
+                    writer.add_scalar("Control/pinned_env_count", len(pinned_env_keys), self.total_env_steps)
 
                 if csv_logger:
                     csv_logger.row([
                         self.total_env_steps, avg_reward, win_rate, avg_len,
                         ql, sll, pent, illegal_rt, eps,
                         eta_val, lr_q_val, n_step_active, rl_every, check_prob, current_max_cards,
-                        self.rl_buf.size, min(self.sl_buf.size, self.sl_buf.capacity)
+                        self.rl_buf.size, min(self.sl_buf.size, self.sl_buf.capacity),
+                        "|".join(pinned_override_keys) if pinned_override_keys else "",
+                        "|".join(pinned_env_keys) if pinned_env_keys else "",
                     ])
 
             if save_path and (self.total_env_steps % (10 * log_every) == 0):
@@ -1256,6 +1271,9 @@ class NFSPAgent:
                     writer.add_scalar("Eval/win_rate",   eval_stats["win_rate"],  self.total_env_steps)
                     writer.add_scalar("Eval/avg_len",    eval_stats["avg_len"],   self.total_env_steps)
                 if csv_logger:
+                    self._ensure_override_state()
+                    pinned_override_keys = sorted(self._pinned_overrides.keys())
+                    pinned_env_keys = sorted(self._pinned_env_overrides.keys())
                     # Write a “synthetic” row carrying eval stats (loss fields left as NaN)
                     csv_logger.row([
                         self.total_env_steps,
@@ -1275,6 +1293,8 @@ class NFSPAgent:
                         int(getattr(env, "max_cards", desired_max_cards)),
                         self.rl_buf.size,
                         min(self.sl_buf.size, self.sl_buf.capacity),
+                        "|".join(pinned_override_keys) if pinned_override_keys else "",
+                        "|".join(pinned_env_keys) if pinned_env_keys else "",
                     ])
                 if eval_env_factory is None:
                     # Evaluation mutated the training env; reset so gameplay resumes cleanly

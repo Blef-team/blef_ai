@@ -140,6 +140,14 @@ def summarise(checkpoint: Dict[str, Any]) -> Dict[str, Any]:
         "tensor_count": len(tensor_meta),
     }
 
+    control_plane = {
+        "pinned_overrides": checkpoint.get("pinned_overrides", {}),
+        "pinned_env_overrides": checkpoint.get("pinned_env_overrides", {}),
+        "eps_current": checkpoint.get("eps_current"),
+        "check_explore_prob": checkpoint.get("check_explore_prob"),
+    }
+    summary["control_plane"] = control_plane
+
     if tensor_meta:
         dtype_counts = Counter(meta.get("dtype") for meta in tensor_meta)
         summary["tensor_dtypes"] = dict(dtype_counts)
@@ -192,6 +200,22 @@ def main() -> None:
         meta = summary["sl_buf"]
         filled = meta.get("filled", meta.get("size"))
         print(f"  sl_buf: filled={filled} capacity={meta.get('capacity')}")
+    if summary.get("control_plane"):
+        cp = summary["control_plane"]
+        pins = cp.get("pinned_overrides") or {}
+        env_pins = cp.get("pinned_env_overrides") or {}
+        if pins or env_pins:
+            print("  control-plane pins:")
+            for key in sorted(pins.keys()):
+                print(f"    {key}: {pins[key]}")
+            for key in sorted(env_pins.keys()):
+                print(f"    env.{key}: {env_pins[key]}")
+        eps_cur = cp.get("eps_current")
+        chk_prob = cp.get("check_explore_prob")
+        if eps_cur is not None or chk_prob is not None:
+            print(
+                f"  control-plane state: eps_current={eps_cur} check_prob={chk_prob}"
+            )
     if "tensor_dtypes" in summary:
         print("  tensor dtypes:")
         for dtype, count in summary["tensor_dtypes"].items():
