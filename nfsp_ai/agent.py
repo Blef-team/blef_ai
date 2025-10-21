@@ -9,7 +9,7 @@
 from __future__ import annotations
 import random
 from dataclasses import dataclass
-from typing import Tuple, Optional, Callable
+from typing import Tuple, Optional, Callable, Any
 
 from collections import deque
 import csv, os, math, time
@@ -386,6 +386,8 @@ class NFSPAgent:
         self.sl_buf = ReservoirSL(cfg.sl_capacity, obs_dim, act_dim, self.device)
 
         self.total_env_steps = 0
+        self._pinned_overrides: dict[str, Any] = {}
+        self._pinned_env_overrides: dict[str, Any] = {}
 
     # -------- Acting (returns sampled action only) --------
     @torch.no_grad()
@@ -497,15 +499,212 @@ class NFSPAgent:
         frac = min(1.0, s / max(1, self.cfg.eps_decay_steps))
         return self.cfg.eps_end + (1.0 - frac) * (self.cfg.eps_start - self.cfg.eps_end)
 
+    def _ensure_override_state(self):
+        if not hasattr(self, "_pinned_overrides"):
+            self._pinned_overrides = {}
+        if not hasattr(self, "_pinned_env_overrides"):
+            self._pinned_env_overrides = {}
+
+    def _apply_pin(self, key: str, value: Any, pin: bool):
+        self._ensure_override_state()
+        if not pin:
+            self._pinned_overrides.pop(key, None)
+            return
+        self._pinned_overrides[key] = value
+
+    def _apply_env_pin(self, key: str, value: Any, pin: bool):
+        self._ensure_override_state()
+        if value is None or not pin:
+            self._pinned_env_overrides.pop(key, None)
+            return
+        self._pinned_env_overrides[key] = value
+
+    def _is_pinned(self, key: str) -> bool:
+        self._ensure_override_state()
+        return key in self._pinned_overrides
+
+    def _get_env_override(self, key: str, default: Any = None) -> Any:
+        self._ensure_override_state()
+        return self._pinned_env_overrides.get(key, default)
+
+    def set_eta(self, value: Optional[float], *, pin: bool = True) -> Optional[float]:
+        key = "anticipatory_eta"
+        if value is None:
+            self._pinned_overrides.pop(key, None)
+            return None
+        val = float(max(0.0, min(1.0, value)))
+        self.cfg.anticipatory_eta = val
+        self._apply_pin(key, val, pin)
+        return val
+
+    def set_epsilon(self, value: Optional[float], *, pin: bool = True) -> Optional[float]:
+        key = "epsilon"
+        if value is None:
+            self._pinned_overrides.pop(key, None)
+            return None
+        val = float(max(0.0, min(1.0, value)))
+        self._eps_current = val
+        self._apply_pin(key, val, pin)
+        return val
+
+    def set_lr_q(self, value: Optional[float], *, pin: bool = True) -> Optional[float]:
+        key = "lr_q"
+        if value is None:
+            self._pinned_overrides.pop(key, None)
+            return None
+        val = float(max(1e-8, min(1e-2, value)))
+        self._set_lr(self.opt_q, val)
+        self.cfg.lr_q = val
+        self._apply_pin(key, val, pin)
+        return val
+
+    def set_lr_pi(self, value: Optional[float], *, pin: bool = True) -> Optional[float]:
+        key = "lr_pi"
+        if value is None:
+            self._pinned_overrides.pop(key, None)
+            return None
+        val = float(max(1e-8, min(1e-2, value)))
+        self._set_lr(self.opt_pi, val)
+        self.cfg.lr_pi = val
+        self._apply_pin(key, val, pin)
+        return val
+
+    def set_train_rl_every(self, value: Optional[int], *, pin: bool = True) -> Optional[int]:
+        key = "train_rl_every"
+        if value is None:
+            self._pinned_overrides.pop(key, None)
+            return None
+        val = int(max(1, min(512, value)))
+        self.cfg.train_rl_every = val
+        self._apply_pin(key, val, pin)
+        return val
+
+    def set_batch_rl(self, value: Optional[int], *, pin: bool = True) -> Optional[int]:
+        key = "batch_rl"
+        if value is None:
+            self._pinned_overrides.pop(key, None)
+            return None
+        val = int(max(16, min(4096, value)))
+        if val % 2 != 0:
+            val += 1
+        self.cfg.batch_rl = val
+        self._apply_pin(key, val, pin)
+        return val
+
+    def set_train_sl_every(self, value: Optional[int], *, pin: bool = True) -> Optional[int]:
+        key = "train_sl_every"
+        if value is None:
+            self._pinned_overrides.pop(key, None)
+            return None
+        val = int(max(1, min(512, value)))
+        self.cfg.train_sl_every = val
+        self._apply_pin(key, val, pin)
+        return val
+
+    def set_batch_sl(self, value: Optional[int], *, pin: bool = True) -> Optional[int]:
+        key = "batch_sl"
+        if value is None:
+            self._pinned_overrides.pop(key, None)
+            return None
+        val = int(max(32, min(8192, value)))
+        if val % 32 != 0:
+            val = ((val // 32) + 1) * 32
+        self.cfg.batch_sl = val
+        self._apply_pin(key, val, pin)
+        return val
+
+    def set_target_tau(self, value: Optional[float], *, pin: bool = True) -> Optional[float]:
+        key = "tau"
+        if value is None:
+            self._pinned_overrides.pop(key, None)
+            return None
+        val = float(max(0.0, min(0.5, value)))
+        self.cfg.target_tau = val
+        self._apply_pin(key, val, pin)
+        return val
+
+    def set_hard_target_interval(self, value: Optional[int], *, pin: bool = True) -> Optional[int]:
+        key = "hard_target_interval"
+        if value is None:
+            self._pinned_overrides.pop(key, None)
+            return None
+        val = int(max(0, min(100_000, value)))
+        self.cfg.hard_target_interval = val
+        self._apply_pin(key, val, pin)
+        return val
+
+    def set_n_step(self, value: Optional[int], *, pin: bool = True) -> Optional[int]:
+        key = "n_step"
+        if value is None:
+            self._pinned_overrides.pop(key, None)
+            return None
+        val = int(max(1, min(32, value)))
+        if val != getattr(self, "_active_n_step", val):
+            self._flush_nstep(force=True)
+            self._active_n_step = val
+        self.cfg.n_step = val
+        self._apply_pin(key, val, pin)
+        return val
+
+    def set_check_explore_prob(self, value: Optional[float], *, pin: bool = True) -> Optional[float]:
+        key = "check_prob"
+        if value is None:
+            self._pinned_overrides.pop(key, None)
+            return None
+        val = float(max(0.0, min(1.0, value)))
+        self._check_explore_prob = val
+        self._apply_pin(key, val, pin)
+        return val
+
+    def set_burst_rl_updates(self, value: Optional[int], *, pin: bool = True) -> Optional[int]:
+        key = "burst_rl_updates_on_reward"
+        if value is None:
+            self._pinned_overrides.pop(key, None)
+            return None
+        val = int(max(0, min(16, value)))
+        self.cfg.burst_rl_updates_on_reward = val
+        self._apply_pin(key, val, pin)
+        return val
+
+    def set_burst_reward_threshold(self, value: Optional[float], *, pin: bool = True) -> Optional[float]:
+        key = "burst_reward_threshold"
+        if value is None:
+            self._pinned_overrides.pop(key, None)
+            return None
+        val = float(max(-1.0, min(1.0, value)))
+        self.cfg.burst_reward_threshold = val
+        self._apply_pin(key, val, pin)
+        return val
+
+    def set_max_cards(self, value: Optional[int], *, env: Optional["TurnEnvAdapter"] = None, pin: bool = True) -> Optional[int]:
+        key = "max_cards"
+        if value is None:
+            self._apply_env_pin(key, None, pin=False)
+            return None
+        val = int(max(1, min(11, value)))
+        self._apply_env_pin(key, val, pin)
+        if env is not None:
+            self._sync_env_max_cards(env, val)
+        return val
+
     def _ensure_schedule_state(self):
+        self._ensure_override_state()
         if not hasattr(self, "_schedule_flags"):
             self._schedule_flags: set[str] = set()
         if not hasattr(self, "_nstep_queue"):
             self._nstep_queue: deque = deque()
         if not hasattr(self, "_eps_current"):
             self._eps_current = float(self.cfg.eps_end)
+        if self._is_pinned("epsilon"):
+            self._eps_current = float(self._pinned_overrides["epsilon"])
         if not hasattr(self, "_active_n_step"):
             self._active_n_step = max(1, int(self.cfg.n_step))
+        if self._is_pinned("n_step"):
+            pinned_n = int(self._pinned_overrides["n_step"])
+            if pinned_n != self._active_n_step:
+                self._flush_nstep(force=True)
+                self._active_n_step = pinned_n
+            self.cfg.n_step = pinned_n
         if not hasattr(self, "_last_checkpoint_million"):
             self._last_checkpoint_million = self.total_env_steps // 1_000_000
         if self.rl_buf.capacity >= 1_000_000:
@@ -516,11 +715,24 @@ class NFSPAgent:
             self._nstep_terminal_boost = 0.5
         if not hasattr(self, "_check_explore_prob"):
             self._check_explore_prob = 0.0
+        if self._is_pinned("check_prob"):
+            self._check_explore_prob = float(self._pinned_overrides["check_prob"])
 
     def _set_lr(self, optimizer, lr: float):
         lr = float(lr)
         for group in optimizer.param_groups:
             group["lr"] = lr
+
+    def _sync_env_max_cards(self, env: Optional["TurnEnvAdapter"], target: int):
+        if env is None:
+            return
+        if getattr(env, "max_cards", None) != target:
+            env.max_cards = target
+        if hasattr(env, "game") and env.game:
+            env.game["max_cards"] = target
+            rules = env.game.get("rules")
+            if isinstance(rules, dict):
+                rules["max_cards"] = target
 
     def _interp(self, step: int, start: int, end: int, v_start: float, v_end: float) -> float:
         if step <= start:
@@ -535,7 +747,8 @@ class NFSPAgent:
 
         if step < 5_000_000:
             # Early curriculum (bootstrapping learning signal)
-            self.cfg.anticipatory_eta = 0.25
+            if not self._is_pinned("anticipatory_eta"):
+                self.cfg.anticipatory_eta = 0.25
 
             if step < 1_500_000:
                 eps = self._interp(step, 0, 1_500_000, 0.20, 0.12)
@@ -543,80 +756,98 @@ class NFSPAgent:
                 eps = self._interp(step, 1_500_000, 3_500_000, 0.12, 0.07)
             else:
                 eps = self._interp(step, 3_500_000, 5_000_000, 0.07, 0.05)
-            self._eps_current = max(0.05, min(1.0, eps))
+            if not self._is_pinned("epsilon"):
+                self._eps_current = max(0.05, min(1.0, eps))
 
-            self._set_lr(self.opt_q, 1e-4)
-            self.cfg.target_tau = 0.01
-            self.cfg.hard_target_interval = 0
+            if not self._is_pinned("lr_q"):
+                self._set_lr(self.opt_q, 1e-4)
+                self.cfg.lr_q = 1e-4
+            if not self._is_pinned("tau"):
+                self.cfg.target_tau = 0.01
+            if not self._is_pinned("hard_target_interval"):
+                self.cfg.hard_target_interval = 0
 
-            self.cfg.train_rl_every = 32
-            self.cfg.batch_rl = 64
+            if not self._is_pinned("train_rl_every"):
+                self.cfg.train_rl_every = 32
+            if not self._is_pinned("batch_rl"):
+                self.cfg.batch_rl = 64
 
             target_n = 5
-            if target_n != self._active_n_step:
+            if not self._is_pinned("n_step") and target_n != self._active_n_step:
                 self._flush_nstep(force=True)
                 self._active_n_step = target_n
-            self.cfg.n_step = target_n
+            if not self._is_pinned("n_step"):
+                self.cfg.n_step = target_n
 
-            self.cfg.lr_pi = 1e-4
-            self._set_lr(self.opt_pi, self.cfg.lr_pi)
-            self.cfg.train_sl_every = 16
-            self.cfg.batch_sl = 256
+            if not self._is_pinned("lr_pi"):
+                self.cfg.lr_pi = 1e-4
+                self._set_lr(self.opt_pi, self.cfg.lr_pi)
+            if not self._is_pinned("train_sl_every"):
+                self.cfg.train_sl_every = 16
+            if not self._is_pinned("batch_sl"):
+                self.cfg.batch_sl = 256
 
-            if step < 3_000_000:
-                self._check_explore_prob = self._interp(step, 0, 3_000_000, 0.25, 0.0)
-            else:
-                self._check_explore_prob = 0.0
+            if not self._is_pinned("check_prob"):
+                if step < 5_000_000:
+                    self._check_explore_prob = self._interp(step, 0, 5_000_000, 0.5, 0.2)
+                else:
+                    self._check_explore_prob = 0.0
             return
 
         # From 5M onwards follow long-horizon curriculum
-        self._check_explore_prob = 0.0
+        if not self._is_pinned("check_prob"):
+            self._check_explore_prob = 0.0
 
         if step >= 5_000_000 and "buffers_1m" not in self._schedule_flags:
             self.rl_buf.resize(1_000_000)
             self.sl_buf.resize(1_000_000)
             self._schedule_flags.add("buffers_1m")
 
-        if step < 10_000_000:
-            eta = 0.25
-        elif step < 15_000_000:
-            eta = 0.15
-        elif step < 20_000_000:
-            eta = 0.12
-        else:
-            eta = 0.10
-        self.cfg.anticipatory_eta = eta
+        if not self._is_pinned("anticipatory_eta"):
+            if step < 10_000_000:
+                eta = 0.25
+            elif step < 15_000_000:
+                eta = 0.15
+            elif step < 20_000_000:
+                eta = 0.12
+            else:
+                eta = 0.10
+            self.cfg.anticipatory_eta = eta
 
-        if step < 10_000_000:
-            eps = self._interp(step, 5_000_000, 10_000_000, 0.05, 0.04)
-        elif step < 15_000_000:
-            eps = self._interp(step, 10_000_000, 15_000_000, 0.04, 0.03)
-        elif step < 20_000_000:
-            eps = self._interp(step, 15_000_000, 20_000_000, 0.03, 0.025)
-        else:
-            eps = self._interp(step, 20_000_000, 25_000_000, 0.025, 0.02)
-        self._eps_current = max(0.0, min(1.0, eps))
+        if not self._is_pinned("epsilon"):
+            if step < 10_000_000:
+                eps = self._interp(step, 5_000_000, 10_000_000, 0.05, 0.04)
+            elif step < 15_000_000:
+                eps = self._interp(step, 10_000_000, 15_000_000, 0.04, 0.03)
+            elif step < 20_000_000:
+                eps = self._interp(step, 15_000_000, 20_000_000, 0.03, 0.025)
+            else:
+                eps = self._interp(step, 20_000_000, 25_000_000, 0.025, 0.02)
+            self._eps_current = max(0.0, min(1.0, eps))
 
-        if step < 10_000_000:
-            lr_q = self._interp(step, 5_000_000, 10_000_000, 1e-4, 7e-5)
-        elif step < 15_000_000:
-            lr_q = self._interp(step, 10_000_000, 15_000_000, 7e-5, 5e-5)
-        elif step < 23_000_000:
-            lr_q = 5e-5
-        else:
-            lr_q = self._interp(step, 23_000_000, 25_000_000, 5e-5, 3e-5)
-        self._set_lr(self.opt_q, lr_q)
+        if not self._is_pinned("lr_q"):
+            if step < 10_000_000:
+                lr_q = self._interp(step, 5_000_000, 10_000_000, 1e-4, 7e-5)
+            elif step < 15_000_000:
+                lr_q = self._interp(step, 10_000_000, 15_000_000, 7e-5, 5e-5)
+            elif step < 23_000_000:
+                lr_q = 5e-5
+            else:
+                lr_q = self._interp(step, 23_000_000, 25_000_000, 5e-5, 3e-5)
+            self._set_lr(self.opt_q, lr_q)
+            self.cfg.lr_q = lr_q
 
-        if step < 10_000_000:
-            self.cfg.train_rl_every = 32
-        elif step < 12_000_000:
-            self.cfg.train_rl_every = 32
-        elif step < 15_000_000:
-            self.cfg.train_rl_every = 48
-        elif step < 20_000_000:
-            self.cfg.train_rl_every = 48
-        else:
-            self.cfg.train_rl_every = 64
+        if not self._is_pinned("train_rl_every"):
+            if step < 10_000_000:
+                self.cfg.train_rl_every = 32
+            elif step < 12_000_000:
+                self.cfg.train_rl_every = 32
+            elif step < 15_000_000:
+                self.cfg.train_rl_every = 48
+            elif step < 20_000_000:
+                self.cfg.train_rl_every = 48
+            else:
+                self.cfg.train_rl_every = 64
 
         if step < 12_000_000:
             target_n = 5
@@ -625,15 +856,19 @@ class NFSPAgent:
         else:
             target_n = 10
         target_n = max(1, target_n)
-        if target_n != self._active_n_step:
+        if not self._is_pinned("n_step") and target_n != self._active_n_step:
             self._flush_nstep(force=True)
             self._active_n_step = target_n
-        self.cfg.n_step = target_n
+        if not self._is_pinned("n_step"):
+            self.cfg.n_step = target_n
 
-        self.cfg.lr_pi = 3e-4
-        self._set_lr(self.opt_pi, self.cfg.lr_pi)
-        self.cfg.train_sl_every = 8
-        self.cfg.batch_sl = max(256, self.cfg.batch_sl)
+        if not self._is_pinned("lr_pi"):
+            self.cfg.lr_pi = 3e-4
+            self._set_lr(self.opt_pi, self.cfg.lr_pi)
+        if not self._is_pinned("train_sl_every"):
+            self.cfg.train_sl_every = 8
+        if not self._is_pinned("batch_sl"):
+            self.cfg.batch_sl = max(256, self.cfg.batch_sl)
 
     def _store_transition(self, obs, mask, action_idx: int, reward: float, nobs, nmask, done: bool, is_br: bool):
         action_tensor = torch.tensor(action_idx, dtype=torch.long, device=self.device)
@@ -750,6 +985,11 @@ class NFSPAgent:
                 return 3
             extra = (step - 5_000_000) // 3_000_000
             return int(max(1, min(11, 3 + extra)))
+        def _effective_max_cards(step: int) -> int:
+            override = self._get_env_override("max_cards")
+            if override is not None:
+                return int(override)
+            return _target_max_cards(step)
 
         self._ensure_schedule_state()
         self._nstep_queue.clear()
@@ -757,14 +997,8 @@ class NFSPAgent:
         self._last_checkpoint_million = max(
             self._last_checkpoint_million, self.total_env_steps // 1_000_000
         )
-        initial_max_cards = _target_max_cards(self.total_env_steps)
-        if getattr(env, "max_cards", None) != initial_max_cards:
-            env.max_cards = initial_max_cards
-        if getattr(env, "game", None):
-            env.game["max_cards"] = initial_max_cards
-            rules = env.game.get("rules")
-            if isinstance(rules, dict):
-                rules["max_cards"] = initial_max_cards
+        initial_max_cards = _effective_max_cards(self.total_env_steps)
+        self._sync_env_max_cards(env, initial_max_cards)
 
         # track update counters across runs
         self.rl_updates = getattr(self, "rl_updates", 0)
@@ -803,14 +1037,9 @@ class NFSPAgent:
             if self.total_env_steps % apply_phase_schedules_every == 0:
                 self._apply_phase_schedules(self.total_env_steps)
             use_br = (random.random() < self.cfg.anticipatory_eta)
-            desired_max_cards = _target_max_cards(self.total_env_steps)
+            desired_max_cards = _effective_max_cards(self.total_env_steps)
             if getattr(env, "max_cards", None) != desired_max_cards:
-                env.max_cards = desired_max_cards
-                if hasattr(env, "game") and env.game:
-                    env.game["max_cards"] = desired_max_cards
-                    rules = env.game.get("rules")
-                    if isinstance(rules, dict):
-                        rules["max_cards"] = desired_max_cards
+                self._sync_env_max_cards(env, desired_max_cards)
             eps = self._epsilon()
 
             action = self.act(obs, mask, use_br=use_br, epsilon=eps)
@@ -983,7 +1212,7 @@ class NFSPAgent:
                 print(
                     "EVALUATION:\n"
                     f"[steps={self.total_env_steps}] "
-                    f"avgR={eval_stats["avg_reward"]:.4f} win={eval_stats["win_rate"]:.3f} len={avg_len:.1f} "
+                    f"avgR={eval_stats['avg_reward']:.4f} win={eval_stats['win_rate']:.3f} len={avg_len:.1f} "
                     f"Qloss={ql:.5f} SLloss={sll:.5f} H(pi)={pent:.3f} "
                     f"illegal={illegal_rt:.3f} eps={eps:.3f} "
                     f"RL_buf={self.rl_buf.size} SL_buf≈{min(self.sl_buf.size, self.sl_buf.capacity)} "
@@ -1001,9 +1230,19 @@ class NFSPAgent:
                         eval_stats["avg_reward"],
                         eval_stats["win_rate"],
                         eval_stats["avg_len"],
-                        float("nan"), float("nan"), float("nan"),
-                        float("nan"), eps,
-                        self.rl_buf.size, min(self.sl_buf.size, self.sl_buf.capacity)
+                        float("nan"),
+                        float("nan"),
+                        float("nan"),
+                        float("nan"),
+                        eps,
+                        float(self.cfg.anticipatory_eta),
+                        float(self.opt_q.param_groups[0]["lr"]),
+                        int(self._active_n_step),
+                        int(self.cfg.train_rl_every),
+                        float(getattr(self, "_check_explore_prob", 0.0)),
+                        int(getattr(env, "max_cards", desired_max_cards)),
+                        self.rl_buf.size,
+                        min(self.sl_buf.size, self.sl_buf.capacity),
                     ])
                 if eval_env_factory is None:
                     # Evaluation mutated the training env; reset so gameplay resumes cleanly
@@ -1047,6 +1286,10 @@ class NFSPAgent:
             "sl_buf": self.sl_buf.state_dict(),
             "rl_updates": getattr(self, "rl_updates", 0),
             "sl_updates": getattr(self, "sl_updates", 0),
+            "pinned_overrides": dict(getattr(self, "_pinned_overrides", {})),
+            "pinned_env_overrides": dict(getattr(self, "_pinned_env_overrides", {})),
+            "eps_current": float(getattr(self, "_eps_current", self.cfg.eps_end)),
+            "check_explore_prob": float(getattr(self, "_check_explore_prob", 0.0)),
         }, path)
 
     def load(self, path: str, map_location=None):
@@ -1066,6 +1309,12 @@ class NFSPAgent:
         self.rl_updates = ckpt.get("rl_updates", getattr(self, "rl_updates", 0))
         self.sl_updates = ckpt.get("sl_updates", getattr(self, "sl_updates", 0))
         self._nstep_queue = deque()
+        self._pinned_overrides = dict(ckpt.get("pinned_overrides", getattr(self, "_pinned_overrides", {})))
+        self._pinned_env_overrides = dict(ckpt.get("pinned_env_overrides", getattr(self, "_pinned_env_overrides", {})))
+        if "eps_current" in ckpt and ckpt["eps_current"] is not None:
+            self._eps_current = float(ckpt["eps_current"])
+        if "check_explore_prob" in ckpt and ckpt["check_explore_prob"] is not None:
+            self._check_explore_prob = float(ckpt["check_explore_prob"])
         self._ensure_schedule_state()
 
 
