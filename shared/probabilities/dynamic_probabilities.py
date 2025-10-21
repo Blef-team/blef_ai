@@ -1,6 +1,5 @@
 import math
 from itertools import product
-from collections import Counter
 from functools import lru_cache
 from typing import Iterable, Tuple
 
@@ -177,12 +176,21 @@ def _calculate_prob_no_cache(action_id, hand, common_hand, unknown_cards_num, ru
     if not set_details: return 0.0
 
     known_cards = hand + common_hand
-    known_cards_counter = Counter(c[0] for c in known_cards)
-    known_cards_by_color = Counter(c[1] for c in known_cards)
-    known_jokers = known_cards_counter.get(-1, 0)
-    
-    my_jokers = Counter(c[0] for c in hand).get(-1, 0)
-    common_jokers = Counter(c[0] for c in common_hand).get(-1, 0)
+    value_counts = [0] * 6
+    colour_counts = [0] * 4
+    known_jokers = 0
+    for value, colour in known_cards:
+        value = int(value)
+        colour = int(colour)
+        if value >= 0:
+            value_counts[value] += 1
+            if colour >= 0:
+                colour_counts[colour] += 1
+        elif value == -1:
+            known_jokers += 1
+
+    my_jokers = sum(1 for value, _ in hand if int(value) == -1)
+    common_jokers = sum(1 for value, _ in common_hand if int(value) == -1)
 
     jokers_in_play = my_jokers + common_jokers if for_betting else common_jokers
     
@@ -194,10 +202,10 @@ def _calculate_prob_no_cache(action_id, hand, common_hand, unknown_cards_num, ru
     if set_type in ["High card", "Pair", "Three of a kind", "Four of a kind"]:
         value_to_check = set_details["detail_1"]
         needed_map = {"High card": 1, "Pair": 2, "Three of a kind": 3, "Four of a kind": 4}
-        needed = needed_map[set_type] - known_cards_counter.get(value_to_check, 0) - jokers_in_play
+        needed = needed_map[set_type] - value_counts[value_to_check] - jokers_in_play
         if needed <= 0: return 1.0
 
-        cards_of_value_in_deck = 4 - known_cards_counter.get(value_to_check, 0)
+        cards_of_value_in_deck = 4 - value_counts[value_to_check]
         jokers_in_deck = total_jokers - known_jokers
         other_cards_in_deck = deck_size + rules.get("blanks", 0) - len(known_cards) + known_jokers - cards_of_value_in_deck
         
@@ -205,13 +213,13 @@ def _calculate_prob_no_cache(action_id, hand, common_hand, unknown_cards_num, ru
         
     if set_type == "Two pairs":
         val1, val2 = set_details["detail_1"], set_details["detail_2"]
-        needed1 = 2 - known_cards_counter.get(val1, 0)
-        needed2 = 2 - known_cards_counter.get(val2, 0)
+        needed1 = 2 - value_counts[val1]
+        needed2 = 2 - value_counts[val2]
         
         if needed1 + needed2 <= jokers_in_play: return 1.0
         
-        cards1_in_deck = 4 - known_cards_counter.get(val1, 0)
-        cards2_in_deck = 4 - known_cards_counter.get(val2, 0)
+        cards1_in_deck = 4 - value_counts[val1]
+        cards2_in_deck = 4 - value_counts[val2]
         jokers_in_deck = total_jokers - known_jokers
         other_cards_in_deck = deck_size + rules.get("blanks", 0) - len(known_cards) + known_jokers - cards1_in_deck - cards2_in_deck
         
@@ -226,7 +234,7 @@ def _calculate_prob_no_cache(action_id, hand, common_hand, unknown_cards_num, ru
         jokers_needed = len(needed_values) - jokers_in_play
         if jokers_needed <= 0: return 1.0
         
-        cards_in_deck_counts = [4 - known_cards_counter.get(v, 0) for v in needed_values]
+        cards_in_deck_counts = [4 - value_counts[v] for v in needed_values]
         jokers_in_deck = total_jokers - known_jokers
         other_cards_in_deck = deck_size + rules.get("blanks", 0) - len(known_cards) + known_jokers - sum(cards_in_deck_counts)
         
@@ -234,10 +242,10 @@ def _calculate_prob_no_cache(action_id, hand, common_hand, unknown_cards_num, ru
 
     if set_type == "Flush":
         color_to_check = set_details["detail_1"]
-        needed = 5 - known_cards_by_color.get(color_to_check, 0) - jokers_in_play
+        needed = 5 - colour_counts[color_to_check] - jokers_in_play
         if needed <= 0: return 1.0
         
-        cards_in_deck = (deck_size // 4) - known_cards_by_color.get(color_to_check, 0)
+        cards_in_deck = (deck_size // 4) - colour_counts[color_to_check]
         jokers_in_deck = total_jokers - known_jokers
         other_cards_in_deck = deck_size + rules.get("blanks", 0) - len(known_cards) + known_jokers - cards_in_deck
         
@@ -245,13 +253,13 @@ def _calculate_prob_no_cache(action_id, hand, common_hand, unknown_cards_num, ru
 
     if set_type == "Full house":
         val3, val2 = set_details["detail_1"], set_details["detail_2"]
-        needed3 = 3 - known_cards_counter.get(val3, 0)
-        needed2 = 2 - known_cards_counter.get(val2, 0)
+        needed3 = 3 - value_counts[val3]
+        needed2 = 2 - value_counts[val2]
         
         if needed3 + needed2 <= jokers_in_play: return 1.0
         
-        cards3_in_deck = 4 - known_cards_counter.get(val3, 0)
-        cards2_in_deck = 4 - known_cards_counter.get(val2, 0)
+        cards3_in_deck = 4 - value_counts[val3]
+        cards2_in_deck = 4 - value_counts[val2]
         jokers_in_deck = total_jokers - known_jokers
         other_cards_in_deck = deck_size + rules.get("blanks", 0) - len(known_cards) + known_jokers - cards3_in_deck - cards2_in_deck
         
