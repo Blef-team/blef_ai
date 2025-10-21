@@ -395,11 +395,14 @@ class NFSPAgent:
         mask = mask.unsqueeze(0).to(self.device) # [1, A]
 
         if use_br:
+
+            # Manual override: here we force it to pick CHECK (for early exposure)
             check_prob = getattr(self, "_check_explore_prob", 0.0)
             if check_prob > 0.0:
                 check_idx = mask.shape[-1] - 1
                 if mask[0, check_idx] > 0 and random.random() < check_prob:
                     return int(check_idx)
+            
             q = self.q(obs)                      # [1, A]
             # epsilon-greedy over legal actions
             if random.random() < epsilon:
@@ -562,7 +565,7 @@ class NFSPAgent:
             self.cfg.batch_sl = 256
 
             if step < 3_000_000:
-                self._check_explore_prob = self._interp(step, 0, 3_000_000, 0.05, 0.0)
+                self._check_explore_prob = self._interp(step, 0, 3_000_000, 0.25, 0.0)
             else:
                 self._check_explore_prob = 0.0
             return
