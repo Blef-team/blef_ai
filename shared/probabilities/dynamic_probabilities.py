@@ -1,6 +1,9 @@
 import math
 from itertools import product
 from collections import Counter
+from functools import lru_cache
+from typing import Iterable, Tuple
+
 from shared.game_utils import GameRules, get_set_details_from_action_id
 
 
@@ -152,7 +155,24 @@ def _calculate_prob_full_house(needed3, needed2, cards3_in_deck, cards2_in_deck,
 
     return successful_outcomes / total_outcomes if total_outcomes > 0 else 0.0
 
-def calculate_prob(action_id, hand, common_hand, unknown_cards_num, rules, for_betting):
+def _normalize_cards(cards: Iterable[Tuple[int, int]]):
+    # Order-agnostic representation for caching
+    return tuple(sorted((int(v), int(c)) for (v, c) in cards))
+
+
+def _normalize_rules(rules: dict):
+    deck_size = int(rules.get("deck_size", 24))
+    jokers = int(rules.get("jokers", 0))
+    blanks = int(rules.get("blanks", 0))
+    return (deck_size, jokers, blanks)
+
+
+def _rebuild_rules(rules_key: Tuple[int, int, int]) -> dict:
+    deck_size, jokers, blanks = rules_key
+    return {"deck_size": deck_size, "jokers": jokers, "blanks": blanks}
+
+
+def _calculate_prob_no_cache(action_id, hand, common_hand, unknown_cards_num, rules, for_betting):
     set_details = get_set_details_from_action_id(action_id, rules.get("deck_size", 24))
     if not set_details: return 0.0
 
@@ -254,6 +274,29 @@ def calculate_prob(action_id, hand, common_hand, unknown_cards_num, rules, for_b
         other_cards_in_deck = deck_size + rules.get("blanks", 0) - len(known_cards) + known_jokers - cards_of_value_in_deck
         
         return _calculate_prob_simple_set(needed, cards_of_value_in_deck, jokers_in_deck, other_cards_in_deck, unknown_cards_num)
+
+@lru_cache(maxsize=50000)
+def _calculate_prob_cached(action_id, hand_key, common_key, unknown_cards_num, rules_key, for_betting):
+    hand = [tuple(card) for card in hand_key]
+    common_hand = [tuple(card) for card in common_key]
+    rules = _rebuild_rules(rules_key)
+    return _calculate_prob_no_cache(action_id, hand, common_hand, unknown_cards_num, rules, for_betting)
+
+
+def calculate_prob(action_id, hand, common_hand, unknown_cards_num, rules, for_betting):
+    hand_key = _normalize_cards(hand)
+    common_key = _normalize_cards(common_hand)
+    rules_key = _normalize_rules(rules)
+    for_betting_flag = bool(for_betting)
+    return _calculate_prob_cached(
+        int(action_id),
+        hand_key,
+        common_key,
+        int(unknown_cards_num),
+        rules_key,
+        for_betting_flag,
+    )
+
 
 def get_bet_probabilities(game_state, for_betting=False, last_bet=None, specific_action_id=None):
     rules = game_state.get("rules", {})
