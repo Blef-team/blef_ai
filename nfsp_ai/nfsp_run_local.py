@@ -300,18 +300,21 @@ class MyEnv:
     done: True only when the game finishes or after the reference player is eliminated.
     """
 
-    def __init__(self, n_agents: int = 2, max_cards: int = 11, verbose: bool = False, illegal_penalty: float = -0.01):
+    def __init__(self, n_agents: int = 2, max_cards: int = 11, verbose: bool = False, illegal_penalty: float = -0.01, game_save_dir: Optional[str] = None, save_sample_rate: int = 5000):
         if n_agents < 2 or n_agents > 8:
             raise ValueError("n_agents must be in [2, 8]")
         self.n_agents = n_agents
         self.max_cards = max_cards
         self.verbose = verbose
         self.illegal_penalty = float(illegal_penalty)
+        self.game_save_dir = game_save_dir
+        self.save_sample_rate = max(1, int(save_sample_rate))
         self.game: Dict = {}
         self._last_obs = None
         self._last_mask = None
         self._ref_nick: Optional[str] = None
         self.rounds_since_reset = 0
+        self._save_counter = 0
 
     def _pid(self) -> int:
         return _nickname_to_idx(self.game["players"], self.game.get("cp_nickname", ""))
@@ -330,7 +333,7 @@ class MyEnv:
         self._last_obs, self._last_mask = obs, mask
         return obs, mask, pid
 
-    def step(self, action: int, game_save_dir="games"):
+    def step(self, action: int):
         """
         Apply action for the current player.
         - If action is illegal (shouldn't happen if mask is used), return same state + small penalty.
@@ -346,8 +349,18 @@ class MyEnv:
         ]
 
         # Try to act; catch and handle illegal attempts gracefully.
+        save_dir = None
+        should_save = False
+        if self.game_save_dir:
+            if self._save_counter >= self.save_sample_rate - 1:
+                save_dir = self.game_save_dir
+                should_save = True
         try:
-            gm.play(self.game, int(action), save_dir=game_save_dir, verbose=self.verbose)
+            gm.play(self.game, int(action), save_dir=save_dir, verbose=self.verbose)
+            if should_save:
+                self._save_counter = 0
+            elif self.game_save_dir:
+                self._save_counter += 1
         except Exception as e:
             # Return same obs/mask/pid with a penalty; do NOT advance player.
             obs = self._last_obs.clone()
@@ -496,12 +509,34 @@ def main():
         default=None,
         help="Optional override for the action-history sample JSONL output.",
     )
+    parser.add_argument(
+        "--save-game-every",
+        dest="save_game_every",
+        type=int,
+        default=5000,
+        help="Persist one full game out of this many (default: 5000).",
+    )
     args = parser.parse_args()
+
+    postfix = datetime.now().strftime("%Y%m%d%H%M%S")
+    model_save_path = f"nfsp_blef_{postfix}.pt"
+    game_save_dir = f"games_{postfix}"
+    os.makedirs(game_save_dir, exist_ok=True)
+    history_sample_limit = None if args.history_sample_limit <= 0 else args.history_sample_limit
+    history_sample_path = args.history_sample_path or os.path.join(
+        "logs", f"action_samples_{postfix}.jsonl"
+    )
+    if history_sample_path:
+        print(
+            f"[history] samples -> {history_sample_path} (every {args.history_sample_every} steps)"
+        )
 
     env = MyEnv(
         n_agents=args.n_agents,
         max_cards=args.max_cards,
         verbose=args.verbose,
+        game_save_dir=game_save_dir,
+        save_sample_rate=args.save_game_every,
     )
     obs0, mask0, _ = env.reset()
 
@@ -527,6 +562,7 @@ def main():
             n_step=5,
             burst_rl_updates_on_reward=4,
             burst_reward_threshold=0.5,
+            #hidden=16
         ),
     )
 
@@ -546,19 +582,6 @@ def main():
             verbose=True,
         )
 
-    postfix = datetime.now().strftime("%Y%m%d%H%M%S")
-    model_save_path = f"nfsp_blef_{postfix}.pt"
-    game_save_dir = f"games_{postfix}"
-    os.makedirs(game_save_dir, exist_ok=True)
-    history_sample_limit = None if args.history_sample_limit <= 0 else args.history_sample_limit
-    history_sample_path = args.history_sample_path or os.path.join(
-        "logs", f"action_samples_{postfix}.jsonl"
-    )
-    if history_sample_path:
-        print(
-            f"[history] samples -> {history_sample_path} (every {args.history_sample_every} steps)"
-        )
-
     agent.train_from_selfplay(
         env,
         total_steps=args.total_steps,
@@ -570,6 +593,7 @@ def main():
             max_cards=env.max_cards,
             verbose=env.verbose,
             illegal_penalty=env.illegal_penalty,
+            game_save_dir=None,
         ),
         control_plane=control_plane,
         history_sample_path=history_sample_path,

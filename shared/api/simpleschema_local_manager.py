@@ -137,6 +137,8 @@ def get_set_details_from_action_id(action_id, deck_size=24):
 
 
 def save(game, dir="games"):
+    if not dir:
+        return
     state_id = game["game_uuid"] + "_" + str(int(game['round_number']))
     filename = os.path.join(dir, state_id)
     with open(filename, "w") as filehandle:

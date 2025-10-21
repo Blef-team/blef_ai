@@ -1101,7 +1101,7 @@ class NFSPAgent:
             use_br = (random.random() < self.cfg.anticipatory_eta)
 
             action = self.act(obs, mask, use_br=use_br, epsilon=eps)
-            nobs, nmask, reward, done, info = env.step(action, game_save_dir=game_save_dir)
+            nobs, nmask, reward, done, info = env.step(action)
             nobs, nmask = nobs.to(self.device), nmask.to(self.device)
             info_dict = info if isinstance(info, dict) else {}
             if info_dict:
