@@ -415,8 +415,8 @@ def main():
         "--total-steps",
         dest="total_steps",
         type=int,
-        default=5_000_000,
-        help="Number of environment steps to train for (default: 5,000,000).",
+        default=25_000_000,
+        help="Number of environment steps to train for (default: 25,000,000).",
     )
     parser.add_argument(
         "--n-agents",
@@ -429,7 +429,7 @@ def main():
         "--max-cards",
         dest="max_cards",
         type=int,
-        default=3,
+        default=11,
         help="Maximum cards per player for Blef variant (default: 3).",
     )
     parser.add_argument(
@@ -452,7 +452,7 @@ def main():
         cfg=NFSPConfig(
             anticipatory_eta=0.25,
             batch_rl=64,
-            train_rl_every=64,
+            train_rl_every=32,
             batch_sl=256,
             train_sl_every=8,
             lr_q=1e-4,
@@ -465,6 +465,9 @@ def main():
             use_double_dqn=True,
             rl_capacity=200_000,
             sl_capacity=200_000,
+            n_step=5,
+            burst_rl_updates_on_reward=4,
+            burst_reward_threshold=0.5,
         ),
     )
 

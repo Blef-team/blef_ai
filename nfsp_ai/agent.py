@@ -177,6 +177,8 @@ class ReplayBuffer:
     def __init__(self, capacity: int, obs_dim: int, act_dim: int, device):
         self.device, self.capacity = device, capacity
         self.ptr, self.size = 0, 0
+        self.obs_dim = obs_dim
+        self.act_dim = act_dim
         self.obs  = torch.zeros((capacity, obs_dim), dtype=torch.float32, device=device)
         self.mask = torch.zeros((capacity, act_dim), dtype=torch.float32, device=device)
         self.act  = torch.zeros((capacity,), dtype=torch.long, device=device)
@@ -236,11 +238,30 @@ class ReplayBuffer:
                 tensor.zero_()
                 tensor[:filled] = src.to(self.device)
 
+    def resize(self, new_capacity: int):
+        if new_capacity <= self.capacity:
+            return
+        def _expand(tensor, new_shape):
+            new_t = torch.zeros(new_shape, dtype=tensor.dtype, device=self.device)
+            new_t[:self.size] = tensor[:self.size]
+            return new_t
+        self.obs = _expand(self.obs, (new_capacity, self.obs_dim))
+        self.mask = _expand(self.mask, (new_capacity, self.act_dim))
+        self.act = _expand(self.act, (new_capacity,))
+        self.rew = _expand(self.rew, (new_capacity,))
+        self.nobs = _expand(self.nobs, (new_capacity, self.obs_dim))
+        self.nmsk = _expand(self.nmsk, (new_capacity, self.act_dim))
+        self.done = _expand(self.done, (new_capacity,))
+        self.capacity = new_capacity
+        self.ptr = self.size % self.capacity
+
 class ReservoirSL:
     """True reservoir sampling (Vitter) for empirical average policy (one-hot actions)."""
     def __init__(self, capacity: int, obs_dim: int, act_dim: int, device):
         self.device, self.capacity = device, capacity
         self.size = 0
+        self.obs_dim = obs_dim
+        self.act_dim = act_dim
         self.obs  = torch.zeros((capacity, obs_dim), dtype=torch.float32, device=device)
         self.mask = torch.zeros((capacity, act_dim), dtype=torch.float32, device=device)
         self.ta   = torch.zeros((capacity, act_dim), dtype=torch.float32, device=device)  # one-hot action
@@ -284,6 +305,19 @@ class ReservoirSL:
             src = state.get(name)
             if src is not None and filled > 0:
                 tensor[:filled] = src.to(self.device)
+
+    def resize(self, new_capacity: int):
+        if new_capacity <= self.capacity:
+            return
+        filled = min(self.capacity, self.size, new_capacity)
+        def _expand(tensor, dim):
+            new_t = torch.zeros((new_capacity, dim), dtype=tensor.dtype, device=self.device)
+            new_t[:filled] = tensor[:filled]
+            return new_t
+        self.obs = _expand(self.obs, self.obs_dim)
+        self.mask = _expand(self.mask, self.act_dim)
+        self.ta = _expand(self.ta, self.act_dim)
+        self.capacity = new_capacity
 
 
 # =========================
@@ -330,6 +364,9 @@ class NFSPConfig:
     max_grad_norm: float = 10.0        # For nn.utils.clip_grad_norm_
     hidden: int = 256
     use_double_dqn: bool = True
+    n_step: int = 1
+    burst_rl_updates_on_reward: int = 2
+    burst_reward_threshold: float = 0.5
 
 class NFSPAgent:
     def __init__(self, obs_dim: int, act_dim: int, device: Optional[torch.device] = None, cfg: NFSPConfig = NFSPConfig()):
@@ -447,10 +484,200 @@ class NFSPAgent:
 
     # -------- Orchestration (online self-play) --------
     def _epsilon(self) -> float:
+        if hasattr(self, "_eps_current"):
+            return float(self._eps_current)
         s = self.total_env_steps
         frac = min(1.0, s / max(1, self.cfg.eps_decay_steps))
         return self.cfg.eps_end + (1.0 - frac) * (self.cfg.eps_start - self.cfg.eps_end)
 
+    def _ensure_schedule_state(self):
+        if not hasattr(self, "_schedule_flags"):
+            self._schedule_flags: set[str] = set()
+        if not hasattr(self, "_nstep_queue"):
+            self._nstep_queue: deque = deque()
+        if not hasattr(self, "_eps_current"):
+            self._eps_current = float(self.cfg.eps_end)
+        if not hasattr(self, "_active_n_step"):
+            self._active_n_step = max(1, int(self.cfg.n_step))
+        if not hasattr(self, "_last_checkpoint_million"):
+            self._last_checkpoint_million = self.total_env_steps // 1_000_000
+        if self.rl_buf.capacity >= 1_000_000:
+            self._schedule_flags.add("buffers_1m")
+        if not hasattr(self, "_nstep_weight_scale"):
+            self._nstep_weight_scale = 0.5
+        if not hasattr(self, "_nstep_terminal_boost"):
+            self._nstep_terminal_boost = 0.5
+
+    def _set_lr(self, optimizer, lr: float):
+        lr = float(lr)
+        for group in optimizer.param_groups:
+            group["lr"] = lr
+
+    def _interp(self, step: int, start: int, end: int, v_start: float, v_end: float) -> float:
+        if step <= start:
+            return v_start
+        if step >= end:
+            return v_end
+        frac = (step - start) / max(1, end - start)
+        return v_start + frac * (v_end - v_start)
+
+    def _apply_phase_schedules(self, step: int):
+        self._ensure_schedule_state()
+
+        # Buffer growth at 5M
+        if step >= 5_000_000 and "buffers_1m" not in self._schedule_flags:
+            self.rl_buf.resize(1_000_000)
+            self.sl_buf.resize(1_000_000)
+            self._schedule_flags.add("buffers_1m")
+
+        # Anticipatory eta
+        if step < 10_000_000:
+            eta = 0.25
+        elif step < 15_000_000:
+            eta = 0.15
+        elif step < 20_000_000:
+            eta = 0.12
+        else:
+            eta = 0.10
+        self.cfg.anticipatory_eta = eta
+
+        # Epsilon schedule
+        if step < 5_000_000:
+            eps = 0.05
+        elif step < 10_000_000:
+            eps = self._interp(step, 5_000_000, 10_000_000, 0.05, 0.04)
+        elif step < 15_000_000:
+            eps = self._interp(step, 10_000_000, 15_000_000, 0.04, 0.03)
+        elif step < 20_000_000:
+            eps = self._interp(step, 15_000_000, 20_000_000, 0.03, 0.025)
+        else:
+            eps = self._interp(step, 20_000_000, 25_000_000, 0.025, 0.02)
+        self._eps_current = max(0.0, min(1.0, eps))
+
+        # Q learning rate schedule
+        if step < 5_000_000:
+            lr_q = 1e-4
+        elif step < 10_000_000:
+            lr_q = self._interp(step, 5_000_000, 10_000_000, 1e-4, 7e-5)
+        elif step < 15_000_000:
+            lr_q = self._interp(step, 10_000_000, 15_000_000, 7e-5, 5e-5)
+        elif step < 23_000_000:
+            lr_q = 5e-5
+        else:
+            lr_q = self._interp(step, 23_000_000, 25_000_000, 5e-5, 3e-5)
+        self._set_lr(self.opt_q, lr_q)
+
+        # RL cadence to keep reuse manageable
+        if step < 10_000_000:
+            self.cfg.train_rl_every = 32
+        elif step < 12_000_000:
+            self.cfg.train_rl_every = 32
+        elif step < 15_000_000:
+            self.cfg.train_rl_every = 48
+        elif step < 20_000_000:
+            self.cfg.train_rl_every = 48
+        else:
+            self.cfg.train_rl_every = 64
+
+        # n-step schedule
+        if step < 12_000_000:
+            target_n = 5
+        elif step < 20_000_000:
+            target_n = 7
+        else:
+            target_n = 10
+        target_n = max(1, target_n)
+        if target_n != self._active_n_step:
+            # flush pending transitions under previous n-step before switching
+            self._flush_nstep(force=True)
+            self._active_n_step = target_n
+            self.cfg.n_step = target_n
+
+    def _store_transition(self, obs, mask, action_idx: int, reward: float, nobs, nmask, done: bool, is_br: bool):
+        action_tensor = torch.tensor(action_idx, dtype=torch.long, device=self.device)
+        reward_val = float(reward)
+        if self._active_n_step <= 1:
+            if is_br:
+                self.rl_buf.add(
+                    obs.clone(),
+                    mask.clone(),
+                    action_tensor,
+                    torch.tensor(reward_val, dtype=torch.float32, device=self.device),
+                    nobs.clone(),
+                    nmask.clone(),
+                    done,
+                )
+            return
+
+        entry = {
+            "obs": obs.clone(),
+            "mask": mask.clone(),
+            "action": action_tensor,
+            "reward": reward_val,
+            "nobs": nobs.clone(),
+            "nmask": nmask.clone(),
+            "done": bool(done),
+            "is_br": bool(is_br),
+        }
+        self._nstep_queue.append(entry)
+        self._flush_nstep(force=False)
+
+    def _flush_nstep(self, force: bool = False):
+        if not hasattr(self, "_nstep_queue"):
+            return
+        n = max(1, self._active_n_step)
+        if n <= 1:
+            self._nstep_queue.clear()
+            return
+        while self._nstep_queue and (
+            force or len(self._nstep_queue) >= n or self._nstep_queue[0]["done"]
+        ):
+            R = 0.0
+            gamma = 1.0
+            done_flag = False
+            next_obs = self._nstep_queue[0]["nobs"]
+            next_mask = self._nstep_queue[0]["nmask"]
+            limit = min(n, len(self._nstep_queue))
+            steps_used = 0
+            for i in range(limit):
+                item = self._nstep_queue[i]
+                R += gamma * item["reward"]
+                gamma *= self.cfg.gamma
+                steps_used += 1
+                next_obs = item["nobs"]
+                next_mask = item["nmask"]
+                done_flag = item["done"]
+                if item["done"]:
+                    break
+            first = self._nstep_queue.popleft()
+            if first.get("is_br", False):
+                weight = 1.0 + max(0.0, self._nstep_weight_scale) * max(0, n - steps_used)
+                if done_flag:
+                    weight += max(0.0, self._nstep_terminal_boost) * max(0, n - steps_used + 1)
+                repeats = max(1, int(weight))
+                residual = max(0.0, weight - repeats)
+                for _ in range(repeats):
+                    self.rl_buf.add(
+                        first["obs"],
+                        first["mask"],
+                        first["action"],
+                        torch.tensor(R, dtype=torch.float32, device=self.device),
+                        next_obs,
+                        next_mask,
+                        done_flag,
+                    )
+                if residual > 0.0 and random.random() < residual:
+                    self.rl_buf.add(
+                        first["obs"],
+                        first["mask"],
+                        first["action"],
+                        torch.tensor(R, dtype=torch.float32, device=self.device),
+                        next_obs,
+                        next_mask,
+                        done_flag,
+                    )
+            if done_flag:
+                force = True
     def train_from_selfplay(
         self,
         env: "TurnEnvAdapter",
@@ -464,10 +691,19 @@ class NFSPAgent:
         eval_every: int = 50_000,
         eval_episodes: int = 200,
         eval_env_factory: Optional[Callable[[], "TurnEnvAdapter"]] = None,
+        apply_phase_schedules_every: int = 1_000,
+        save_checkpoint_every: int = 2000
     ):
         # --- setup ---
         obs, mask, pid = env.reset()
         obs, mask = obs.to(self.device), mask.to(self.device)
+
+        self._ensure_schedule_state()
+        self._nstep_queue.clear()
+        self._active_n_step = max(1, int(self.cfg.n_step))
+        self._last_checkpoint_million = max(
+            self._last_checkpoint_million, self.total_env_steps // 1_000_000
+        )
 
         # track update counters across runs
         self.rl_updates = getattr(self, "rl_updates", 0)
@@ -493,7 +729,8 @@ class NFSPAgent:
         csv_header = [
             "step","avg_reward","win_rate","avg_len",
             "q_loss","sl_loss","policy_entropy",
-            "illegal_rate","epsilon","rl_buf","sl_buf"
+            "illegal_rate","epsilon","anticipatory_eta","lr_q","n_step","train_rl_every",
+            "rl_buf","sl_buf"
         ]
         csv_logger = _CsvLogger(csv_path, csv_header) if csv_path else None
 
@@ -502,6 +739,8 @@ class NFSPAgent:
 
         # main loop
         while self.total_env_steps < total_steps:
+            if self.total_env_steps % apply_phase_schedules_every == 0:
+                self._apply_phase_schedules(self.total_env_steps)
             use_br = (random.random() < self.cfg.anticipatory_eta)
             eps = self._epsilon()
 
@@ -509,13 +748,35 @@ class NFSPAgent:
             nobs, nmask, reward, done, info = env.step(action, game_save_dir=game_save_dir)
             nobs, nmask = nobs.to(self.device), nmask.to(self.device)
 
-            # RL buffer: BR transitions only
-            if use_br:
-                self.rl_buf.add(
-                    obs, mask, torch.tensor(action, device=self.device),
-                    torch.tensor(reward, dtype=torch.float32, device=self.device),
-                    nobs, nmask, done
-                )
+            # Store transition (all actions) but only BR steps produce replay entries
+            self._store_transition(obs, mask, action, reward, nobs, nmask, done, is_br=use_br)
+            if done and self._active_n_step > 1:
+                self._flush_nstep(force=True)
+            elif (
+                self._active_n_step > 1
+                and self._nstep_queue
+                and self._nstep_queue[0]["done"]
+            ):
+                self._flush_nstep(force=True)
+
+            rewardful = reward >= self.cfg.burst_reward_threshold
+            if (
+                rewardful
+                and self.cfg.burst_rl_updates_on_reward > 0
+                and self.total_env_steps > self.cfg.warmup_steps
+            ):
+                extra_updates = max(0, int(self.cfg.burst_rl_updates_on_reward))
+                for _ in range(extra_updates):
+                    out_extra = self._train_rl_step()
+                    if out_extra is None:
+                        continue
+                    if isinstance(out_extra, dict):
+                        q_loss_extra = out_extra.get("q_loss", None)
+                    else:
+                        q_loss_extra = float(out_extra) if out_extra is not None else None
+                    if q_loss_extra is not None and math.isfinite(q_loss_extra):
+                        recent_q_loss.append(q_loss_extra)
+                    self.rl_updates += 1
 
             # SL reservoir: empirical one-hot from behavior (BR or pi)
             one_hot = torch.zeros(self.act_dim, dtype=torch.float32)
@@ -531,6 +792,16 @@ class NFSPAgent:
                 recent_illegal.append(illegal)
 
             self.total_env_steps += 1
+            # per-million checkpointing
+            if save_path and self.total_env_steps % save_checkpoint_every == 0:
+                current_million = self.total_env_steps // 1_000_000
+                if current_million > self._last_checkpoint_million:
+                    base, ext = os.path.splitext(save_path)
+                    if not ext:
+                        ext = ".pt"
+                    million_path = f"{base}_{current_million}M{ext}"
+                    self.save(million_path)
+                    self._last_checkpoint_million = current_million
 
             # Online updates (after warmup)
             if self.total_env_steps > self.cfg.warmup_steps:
@@ -568,6 +839,7 @@ class NFSPAgent:
 
             # Episode handling
             if done:
+                self._flush_nstep(force=True)
                 recent_rewards.append(ep_reward)
                 recent_lens.append(ep_len)
                 ep_reward, ep_len = 0.0, 0
@@ -587,6 +859,10 @@ class NFSPAgent:
                 pent       = float(np.mean(recent_pi_ent)) if recent_pi_ent else float("nan")
                 illegal_rt = float(np.mean(recent_illegal)) if recent_illegal else 0.0
                 episodes_logged = len(recent_rewards)
+                eta_val = float(self.cfg.anticipatory_eta)
+                lr_q_val = float(self.opt_q.param_groups[0]["lr"])
+                n_step_active = int(self._active_n_step)
+                rl_every = int(self.cfg.train_rl_every)
 
                 print(
                     f"[steps={self.total_env_steps}] "
@@ -595,6 +871,7 @@ class NFSPAgent:
                     f"illegal={illegal_rt:.3f} eps={eps:.3f} "
                     f"RL_buf={self.rl_buf.size} SL_buf≈{min(self.sl_buf.size, self.sl_buf.capacity)} "
                     f"RL_upd={self.rl_updates} SL_upd={self.sl_updates} "
+                    f"eta={eta_val:.3f} lr_q={lr_q_val:.2e} n_step={n_step_active} rl_every={rl_every} "
                     f"episodes_tracked={episodes_logged}"
                 )
 
@@ -607,6 +884,10 @@ class NFSPAgent:
                     writer.add_scalar("Policy/entropy", pent,      self.total_env_steps)
                     writer.add_scalar("Env/illegal_rate", illegal_rt, self.total_env_steps)
                     writer.add_scalar("Exploration/epsilon", eps,   self.total_env_steps)
+                    writer.add_scalar("Exploration/eta", eta_val, self.total_env_steps)
+                    writer.add_scalar("Optimization/lr_q", lr_q_val, self.total_env_steps)
+                    writer.add_scalar("Optimization/n_step", n_step_active, self.total_env_steps)
+                    writer.add_scalar("Optimization/train_rl_every", rl_every, self.total_env_steps)
                     writer.add_scalar("Buffers/RL_size", self.rl_buf.size, self.total_env_steps)
                     writer.add_scalar("Buffers/SL_size", min(self.sl_buf.size, self.sl_buf.capacity), self.total_env_steps)
 
@@ -614,6 +895,7 @@ class NFSPAgent:
                     csv_logger.row([
                         self.total_env_steps, avg_reward, win_rate, avg_len,
                         ql, sll, pent, illegal_rt, eps,
+                        eta_val, lr_q_val, n_step_active, rl_every,
                         self.rl_buf.size, min(self.sl_buf.size, self.sl_buf.capacity)
                     ])
 
@@ -655,6 +937,7 @@ class NFSPAgent:
                     obs, mask, pid = env.reset()
                     obs, mask = obs.to(self.device), mask.to(self.device)
 
+        self._flush_nstep(force=True)
         if save_path:
             self.save(save_path)
         if writer:
@@ -708,6 +991,8 @@ class NFSPAgent:
             self.sl_buf.load_state_dict(ckpt["sl_buf"])
         self.rl_updates = ckpt.get("rl_updates", getattr(self, "rl_updates", 0))
         self.sl_updates = ckpt.get("sl_updates", getattr(self, "sl_updates", 0))
+        self._nstep_queue = deque()
+        self._ensure_schedule_state()
 
 
 # =========================
