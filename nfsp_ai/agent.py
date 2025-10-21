@@ -719,6 +719,12 @@ class NFSPAgent:
             self._check_explore_prob = 0.0
         if self._is_pinned("check_prob"):
             self._check_explore_prob = float(self._pinned_overrides["check_prob"])
+        if not hasattr(self, "_control_plane_events"):
+            self._control_plane_events: list[dict[str, Any]] = []
+        if not hasattr(self, "_last_control_plane_override_flag"):
+            self._last_control_plane_override_flag = 0
+        if not hasattr(self, "_last_control_plane_override_summary"):
+            self._last_control_plane_override_summary = ""
 
     def _set_lr(self, optimizer, lr: float):
         lr = float(lr)
@@ -1028,7 +1034,7 @@ class NFSPAgent:
             "step","avg_reward","win_rate","avg_len",
             "q_loss","sl_loss","policy_entropy",
             "illegal_rate","epsilon","anticipatory_eta","lr_q","n_step","train_rl_every","check_explore_prob","max_cards",
-            "rl_buf","sl_buf","pinned_overrides","pinned_env"
+            "rl_buf","sl_buf","control_override","control_changes","pinned_overrides","pinned_env"
         ]
         csv_logger = _CsvLogger(csv_path, csv_header) if csv_path else None
 
@@ -1205,6 +1211,15 @@ class NFSPAgent:
                 pinned_env_keys = sorted(self._pinned_env_overrides.keys())
                 pin_summary = ",".join(pinned_override_keys) if pinned_override_keys else "-"
                 env_pin_summary = ",".join(pinned_env_keys) if pinned_env_keys else "-"
+                control_events = getattr(self, "_control_plane_events", [])
+                control_override_flag = 1 if control_events else 0
+                control_changes = []
+                if control_events:
+                    for event in control_events:
+                        step_mark = event.get("step", self.total_env_steps)
+                        for msg in event.get("changes", []):
+                            control_changes.append(f"{step_mark}:{msg}")
+                control_change_summary = ";".join(control_changes)
 
                 print(
                     f"[steps={self.total_env_steps}] "
@@ -1216,6 +1231,7 @@ class NFSPAgent:
                     f"eta={eta_val:.3f} lr_q={lr_q_val:.2e} n_step={n_step_active} rl_every={rl_every} "
                     f"chk_p={check_prob:.3f} max_cards={current_max_cards} "
                     f"pins={pin_summary} env_pins={env_pin_summary} "
+                    f"ctrl={control_override_flag} "
                     f"episodes_tracked={episodes_logged}"
                 )
 
@@ -1238,6 +1254,7 @@ class NFSPAgent:
                     writer.add_scalar("Buffers/SL_size", min(self.sl_buf.size, self.sl_buf.capacity), self.total_env_steps)
                     writer.add_scalar("Control/pinned_override_count", len(pinned_override_keys), self.total_env_steps)
                     writer.add_scalar("Control/pinned_env_count", len(pinned_env_keys), self.total_env_steps)
+                    writer.add_scalar("Control/override_applied", control_override_flag, self.total_env_steps)
 
                 if csv_logger:
                     csv_logger.row([
@@ -1245,9 +1262,13 @@ class NFSPAgent:
                         ql, sll, pent, illegal_rt, eps,
                         eta_val, lr_q_val, n_step_active, rl_every, check_prob, current_max_cards,
                         self.rl_buf.size, min(self.sl_buf.size, self.sl_buf.capacity),
+                        control_override_flag, control_change_summary,
                         "|".join(pinned_override_keys) if pinned_override_keys else "",
                         "|".join(pinned_env_keys) if pinned_env_keys else "",
                     ])
+                self._last_control_plane_override_flag = control_override_flag
+                self._last_control_plane_override_summary = control_change_summary
+                self._control_plane_events = []
 
             if save_path and (self.total_env_steps % (10 * log_every) == 0):
                 self.save(save_path)
@@ -1293,6 +1314,8 @@ class NFSPAgent:
                         int(getattr(env, "max_cards", desired_max_cards)),
                         self.rl_buf.size,
                         min(self.sl_buf.size, self.sl_buf.capacity),
+                        int(getattr(self, "_last_control_plane_override_flag", 0)),
+                        getattr(self, "_last_control_plane_override_summary", ""),
                         "|".join(pinned_override_keys) if pinned_override_keys else "",
                         "|".join(pinned_env_keys) if pinned_env_keys else "",
                     ])
