@@ -9,7 +9,7 @@
 from __future__ import annotations
 import random
 from dataclasses import dataclass
-from typing import Tuple, Optional, Callable, Any
+from typing import Tuple, Optional, Callable, Any, TYPE_CHECKING
 
 from collections import deque
 import csv, os, math, time
@@ -26,6 +26,8 @@ import torch.nn.functional as F
 # Baseline strategy for evaluation
 from conservative_ai.agent import ConservativeAgent
 
+if TYPE_CHECKING:
+    from nfsp_ai.control_plane import JsonControlPlane
 
 # Logging, metrics
 
@@ -969,7 +971,8 @@ class NFSPAgent:
         eval_episodes: int = 200,
         eval_env_factory: Optional[Callable[[], "TurnEnvAdapter"]] = None,
         apply_phase_schedules_every: int = 1_000,
-        save_checkpoint_every: int = 2000
+        save_checkpoint_every: int = 2000,
+        control_plane: Optional["JsonControlPlane"] = None,
     ):
         # --- setup ---
         obs, mask, pid = env.reset()
@@ -1036,11 +1039,40 @@ class NFSPAgent:
         while self.total_env_steps < total_steps:
             if self.total_env_steps % apply_phase_schedules_every == 0:
                 self._apply_phase_schedules(self.total_env_steps)
-            use_br = (random.random() < self.cfg.anticipatory_eta)
+            eps = self._epsilon()
+            if control_plane is not None:
+                metrics_snapshot = {
+                    "step": self.total_env_steps,
+                    "eta": float(self.cfg.anticipatory_eta),
+                    "epsilon": float(eps),
+                    "lr_q": float(self.opt_q.param_groups[0]["lr"]),
+                    "lr_pi": float(self.opt_pi.param_groups[0]["lr"]),
+                    "train_rl_every": int(self.cfg.train_rl_every),
+                    "batch_rl": int(self.cfg.batch_rl),
+                    "train_sl_every": int(self.cfg.train_sl_every),
+                    "batch_sl": int(self.cfg.batch_sl),
+                    "tau": float(self.cfg.target_tau),
+                    "hard_target_interval": int(self.cfg.hard_target_interval),
+                    "n_step": int(self._active_n_step),
+                    "max_cards": int(getattr(env, "max_cards", _effective_max_cards(self.total_env_steps))),
+                    "burst_rl_updates_on_reward": int(self.cfg.burst_rl_updates_on_reward),
+                    "burst_reward_threshold": float(self.cfg.burst_reward_threshold),
+                    "check_prob": float(getattr(self, "_check_explore_prob", 0.0)),
+                    "rho_est": float(
+                        self.cfg.batch_rl
+                        / max(1.0, self.cfg.train_rl_every)
+                        / max(self.cfg.anticipatory_eta, 1e-9)
+                    ),
+                }
+                try:
+                    control_plane.tick(self, env, metrics_snapshot)
+                except Exception as exc:
+                    print(f"[control] failed to apply overrides: {exc}")
+                eps = self._epsilon()
             desired_max_cards = _effective_max_cards(self.total_env_steps)
             if getattr(env, "max_cards", None) != desired_max_cards:
                 self._sync_env_max_cards(env, desired_max_cards)
-            eps = self._epsilon()
+            use_br = (random.random() < self.cfg.anticipatory_eta)
 
             action = self.act(obs, mask, use_br=use_br, epsilon=eps)
             nobs, nmask, reward, done, info = env.step(action, game_save_dir=game_save_dir)

@@ -16,6 +16,7 @@ import torch
 import shared.api.simpleschema_local_manager as gm                 # local manager
 from shared.probabilities.dynamic_probabilities import get_bet_probabilities, get_generic_bet_probabilities
 from nfsp_ai.agent import NFSPAgent, NFSPConfig          # your NFSP implementation
+from nfsp_ai.control_plane import JsonControlPlane, build_control_snapshot, write_control_file
 
 CHECK = gm.CHECK
 MAX_PLAYERS = 8
@@ -437,6 +438,20 @@ def main():
         action="store_true",
         help="Enable verbose logging from the game manager.",
     )
+    parser.add_argument(
+        "--control-plane",
+        dest="control_plane",
+        type=str,
+        default=None,
+        help="Path to control-plane JSON file for runtime overrides.",
+    )
+    parser.add_argument(
+        "--control-plane-cooldown",
+        dest="control_plane_cooldown",
+        type=int,
+        default=50_000,
+        help="Minimum env steps between control-plane applications (default: 50k).",
+    )
     args = parser.parse_args()
 
     env = MyEnv(
@@ -474,6 +489,19 @@ def main():
     if args.resume_path:
         agent.load(args.resume_path)
 
+    control_plane = None
+    if args.control_plane:
+        cp_path = os.path.abspath(args.control_plane)
+        if not os.path.exists(cp_path):
+            snapshot = build_control_snapshot(agent, env, cooldown_steps=args.control_plane_cooldown)
+            write_control_file(cp_path, snapshot)
+            print(f"[control] bootstrap control-plane file written to {cp_path}")
+        control_plane = JsonControlPlane(
+            cp_path,
+            cooldown_steps=args.control_plane_cooldown,
+            verbose=True,
+        )
+
     postfix = datetime.now().strftime("%Y%m%d%H%M%S")
     model_save_path = f"nfsp_blef_{postfix}.pt"
     game_save_dir = f"games_{postfix}"
@@ -491,6 +519,7 @@ def main():
             verbose=env.verbose,
             illegal_penalty=env.illegal_penalty,
         ),
+        control_plane=control_plane,
     )
 
 
