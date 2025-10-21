@@ -405,8 +405,8 @@ class MyEnv:
 def main():
     parser = argparse.ArgumentParser(description="Run NFSP Blef self-play locally.")
     parser.add_argument(
-        "--load-model-path",
-        dest="load_model_path",
+        "--resume",
+        dest="resume_path",
         type=str,
         default=None,
         help="Optional path to an NFSP checkpoint (.pt) to resume from.",
@@ -471,8 +471,8 @@ def main():
         ),
     )
 
-    if args.load_model_path:
-        agent.load(args.load_model_path)
+    if args.resume_path:
+        agent.load(args.resume_path)
 
     postfix = datetime.now().strftime("%Y%m%d%H%M%S")
     model_save_path = f"nfsp_blef_{postfix}.pt"
