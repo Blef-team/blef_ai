@@ -738,12 +738,31 @@ class NFSPAgent:
         obs, mask, pid = env.reset()
         obs, mask = obs.to(self.device), mask.to(self.device)
 
+        # environment curriculum for max_cards
+        def _target_max_cards(step: int) -> int:
+            if step < 1_000_000:
+                return 1
+            if step < 3_000_000:
+                return 2
+            if step < 5_000_000:
+                return 3
+            extra = (step - 5_000_000) // 3_000_000
+            return int(max(1, min(11, 3 + extra)))
+
         self._ensure_schedule_state()
         self._nstep_queue.clear()
         self._active_n_step = max(1, int(self.cfg.n_step))
         self._last_checkpoint_million = max(
             self._last_checkpoint_million, self.total_env_steps // 1_000_000
         )
+        initial_max_cards = _target_max_cards(self.total_env_steps)
+        if getattr(env, "max_cards", None) != initial_max_cards:
+            env.max_cards = initial_max_cards
+        if getattr(env, "game", None):
+            env.game["max_cards"] = initial_max_cards
+            rules = env.game.get("rules")
+            if isinstance(rules, dict):
+                rules["max_cards"] = initial_max_cards
 
         # track update counters across runs
         self.rl_updates = getattr(self, "rl_updates", 0)
@@ -769,7 +788,7 @@ class NFSPAgent:
         csv_header = [
             "step","avg_reward","win_rate","avg_len",
             "q_loss","sl_loss","policy_entropy",
-            "illegal_rate","epsilon","anticipatory_eta","lr_q","n_step","train_rl_every","check_explore_prob",
+            "illegal_rate","epsilon","anticipatory_eta","lr_q","n_step","train_rl_every","check_explore_prob","max_cards",
             "rl_buf","sl_buf"
         ]
         csv_logger = _CsvLogger(csv_path, csv_header) if csv_path else None
@@ -782,6 +801,14 @@ class NFSPAgent:
             if self.total_env_steps % apply_phase_schedules_every == 0:
                 self._apply_phase_schedules(self.total_env_steps)
             use_br = (random.random() < self.cfg.anticipatory_eta)
+            desired_max_cards = _target_max_cards(self.total_env_steps)
+            if getattr(env, "max_cards", None) != desired_max_cards:
+                env.max_cards = desired_max_cards
+                if hasattr(env, "game") and env.game:
+                    env.game["max_cards"] = desired_max_cards
+                    rules = env.game.get("rules")
+                    if isinstance(rules, dict):
+                        rules["max_cards"] = desired_max_cards
             eps = self._epsilon()
 
             action = self.act(obs, mask, use_br=use_br, epsilon=eps)
@@ -904,6 +931,7 @@ class NFSPAgent:
                 n_step_active = int(self._active_n_step)
                 rl_every = int(self.cfg.train_rl_every)
                 check_prob = float(getattr(self, "_check_explore_prob", 0.0))
+                current_max_cards = int(getattr(env, "max_cards", desired_max_cards))
 
                 print(
                     f"[steps={self.total_env_steps}] "
@@ -913,7 +941,7 @@ class NFSPAgent:
                     f"RL_buf={self.rl_buf.size} SL_buf≈{min(self.sl_buf.size, self.sl_buf.capacity)} "
                     f"RL_upd={self.rl_updates} SL_upd={self.sl_updates} "
                     f"eta={eta_val:.3f} lr_q={lr_q_val:.2e} n_step={n_step_active} rl_every={rl_every} "
-                    f"chk_p={check_prob:.3f} "
+                    f"chk_p={check_prob:.3f} max_cards={current_max_cards} "
                     f"episodes_tracked={episodes_logged}"
                 )
 
@@ -931,6 +959,7 @@ class NFSPAgent:
                     writer.add_scalar("Optimization/lr_q", lr_q_val, self.total_env_steps)
                     writer.add_scalar("Optimization/n_step", n_step_active, self.total_env_steps)
                     writer.add_scalar("Optimization/train_rl_every", rl_every, self.total_env_steps)
+                    writer.add_scalar("Env/max_cards", current_max_cards, self.total_env_steps)
                     writer.add_scalar("Buffers/RL_size", self.rl_buf.size, self.total_env_steps)
                     writer.add_scalar("Buffers/SL_size", min(self.sl_buf.size, self.sl_buf.capacity), self.total_env_steps)
 
@@ -938,7 +967,7 @@ class NFSPAgent:
                     csv_logger.row([
                         self.total_env_steps, avg_reward, win_rate, avg_len,
                         ql, sll, pent, illegal_rt, eps,
-                        eta_val, lr_q_val, n_step_active, rl_every, check_prob,
+                        eta_val, lr_q_val, n_step_active, rl_every, check_prob, current_max_cards,
                         self.rl_buf.size, min(self.sl_buf.size, self.sl_buf.capacity)
                     ])
 
