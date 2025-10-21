@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import Tuple, Optional, Callable, Any, TYPE_CHECKING
 
 from collections import deque
-import csv, os, math, time
+import csv, os, math, time, json
 import numpy as np
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -979,6 +979,9 @@ class NFSPAgent:
         apply_phase_schedules_every: int = 1_000,
         save_checkpoint_every: int = 2000,
         control_plane: Optional["JsonControlPlane"] = None,
+        history_sample_path: Optional[str] = "./logs/action_history_samples.jsonl",
+        history_sample_every: int = 100_000,
+        history_sample_limit: Optional[int] = 1_000,
     ):
         # --- setup ---
         obs, mask, pid = env.reset()
@@ -1041,6 +1044,18 @@ class NFSPAgent:
         # episode accumulators
         ep_reward, ep_len = 0.0, 0
 
+        history_sample_next = None
+        history_samples_written = 0
+        if history_sample_path:
+            os.makedirs(os.path.dirname(history_sample_path) or ".", exist_ok=True)
+            history_sample_every = max(1, int(history_sample_every))
+            history_sample_next = history_sample_every
+            history_sample_limit = (
+                None if history_sample_limit is None else max(0, int(history_sample_limit))
+            )
+        else:
+            history_sample_limit = None
+
         # main loop
         while self.total_env_steps < total_steps:
             if self.total_env_steps % apply_phase_schedules_every == 0:
@@ -1088,6 +1103,12 @@ class NFSPAgent:
             action = self.act(obs, mask, use_br=use_br, epsilon=eps)
             nobs, nmask, reward, done, info = env.step(action, game_save_dir=game_save_dir)
             nobs, nmask = nobs.to(self.device), nmask.to(self.device)
+            info_dict = info if isinstance(info, dict) else {}
+            if info_dict:
+                illegal = int(info_dict.get("illegal", 0))
+                recent_illegal.append(illegal)
+            else:
+                illegal = 0
 
             # Store transition (all actions) but only BR steps produce replay entries
             self._store_transition(obs, mask, action, reward, nobs, nmask, done, is_br=use_br)
@@ -1124,13 +1145,41 @@ class NFSPAgent:
             one_hot[action] = 1.0
             self.sl_buf.add(obs.detach().cpu(), mask.detach().cpu(), one_hot)
 
+            if history_sample_path and history_sample_next is not None and info_dict:
+                history_payload = info_dict.get("history")
+                if history_payload:
+                    if self.total_env_steps >= history_sample_next:
+                        if history_sample_limit is None or history_samples_written < history_sample_limit:
+                            self._ensure_override_state()
+                            record = {
+                                "step": self.total_env_steps,
+                                "history": history_payload,
+                                "round_result": info_dict.get("round_result"),
+                                "reward": float(reward),
+                                "eta": float(self.cfg.anticipatory_eta),
+                                "epsilon": float(eps),
+                                "check_prob": float(getattr(self, "_check_explore_prob", 0.0)),
+                                "max_cards": int(getattr(env, "max_cards", desired_max_cards)),
+                                "pins": {
+                                    "overrides": sorted(self._pinned_overrides.keys()),
+                                    "env": sorted(self._pinned_env_overrides.keys()),
+                                },
+                            }
+                            with open(history_sample_path, "a", encoding="utf-8") as hf:
+                                hf.write(json.dumps(record, sort_keys=True) + "\n")
+                            history_samples_written += 1
+                            history_sample_next += history_sample_every
+                            if (
+                                history_sample_limit is not None
+                                and history_samples_written >= history_sample_limit
+                            ):
+                                history_sample_next = None
+                        else:
+                            history_sample_next = None
+
             # gameplay accumulators
             ep_reward += float(reward)
             ep_len    += 1
-            if info and isinstance(info, dict):
-                # If your env reports illegal moves attempted & corrected:
-                illegal = int(info.get("illegal", 0))
-                recent_illegal.append(illegal)
 
             self.total_env_steps += 1
             # per-million checkpointing

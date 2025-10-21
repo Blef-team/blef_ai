@@ -340,6 +340,10 @@ class MyEnv:
         actor_nick = self.game.get("cp_nickname")
         before_counts = {p["nickname"]: int(p["n_cards"]) for p in self.game.get("players", [])}
         status_before = self.game.get("status", "Running")
+        history_before = [
+            {"player": ev.get("player"), "action_id": int(ev.get("action_id", -1))}
+            for ev in (self.game.get("history") or [])
+        ]
 
         # Try to act; catch and handle illegal attempts gracefully.
         try:
@@ -349,7 +353,8 @@ class MyEnv:
             obs = self._last_obs.clone()
             mask = self._last_mask.clone()
             pid = self._pid()
-            return obs, mask, float(self.illegal_penalty), False, pid
+            info = {"next_pid": pid, "illegal": 1}
+            return obs, mask, float(self.illegal_penalty), False, info
 
         # New observation / mask / pid after the move (may be a new round if CHECK)
         cp = self.game.get("cp_nickname")
@@ -360,6 +365,8 @@ class MyEnv:
         # Determine terminal and reward
         done = False
         reward = 0.0
+        round_result = None
+        history_for_log = None
 
         if int(action) == CHECK:
             # Round has been resolved by the manager, and a new round likely started.
@@ -385,6 +392,14 @@ class MyEnv:
                 reward = -1.0
             else:
                 reward = 1.0
+            round_result = {
+                "actor": actor_nick,
+                "loser": loser,
+                "ref": ref,
+                "before_counts": before_counts,
+                "after_counts": after_counts,
+            }
+            history_for_log = history_before
 
         # Game finished? Mark terminal regardless of action.
         if self.game.get("status") == "Finished" and status_before != "Finished":
@@ -400,7 +415,15 @@ class MyEnv:
         assert done or self.rounds_since_reset < MAX_ROUNDS
 
         self._last_obs, self._last_mask = obs, mask
-        return obs, mask, float(reward), bool(done), pid
+        info = {
+            "next_pid": pid,
+            "illegal": 0,
+            "action": int(action),
+            "history": history_for_log,
+            "round_result": round_result,
+            "reward": float(reward),
+        }
+        return obs, mask, float(reward), bool(done), info
 
 
 def main():
@@ -451,6 +474,27 @@ def main():
         type=int,
         default=50_000,
         help="Minimum env steps between control-plane applications (default: 50k).",
+    )
+    parser.add_argument(
+        "--history-sample-every",
+        dest="history_sample_every",
+        type=int,
+        default=100_000,
+        help="Env steps between stored action-history samples (default: 100k).",
+    )
+    parser.add_argument(
+        "--history-sample-limit",
+        dest="history_sample_limit",
+        type=int,
+        default=1_000,
+        help="Maximum number of history samples to record (default: 1000, <=0 disables limit).",
+    )
+    parser.add_argument(
+        "--history-sample-path",
+        dest="history_sample_path",
+        type=str,
+        default=None,
+        help="Optional override for the action-history sample JSONL output.",
     )
     args = parser.parse_args()
 
@@ -506,6 +550,14 @@ def main():
     model_save_path = f"nfsp_blef_{postfix}.pt"
     game_save_dir = f"games_{postfix}"
     os.makedirs(game_save_dir, exist_ok=True)
+    history_sample_limit = None if args.history_sample_limit <= 0 else args.history_sample_limit
+    history_sample_path = args.history_sample_path or os.path.join(
+        "logs", f"action_samples_{postfix}.jsonl"
+    )
+    if history_sample_path:
+        print(
+            f"[history] samples -> {history_sample_path} (every {args.history_sample_every} steps)"
+        )
 
     agent.train_from_selfplay(
         env,
@@ -520,6 +572,9 @@ def main():
             illegal_penalty=env.illegal_penalty,
         ),
         control_plane=control_plane,
+        history_sample_path=history_sample_path,
+        history_sample_every=args.history_sample_every,
+        history_sample_limit=history_sample_limit,
     )
 
 
