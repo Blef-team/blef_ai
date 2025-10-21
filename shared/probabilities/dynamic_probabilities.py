@@ -191,13 +191,18 @@ def _prepare_prob_context(hand_key: Tuple[Tuple[int, int], ...], common_key: Tup
     common_cards = tuple((int(v), int(c)) for v, c in common_key)
     known_cards = hand_cards + common_cards
 
-    value_counts = [0] * 6
+    if deck_size % 4 != 0:
+        raise ValueError(f"Deck size {deck_size} unsupported (must be divisible by 4).")
+    num_values = deck_size // 4
+    value_counts = [0] * num_values
     colour_counts = [0] * 4
     my_jokers = 0
     common_jokers = 0
 
     for value, colour in hand_cards:
         if value >= 0:
+            if value >= num_values:
+                raise ValueError(f"Card value {value} exceeds deck bounds for deck size {deck_size}.")
             value_counts[value] += 1
             if colour >= 0:
                 colour_counts[colour] += 1
@@ -206,6 +211,8 @@ def _prepare_prob_context(hand_key: Tuple[Tuple[int, int], ...], common_key: Tup
 
     for value, colour in common_cards:
         if value >= 0:
+            if value >= num_values:
+                raise ValueError(f"Card value {value} exceeds deck bounds for deck size {deck_size}.")
             value_counts[value] += 1
             if colour >= 0:
                 colour_counts[colour] += 1
@@ -248,11 +255,13 @@ def _calculate_prob_with_context(action_id: int, ctx: ProbContext, unknown_cards
 
     if set_type in ["High card", "Pair", "Three of a kind", "Four of a kind"]:
         value_to_check = set_details["detail_1"]
+        if value_to_check >= len(value_counts):
+            return 0.0
         needed_map = {"High card": 1, "Pair": 2, "Three of a kind": 3, "Four of a kind": 4}
         needed = needed_map[set_type] - value_counts[value_to_check] - jokers_in_play
         if needed <= 0: return 1.0
 
-        cards_of_value_in_deck = 4 - value_counts[value_to_check]
+        cards_of_value_in_deck = max(0, 4 - value_counts[value_to_check])
         jokers_in_deck = total_jokers - known_jokers
         other_cards_in_deck = deck_size + rules.get("blanks", 0) - len(known_cards) + known_jokers - cards_of_value_in_deck
         
@@ -260,13 +269,15 @@ def _calculate_prob_with_context(action_id: int, ctx: ProbContext, unknown_cards
         
     if set_type == "Two pairs":
         val1, val2 = set_details["detail_1"], set_details["detail_2"]
+        if val1 >= len(value_counts) or val2 >= len(value_counts):
+            return 0.0
         needed1 = 2 - value_counts[val1]
         needed2 = 2 - value_counts[val2]
         
         if needed1 + needed2 <= jokers_in_play: return 1.0
         
-        cards1_in_deck = 4 - value_counts[val1]
-        cards2_in_deck = 4 - value_counts[val2]
+        cards1_in_deck = max(0, 4 - value_counts[val1])
+        cards2_in_deck = max(0, 4 - value_counts[val2])
         jokers_in_deck = total_jokers - known_jokers
         other_cards_in_deck = deck_size + rules.get("blanks", 0) - len(known_cards) + known_jokers - cards1_in_deck - cards2_in_deck
         
@@ -282,6 +293,7 @@ def _calculate_prob_with_context(action_id: int, ctx: ProbContext, unknown_cards
         if jokers_needed <= 0: return 1.0
         
         cards_in_deck_counts = [4 - value_counts[v] for v in needed_values]
+        cards_in_deck_counts = [max(0, c) for c in cards_in_deck_counts]
         jokers_in_deck = total_jokers - known_jokers
         other_cards_in_deck = deck_size + rules.get("blanks", 0) - len(known_cards) + known_jokers - sum(cards_in_deck_counts)
         
@@ -300,13 +312,15 @@ def _calculate_prob_with_context(action_id: int, ctx: ProbContext, unknown_cards
 
     if set_type == "Full house":
         val3, val2 = set_details["detail_1"], set_details["detail_2"]
+        if val3 >= len(value_counts) or val2 >= len(value_counts):
+            return 0.0
         needed3 = 3 - value_counts[val3]
         needed2 = 2 - value_counts[val2]
         
         if needed3 + needed2 <= jokers_in_play: return 1.0
         
-        cards3_in_deck = 4 - value_counts[val3]
-        cards2_in_deck = 4 - value_counts[val2]
+        cards3_in_deck = max(0, 4 - value_counts[val3])
+        cards2_in_deck = max(0, 4 - value_counts[val2])
         jokers_in_deck = total_jokers - known_jokers
         other_cards_in_deck = deck_size + rules.get("blanks", 0) - len(known_cards) + known_jokers - cards3_in_deck - cards2_in_deck
         
