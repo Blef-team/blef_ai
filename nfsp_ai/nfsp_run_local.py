@@ -18,6 +18,7 @@ import shared.api.simpleschema_local_manager as gm                 # local manag
 from shared.probabilities.dynamic_probabilities import get_bet_probabilities, get_generic_bet_probabilities
 from nfsp_ai.agent import NFSPAgent, NFSPConfig          # your NFSP implementation
 from nfsp_ai.control_plane import JsonControlPlane, build_control_snapshot, write_control_file
+from nfsp_ai.embedding import CardEmbeddingEncoder, CardEmbeddingConfig
 from shared.game_utils import GameRules
 
 
@@ -30,15 +31,18 @@ class DeckSpec:
     hand_vec_dim: int
     hist_dim: int
     obs_dim: int
+    card_feature_dim: int
+    use_card_embeddings: bool
 
 
-def _compute_obs_dim(hand_vec_dim: int, hist_dim: int) -> int:
+def _compute_obs_dim(hand_vec_dim: int, hist_dim: int, card_feature_dim: Optional[int] = None) -> int:
+    card_dim = card_feature_dim if card_feature_dim is not None else hand_vec_dim
     return (
-        hand_vec_dim
+        card_dim
         + 1  # rules jokers
         + 1  # private jokers
         + 1  # common jokers
-        + hand_vec_dim
+        + card_dim
         + MAX_PLAYERS
         + 1  # round scaling
         + hist_dim
@@ -49,7 +53,7 @@ def _compute_obs_dim(hand_vec_dim: int, hist_dim: int) -> int:
     )
 
 
-def _build_deck_spec(rules: Dict) -> DeckSpec:
+def _build_deck_spec(rules: Dict, card_embedding: Optional["CardEmbeddingRuntime"] = None) -> DeckSpec:
     deck_size = int(rules.get("deck_size", 24))
     if deck_size % 4 != 0:
         raise ValueError(f"Unsupported deck_size {deck_size}; must be divisible by four.")
@@ -59,7 +63,22 @@ def _build_deck_spec(rules: Dict) -> DeckSpec:
     check_action_id = gr.check_action_id
     hand_vec_dim = num_values * 4
     hist_dim = check_action_id
-    obs_dim = _compute_obs_dim(hand_vec_dim, hist_dim)
+    use_card_embeddings = card_embedding is not None
+    if use_card_embeddings:
+        base_deck = int(card_embedding.config.base_deck_size)
+        if base_deck != deck_size:
+            raise ValueError(
+                f"Card embedding artifact deck size {base_deck} does not match environment deck size {deck_size}"
+            )
+        if card_embedding.rank_feature_dim != num_values:
+            raise ValueError(
+                f"Card embedding rank feature dim {card_embedding.rank_feature_dim} "
+                f"does not match expected num values {num_values}"
+            )
+        card_feature_dim = card_embedding.feature_dim
+    else:
+        card_feature_dim = hand_vec_dim
+    obs_dim = _compute_obs_dim(hand_vec_dim, hist_dim, card_feature_dim=card_feature_dim)
     return DeckSpec(
         deck_size=deck_size,
         num_values=num_values,
@@ -68,9 +87,27 @@ def _build_deck_spec(rules: Dict) -> DeckSpec:
         hand_vec_dim=hand_vec_dim,
         hist_dim=hist_dim,
         obs_dim=obs_dim,
+        card_feature_dim=card_feature_dim,
+        use_card_embeddings=use_card_embeddings,
     )
 
 MAX_PLAYERS = 8
+DEFAULT_CARD_EMBEDDING_PATH = "artifacts/card_embedding_pretrain.pt"
+
+
+@dataclass
+class CardEmbeddingRuntime:
+    encoder: CardEmbeddingEncoder
+    config: CardEmbeddingConfig
+    device: torch.device
+    feature_dim: int
+    rank_feature_dim: int
+    suit_feature_dim: int
+    extra_feature_dim: int
+    max_hand_cards: int
+    num_joker_ids: int
+    num_blank_ids: int
+    source_path: Optional[str] = None
 
 
 # ---------- Utilities ----------
@@ -79,9 +116,9 @@ def _nickname_to_idx(players: List[dict], nick: str) -> int:
     return next((i for i, p in enumerate(players) if p["nickname"] == nick), -1)
 
 
-def _deck_spec_from_game(game: dict) -> DeckSpec:
+def _deck_spec_from_game(game: dict, card_embedding: Optional["CardEmbeddingRuntime"] = None) -> DeckSpec:
     rules = game.get("rules", {}) or {}
-    return _build_deck_spec(rules)
+    return _build_deck_spec(rules, card_embedding=card_embedding)
 
 
 def _current_hand(game: dict, nick: str) -> List[dict]:
@@ -109,6 +146,137 @@ def _last_bet_action_id(game: dict, spec: DeckSpec) -> int:
         if 0 <= act < check:
             return act
     return -1
+
+
+def _cards_to_embedding_inputs(
+    cards: List[dict],
+    rules: dict,
+    spec: DeckSpec,
+    embedding: "CardEmbeddingRuntime",
+) -> Tuple[np.ndarray, np.ndarray]:
+    hand_ids = np.full((embedding.max_hand_cards,), -1, dtype=np.int64)
+    rank_counts = np.zeros((embedding.rank_feature_dim,), dtype=np.float32)
+    suit_counts = np.zeros((embedding.suit_feature_dim,), dtype=np.float32)
+    joker_count = 0.0
+    blank_count = 0.0
+
+    joker_cap = max(0, embedding.num_joker_ids)
+    blank_cap = max(0, embedding.num_blank_ids)
+    joker_total = min(joker_cap, max(0, _rules_total_jokers(rules)))
+    blank_total = min(blank_cap, max(0, _rules_total_blanks(rules)))
+
+    base_deck = int(embedding.config.base_deck_size)
+    joker_base = base_deck
+    blank_base = base_deck + joker_cap
+
+    regular_ids: List[int] = []
+    joker_ids: List[int] = []
+    blank_ids: List[int] = []
+
+    for card in cards or []:
+        value = int(card.get("value", -99))
+        colour = int(card.get("colour", -99))
+        if value >= 0 and colour >= 0:
+            card_id = value * embedding.suit_feature_dim + colour
+            regular_ids.append(card_id)
+            if 0 <= value < rank_counts.shape[0]:
+                rank_counts[value] += 1.0
+            if 0 <= colour < suit_counts.shape[0]:
+                suit_counts[colour] += 1.0
+        elif value == -1:
+            if joker_cap <= 0:
+                raise ValueError("Encountered joker but embedding artifact has no joker slots")
+            offset = min(len(joker_ids), max(joker_total - 1, 0))
+            card_id = joker_base + offset
+            joker_ids.append(card_id)
+            joker_count += 1.0
+        elif value == -2:
+            if blank_cap <= 0:
+                raise ValueError("Encountered blank but embedding artifact has no blank slots")
+            offset = min(len(blank_ids), max(blank_total - 1, 0))
+            card_id = blank_base + offset
+            blank_ids.append(card_id)
+            blank_count += 1.0
+
+    ordered_ids = sorted(regular_ids) + sorted(joker_ids) + sorted(blank_ids)
+    for idx, card_id in enumerate(ordered_ids[:embedding.max_hand_cards]):
+        hand_ids[idx] = int(card_id)
+
+    aux_features = np.concatenate(
+        (
+            rank_counts,
+            suit_counts,
+            np.array([joker_count, blank_count], dtype=np.float32),
+        )
+    ).astype(np.float32, copy=False)
+
+    return hand_ids, aux_features
+
+
+def _encode_hand_with_embedding(
+    cards: List[dict],
+    rules: dict,
+    spec: DeckSpec,
+    embedding: "CardEmbeddingRuntime",
+) -> np.ndarray:
+    hand_ids, aux = _cards_to_embedding_inputs(cards, rules, spec, embedding)
+    device = embedding.device
+    hand_tensor = torch.from_numpy(hand_ids).unsqueeze(0).to(device=device, dtype=torch.long)
+    aux_tensor = torch.from_numpy(aux).unsqueeze(0).to(device=device, dtype=torch.float32)
+    with torch.no_grad():
+        emb, _ = embedding.encoder(hand_tensor)
+    features = torch.cat((emb, aux_tensor), dim=1)
+    return features.squeeze(0).detach().cpu().numpy().astype(np.float32, copy=False)
+
+
+def _load_card_embedding(
+    artifact_path: str,
+    device: Optional[str] = None,
+) -> "CardEmbeddingRuntime":
+    if not os.path.exists(artifact_path):
+        raise FileNotFoundError(f"Card embedding artifact not found at '{artifact_path}'")
+
+    payload = torch.load(artifact_path, map_location="cpu")
+    cfg_dict = payload.get("encoder_config")
+    if not isinstance(cfg_dict, dict):
+        raise ValueError("encoder_config missing from embedding artifact")
+    encoder_cfg = CardEmbeddingConfig(**cfg_dict)
+    encoder = CardEmbeddingEncoder(encoder_cfg)
+    state = payload.get("encoder_state_dict")
+    if not isinstance(state, dict):
+        raise ValueError("encoder_state_dict missing from embedding artifact")
+    encoder.load_state_dict(state)
+    encoder.eval()
+
+    target_device = torch.device(device) if device else torch.device("cpu")
+    encoder.to(target_device)
+    hyperparams = payload.get("hyperparams", {}) or {}
+    rank_feature_dim = int(hyperparams.get("rank_feature_dim", encoder_cfg.num_ranks))
+    suit_feature_dim = int(hyperparams.get("suit_feature_dim", encoder_cfg.num_suits))
+    extra_feature_dim = int(hyperparams.get("aux_feature_dim", rank_feature_dim + suit_feature_dim + 2))
+    max_hand_cards = int(
+        hyperparams.get(
+            "max_hand_cards",
+            encoder_cfg.base_deck_size + encoder_cfg.num_joker_ids + encoder_cfg.num_blank_ids,
+        )
+    )
+    feature_dim = encoder.output_dim + extra_feature_dim
+    if max_hand_cards <= 0:
+        max_hand_cards = encoder_cfg.base_deck_size + encoder_cfg.num_joker_ids + encoder_cfg.num_blank_ids
+
+    return CardEmbeddingRuntime(
+        encoder=encoder,
+        config=encoder_cfg,
+        device=target_device,
+        feature_dim=feature_dim,
+        rank_feature_dim=rank_feature_dim,
+        suit_feature_dim=suit_feature_dim,
+        extra_feature_dim=extra_feature_dim,
+        max_hand_cards=max_hand_cards,
+        num_joker_ids=int(encoder_cfg.num_joker_ids),
+        num_blank_ids=int(encoder_cfg.num_blank_ids),
+        source_path=os.path.abspath(artifact_path),
+    )
 
 
 def _legal_action_mask(game: dict, spec: DeckSpec) -> torch.Tensor:
@@ -212,7 +380,12 @@ def _round_history_action_ids(game: dict, hist_dim: int) -> List[int]:
     return ids
 
 
-def vectorize_obs(game: dict, nick: str, spec: DeckSpec) -> torch.Tensor:
+def vectorize_obs(
+    game: dict,
+    nick: str,
+    spec: DeckSpec,
+    embedding: Optional["CardEmbeddingRuntime"] = None,
+) -> torch.Tensor:
     """
     Updated observation for current player (nick) with minimal allocations.
     """
@@ -224,8 +397,17 @@ def vectorize_obs(game: dict, nick: str, spec: DeckSpec) -> torch.Tensor:
 
     # Private hand multi-hot
     my_hand = _current_hand_int(game, nick)
-    obs[idx:idx + spec.hand_vec_dim] = _multi_hot_cards(my_hand, spec)
-    idx += spec.hand_vec_dim
+    if spec.use_card_embeddings and embedding is not None:
+        priv_feat = _encode_hand_with_embedding(my_hand, rules, spec, embedding)
+        if priv_feat.shape[0] != spec.card_feature_dim:
+            raise ValueError(
+                f"Card embedding produced dim {priv_feat.shape[0]}, expected {spec.card_feature_dim}"
+            )
+        obs[idx:idx + spec.card_feature_dim] = priv_feat
+        idx += spec.card_feature_dim
+    else:
+        obs[idx:idx + spec.hand_vec_dim] = _multi_hot_cards(my_hand, spec)
+        idx += spec.hand_vec_dim
 
     # Totals & joker counts
     obs[idx] = float(_rules_total_jokers(rules)); idx += 1
@@ -233,9 +415,18 @@ def vectorize_obs(game: dict, nick: str, spec: DeckSpec) -> torch.Tensor:
     common_hand = _common_hand_int(game)
     obs[idx] = float(_count_jokers_from_ints(common_hand)); idx += 1
 
-    # Common cards multi-hot
-    obs[idx:idx + spec.hand_vec_dim] = _multi_hot_cards(common_hand, spec)
-    idx += spec.hand_vec_dim
+    # Common cards features
+    if spec.use_card_embeddings and embedding is not None:
+        common_feat = _encode_hand_with_embedding(common_hand, rules, spec, embedding)
+        if common_feat.shape[0] != spec.card_feature_dim:
+            raise ValueError(
+                f"Card embedding produced dim {common_feat.shape[0]}, expected {spec.card_feature_dim}"
+            )
+        obs[idx:idx + spec.card_feature_dim] = common_feat
+        idx += spec.card_feature_dim
+    else:
+        obs[idx:idx + spec.hand_vec_dim] = _multi_hot_cards(common_hand, spec)
+        idx += spec.hand_vec_dim
 
     # Seat counts rotated so current player is seat 0
     my_seat = _seat_index(players, game.get("cp_nickname", nick))
@@ -339,13 +530,15 @@ class MyEnv:
         illegal_penalty: float = -0.01,
         game_save_dir: Optional[str] = None,
         save_sample_rate: int = 5000,
+        card_embedding: Optional["CardEmbeddingRuntime"] = None,
     ):
         if n_agents < 2 or n_agents > 8:
             raise ValueError("n_agents must be in [2, 8]")
         self.n_agents = n_agents
         self.max_cards = max_cards
         self.rules = {"deck_size": int(deck_size), "jokers": int(jokers), "blanks": int(blanks)}
-        self.deck_spec = _build_deck_spec(self.rules)
+        self.card_embedding = card_embedding
+        self.deck_spec = _build_deck_spec(self.rules, card_embedding=self.card_embedding)
         self.verbose = verbose
         self.illegal_penalty = float(illegal_penalty)
         self.game_save_dir = game_save_dir
@@ -371,14 +564,14 @@ class MyEnv:
         )
         self.rules = dict(self.game.get("rules", self.rules))
         self.rules = dict(self.game.get("rules", self.rules))
-        self.deck_spec = _deck_spec_from_game(self.game)
+        self.deck_spec = _deck_spec_from_game(self.game, card_embedding=self.card_embedding)
         self.rounds_since_reset = 0
         players = self.game.get("players", []) or []
         if not players:
             raise RuntimeError("Game manager returned no players")
         self._ref_nick = random.choice([p["nickname"] for p in players])
         cp = self.game["cp_nickname"]
-        obs = vectorize_obs(self.game, cp, self.deck_spec).float()
+        obs = vectorize_obs(self.game, cp, self.deck_spec, self.card_embedding).float()
         mask = _legal_action_mask(self.game, self.deck_spec).float()
         pid = self._pid()
         self._last_obs, self._last_mask = obs, mask
@@ -429,10 +622,10 @@ class MyEnv:
             info = {"next_pid": pid, "illegal": 1}
             return obs, mask, float(self.illegal_penalty), False, info
 
-        self.deck_spec = _deck_spec_from_game(self.game)
+        self.deck_spec = _deck_spec_from_game(self.game, card_embedding=self.card_embedding)
         # New observation / mask / pid after the move (may be a new round if the last action was a check)
         cp = self.game.get("cp_nickname")
-        obs = vectorize_obs(self.game, cp, self.deck_spec).float()
+        obs = vectorize_obs(self.game, cp, self.deck_spec, self.card_embedding).float()
         mask = _legal_action_mask(self.game, self.deck_spec).float()
         pid = self._pid()
 
@@ -598,6 +791,23 @@ def main():
         default=5000,
         help="Persist one full game out of this many (default: 5000).",
     )
+    parser.add_argument(
+        "--use-card-embeddings",
+        nargs="?",
+        const="auto",
+        default=None,
+        help=(
+            "Enable pretrained card embedding encoder; optionally provide the .pt artifact path. "
+            "If omitted, legacy multi-hot features are used."
+        ),
+    )
+    parser.add_argument(
+        "--card-embedding-device",
+        dest="card_embedding_device",
+        type=str,
+        default="cpu",
+        help="Torch device for card embedding encoder (default: cpu).",
+    )
     args = parser.parse_args()
 
     postfix = datetime.now().strftime("%Y%m%d%H%M%S")
@@ -613,6 +823,34 @@ def main():
             f"[history] samples -> {history_sample_path} (every {args.history_sample_every} steps)"
         )
 
+    card_embedding_bundle: Optional[CardEmbeddingRuntime] = None
+    embedding_flag = args.use_card_embeddings
+    if embedding_flag:
+        embedding_path = (
+            DEFAULT_CARD_EMBEDDING_PATH
+            if embedding_flag == "auto" or embedding_flag is True
+            else embedding_flag
+        )
+        try:
+            card_embedding_bundle = _load_card_embedding(
+                embedding_path,
+                device=args.card_embedding_device,
+            )
+            print(f"[embeddings] card encoder loaded from {card_embedding_bundle.source_path}")
+        except FileNotFoundError:
+            if embedding_flag == "auto":
+                print(
+                    f"[embeddings] no artifact at {os.path.abspath(embedding_path)}; "
+                    "falling back to legacy multi-hot features."
+                )
+                card_embedding_bundle = None
+            else:
+                raise
+        except Exception as exc:
+            raise RuntimeError(f"Failed to load card embeddings: {exc}") from exc
+    else:
+        print("[embeddings] using legacy card multi-hot features.")
+
     env = MyEnv(
         n_agents=args.n_agents,
         max_cards=args.max_cards,
@@ -622,6 +860,7 @@ def main():
         verbose=args.verbose,
         game_save_dir=game_save_dir,
         save_sample_rate=args.save_game_every,
+        card_embedding=card_embedding_bundle,
     )
     obs0, mask0, _ = env.reset()
 
@@ -682,6 +921,7 @@ def main():
             verbose=env.verbose,
             illegal_penalty=env.illegal_penalty,
             game_save_dir=None,
+            card_embedding=card_embedding_bundle,
         ),
         control_plane=control_plane,
         history_sample_path=history_sample_path,

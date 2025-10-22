@@ -3,13 +3,7 @@ import unittest
 import torch
 
 from nfsp_ai.embedding import CardEmbeddingConfig, CardEmbeddingEncoder
-from tools.pretrain_card_embeddings import (
-    CardExistenceIterableDataset,
-    CardExistenceModel,
-    build_deck_domain,
-    EXTRA_COUNT_FEATURES,
-    MAX_HAND_CARDS,
-)
+from tools.pretrain_card_embeddings import CardExistenceIterableDataset, CardExistenceModel, build_deck_domain
 from shared.api.simpleschema_local_manager import determine_set_existence
 
 
@@ -42,12 +36,18 @@ class CardEmbeddingEncoderTest(unittest.TestCase):
 class CardExistencePipelineTest(unittest.TestCase):
     def test_dataset_produces_valid_sample(self) -> None:
         domain = build_deck_domain(24)
+        rank_feature_dim = domain.num_values
+        suit_feature_dim = 4
+        max_hand_cards = domain.deck_size + 3
         dataset = CardExistenceIterableDataset(
             num_samples=4,
             private_card_options=[1, 2],
             common_card_options=[0, 1],
             seed=42,
             domain=domain,
+            rank_feature_dim=rank_feature_dim,
+            suit_feature_dim=suit_feature_dim,
+            max_hand_cards=max_hand_cards,
             num_jokers=2,
             num_blanks=1,
         )
@@ -57,30 +57,40 @@ class CardExistencePipelineTest(unittest.TestCase):
         self.assertEqual(hand_ids.dtype, torch.long)
         self.assertEqual(aux_features.dtype, torch.float32)
         self.assertEqual(labels.dtype, torch.float32)
-        self.assertEqual(hand_ids.shape[-1], MAX_HAND_CARDS)
-        self.assertEqual(aux_features.shape[-1], EXTRA_COUNT_FEATURES)
+        self.assertEqual(hand_ids.shape[-1], dataset.max_hand_cards)
+        self.assertEqual(aux_features.shape[-1], dataset.extra_feature_dim)
         self.assertGreaterEqual(hand_ids.max().item(), -1)
         self.assertEqual(labels.shape[-1], domain.num_actions)
         self.assertTrue(torch.all((labels == 0.0) | (labels == 1.0)))
 
     def test_dataset_supports_32_deck(self) -> None:
         domain = build_deck_domain(32)
+        rank_feature_dim = domain.num_values
+        suit_feature_dim = 4
+        max_hand_cards = domain.deck_size + 2
         dataset = CardExistenceIterableDataset(
             num_samples=2,
             private_card_options=[0, 1],
             common_card_options=[0, 1],
             seed=1,
             domain=domain,
+            rank_feature_dim=rank_feature_dim,
+            suit_feature_dim=suit_feature_dim,
+            max_hand_cards=max_hand_cards,
             num_jokers=0,
             num_blanks=0,
         )
         sample = next(iter(dataset))
         _, aux_features, labels = sample
-        self.assertEqual(aux_features.shape[-1], EXTRA_COUNT_FEATURES)
+        self.assertEqual(aux_features.shape[-1], dataset.extra_feature_dim)
         self.assertEqual(labels.shape[-1], domain.num_actions)
 
     def test_model_forward(self) -> None:
         domain = build_deck_domain(24)
+        rank_feature_dim = domain.num_values
+        suit_feature_dim = 4
+        extra_features = rank_feature_dim + suit_feature_dim + 2
+        max_hand_cards = domain.deck_size + 3
         cfg = CardEmbeddingConfig(
             rank_dim=4,
             suit_dim=2,
@@ -99,13 +109,13 @@ class CardExistencePipelineTest(unittest.TestCase):
             hidden_sizes=[16],
             dropout=0.0,
             num_actions=domain.num_actions,
-            extra_features=EXTRA_COUNT_FEATURES,
+            extra_features=extra_features,
         )
 
-        hand_ids = torch.full((2, MAX_HAND_CARDS), -1, dtype=torch.long)
+        hand_ids = torch.full((2, max_hand_cards), -1, dtype=torch.long)
         hand_ids[0, :3] = torch.tensor([0, 1, 24])  # include a joker id
         hand_ids[1, :2] = torch.tensor([2, 3])
-        aux_features = torch.zeros((2, EXTRA_COUNT_FEATURES), dtype=torch.float32)
+        aux_features = torch.zeros((2, extra_features), dtype=torch.float32)
         aux_features[0, 0] = 2.0  # rank count indicator
         aux_features[0, -2] = 1.0  # joker count
         aux_features[1, 1] = 1.0

@@ -34,11 +34,6 @@ RANK_LABELS = {
     8: ["7", "8", "9", "T", "J", "Q", "K", "A"],
 }
 
-MAX_HAND_CARDS = 32
-RANK_FEATURE_DIM = 8
-SUIT_FEATURE_DIM = 4
-EXTRA_COUNT_FEATURES = RANK_FEATURE_DIM + SUIT_FEATURE_DIM + 2  # ranks + suits + jokers + blanks
-
 
 @dataclass
 class DeckDomain:
@@ -173,6 +168,9 @@ class CardExistenceIterableDataset(IterableDataset):
         common_card_options: Sequence[int],
         seed: int,
         domain: DeckDomain,
+        rank_feature_dim: int,
+        suit_feature_dim: int,
+        max_hand_cards: int,
         num_jokers: int = 0,
         num_blanks: int = 0,
     ):
@@ -182,6 +180,9 @@ class CardExistenceIterableDataset(IterableDataset):
         self.common_card_options = tuple(int(x) for x in common_card_options)
         self.base_seed = int(seed)
         self.domain = domain
+        self.rank_feature_dim = int(rank_feature_dim)
+        self.suit_feature_dim = int(suit_feature_dim)
+        self.extra_feature_dim = self.rank_feature_dim + self.suit_feature_dim + 2
         self.num_jokers = max(0, int(num_jokers))
         self.num_blanks = max(0, int(num_blanks))
         base_deck = np.arange(domain.deck_size, dtype=np.int64)
@@ -197,10 +198,12 @@ class CardExistenceIterableDataset(IterableDataset):
         self.deck_size = self.deck.size
         self.max_private = max(self.private_card_options) if self.private_card_options else 0
         self.max_common = max(self.common_card_options) if self.common_card_options else 0
-        self.max_hand_cards = MAX_HAND_CARDS
+        self.max_hand_cards = int(max_hand_cards)
+        if self.max_hand_cards <= 0:
+            raise ValueError("max_hand_cards must be positive")
         if self.max_private > self.max_hand_cards or self.max_common > self.max_hand_cards:
             raise ValueError(
-                f"Hand size exceeds supported maximum ({MAX_HAND_CARDS}); "
+                f"Hand size exceeds supported maximum ({self.max_hand_cards}); "
                 "adjust --max-private-cards/--max-common-cards or limit options."
             )
         self._epoch = 0
@@ -218,8 +221,6 @@ class CardExistenceIterableDataset(IterableDataset):
         stride = worker.num_workers if worker else 1
         rng = self._spawn_rng(worker_id)
 
-        max_private = self.max_private
-        max_common = self.max_common
         private_opts = self.private_card_options
         common_opts = self.common_card_options
 
@@ -258,17 +259,16 @@ class CardExistenceIterableDataset(IterableDataset):
                 if hand_cards.size > self.max_hand_cards:
                     raise ValueError("Hand size exceeds maximum supported card slots.")
                 hand_pad[:hand_cards.size] = hand_cards
-
-            rank_counts = np.zeros(RANK_FEATURE_DIM, dtype=np.float32)
-            suit_counts = np.zeros(SUIT_FEATURE_DIM, dtype=np.float32)
+            rank_counts = np.zeros(self.rank_feature_dim, dtype=np.float32)
+            suit_counts = np.zeros(self.suit_feature_dim, dtype=np.float32)
             joker_count = 0.0
             blank_count = 0.0
             for cid in hand_cards:
                 cid_int = int(cid)
                 if cid_int < self.domain.deck_size:
-                    rank_idx = cid_int // SUIT_FEATURE_DIM
-                    suit_idx = cid_int % SUIT_FEATURE_DIM
-                    if 0 <= rank_idx < RANK_FEATURE_DIM:
+                    rank_idx = cid_int // self.suit_feature_dim
+                    suit_idx = cid_int % self.suit_feature_dim
+                    if 0 <= rank_idx < self.rank_feature_dim:
                         rank_counts[rank_idx] += 1.0
                     else:
                         raise ValueError(f"Rank index {rank_idx} exceeds configured feature dim.")
@@ -312,7 +312,7 @@ class CardExistenceModel(nn.Module):
         super().__init__()
         self.encoder = encoder
         self.extra_features = extra_features
-        features = encoder.output_dim + 1 + extra_features  # embedding + card count + aux stats
+        features = encoder.output_dim + extra_features
 
         layers: List[nn.Module] = []
         in_dim = features
@@ -326,14 +326,14 @@ class CardExistenceModel(nn.Module):
         self.head = nn.Sequential(*layers)
 
     def forward(self, hand_ids: torch.LongTensor, aux_features: torch.Tensor) -> torch.Tensor:
-        emb, count = self.encoder(hand_ids)
+        emb, _ = self.encoder(hand_ids)
         if aux_features.dtype != emb.dtype:
             aux_features = aux_features.to(dtype=emb.dtype)
         if aux_features.dim() != 2 or aux_features.shape[1] != self.extra_features:
             raise ValueError(
                 f"Expected auxiliary features with shape [B, {self.extra_features}], got {tuple(aux_features.shape)}"
             )
-        features = torch.cat((emb, count, aux_features), dim=1)
+        features = torch.cat((emb, aux_features), dim=1)
         return self.head(features)
 
 
@@ -379,17 +379,6 @@ def train(args: argparse.Namespace) -> None:
         base_deck_size=domain.deck_size,
     )
     encoder = CardEmbeddingEncoder(encoder_cfg)
-    model = CardExistenceModel(
-        encoder,
-        args.hidden_sizes,
-        args.dropout,
-        num_actions=domain.num_actions,
-        extra_features=EXTRA_COUNT_FEATURES,
-    )
-    model.to(device)
-
-    criterion = nn.BCEWithLogitsLoss()
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
     train_samples = args.train_batches_per_epoch * args.batch_size
     val_samples = args.val_batches * args.batch_size
@@ -399,12 +388,37 @@ def train(args: argparse.Namespace) -> None:
     args.private_card_options = private_options
     args.common_card_options = common_options
 
+    rank_feature_dim = domain.num_values
+    suit_feature_dim = 4
+    extra_feature_dim = rank_feature_dim + suit_feature_dim + 2
+    max_hand_cards = max(
+        domain.deck_size + args.num_jokers + args.num_blanks,
+        max(private_options) if private_options else 0,
+        max(common_options) if common_options else 0,
+    )
+    if max_hand_cards <= 0:
+        max_hand_cards = domain.deck_size + args.num_jokers + args.num_blanks
+
+    model = CardExistenceModel(
+        encoder,
+        args.hidden_sizes,
+        args.dropout,
+        num_actions=domain.num_actions,
+        extra_features=extra_feature_dim,
+    )
+    model.to(device)
+    criterion = nn.BCEWithLogitsLoss()
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+
     train_dataset = CardExistenceIterableDataset(
         num_samples=train_samples,
         private_card_options=private_options,
         common_card_options=common_options,
         seed=args.seed,
         domain=domain,
+        rank_feature_dim=rank_feature_dim,
+        suit_feature_dim=suit_feature_dim,
+        max_hand_cards=max_hand_cards,
         num_jokers=args.num_jokers,
         num_blanks=args.num_blanks,
     )
@@ -414,6 +428,9 @@ def train(args: argparse.Namespace) -> None:
         common_card_options=common_options,
         seed=args.seed + 10_000,
         domain=domain,
+        rank_feature_dim=rank_feature_dim,
+        suit_feature_dim=suit_feature_dim,
+        max_hand_cards=max_hand_cards,
         num_jokers=args.num_jokers,
         num_blanks=args.num_blanks,
     )
@@ -488,10 +505,10 @@ def train(args: argparse.Namespace) -> None:
                                         num_jokers=args.num_jokers,
                                         num_blanks=args.num_blanks,
                                     ),
-                                    "rank_counts": aux_cpu[i][:RANK_FEATURE_DIM].tolist(),
-                                    "suit_counts": aux_cpu[i][RANK_FEATURE_DIM:RANK_FEATURE_DIM + SUIT_FEATURE_DIM].tolist(),
-                                    "joker_count": aux_cpu[i][-2],
-                                    "blank_count": aux_cpu[i][-1],
+                                    "rank_counts": aux_cpu[i][:rank_feature_dim].tolist(),
+                                    "suit_counts": aux_cpu[i][rank_feature_dim:rank_feature_dim + suit_feature_dim].tolist(),
+                                    "joker_count": float(aux_cpu[i][-2]),
+                                    "blank_count": float(aux_cpu[i][-1]),
                                     "legal_actions": legal_actions.tolist(),
                                     "top_predictions": [
                                         {"action": int(a), "prob": float(probs[i][a])}
@@ -544,10 +561,10 @@ def train(args: argparse.Namespace) -> None:
                     "num_joker_embeddings": args.num_joker_embeddings,
                     "num_blanks": args.num_blanks,
                     "num_blank_embeddings": args.num_blank_embeddings,
-                    "max_hand_cards": MAX_HAND_CARDS,
-                    "rank_feature_dim": RANK_FEATURE_DIM,
-                    "suit_feature_dim": SUIT_FEATURE_DIM,
-                    "aux_feature_dim": EXTRA_COUNT_FEATURES,
+                    "max_hand_cards": int(max_hand_cards),
+                    "rank_feature_dim": int(rank_feature_dim),
+                    "suit_feature_dim": int(suit_feature_dim),
+                    "aux_feature_dim": int(extra_feature_dim),
                 },
                 "metrics": {
                     "best_val_loss": best_val_loss,
@@ -601,9 +618,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Comma-separated counts or ranges (e.g., '0-12') for common cards; defaults to 0..max-common-cards.",
     )
     parser.add_argument("--max-private-cards", type=int, default=12)
-    parser.add_argument("--max-common-cards", type=int, default=12)
+    parser.add_argument("--max-common-cards", type=int, default=0)
     parser.add_argument("--num-jokers", type=int, default=2)
-    parser.add_argument("--num-blanks", type=int, default=0)
+    parser.add_argument("--num-blanks", type=int, default=2)
     parser.add_argument("--print-val-samples", type=int, default=10, help="Print N validation samples with predicted probabilities each epoch.")
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--device", type=str, default="cpu")
