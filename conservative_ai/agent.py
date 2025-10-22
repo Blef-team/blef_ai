@@ -1,6 +1,8 @@
 import random
 from shared.ai import agent
 from shared.probabilities import dynamic_probabilities
+from shared.game_utils import GameRules
+
 
 def normalise(arr):
     sum_arr = sum(arr)
@@ -27,7 +29,7 @@ class ConservativeAgent(agent.Agent):
     @staticmethod
     def determine_action(game_state):
         rules = game_state.get("rules", {})
-        game_rules = dynamic_probabilities.GameRules(rules.get("deck_size", 24))
+        game_rules = GameRules(rules.get("deck_size", 24))
         check_action_id = game_rules.check_action_id
 
         last_bet = None
