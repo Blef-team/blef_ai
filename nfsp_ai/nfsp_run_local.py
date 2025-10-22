@@ -9,6 +9,7 @@ import random
 from datetime import datetime
 import math
 from typing import Tuple, Dict, List, Optional
+from dataclasses import dataclass
 
 import numpy as np
 import torch
@@ -17,22 +18,70 @@ import shared.api.simpleschema_local_manager as gm                 # local manag
 from shared.probabilities.dynamic_probabilities import get_bet_probabilities, get_generic_bet_probabilities
 from nfsp_ai.agent import NFSPAgent, NFSPConfig          # your NFSP implementation
 from nfsp_ai.control_plane import JsonControlPlane, build_control_snapshot, write_control_file
+from shared.game_utils import GameRules
 
-CHECK = gm.CHECK
+
+@dataclass
+class DeckSpec:
+    deck_size: int
+    num_values: int
+    num_actions: int
+    check_action_id: int
+    hand_vec_dim: int
+    hist_dim: int
+    obs_dim: int
+
+
+def _compute_obs_dim(hand_vec_dim: int, hist_dim: int) -> int:
+    return (
+        hand_vec_dim
+        + 1  # rules jokers
+        + 1  # private jokers
+        + 1  # common jokers
+        + hand_vec_dim
+        + MAX_PLAYERS
+        + 1  # round scaling
+        + hist_dim
+        + 1  # last bet prob
+        + hist_dim  # private priors
+        + hist_dim  # public priors
+        + 1  # total blanks
+    )
+
+
+def _build_deck_spec(rules: Dict) -> DeckSpec:
+    deck_size = int(rules.get("deck_size", 24))
+    if deck_size % 4 != 0:
+        raise ValueError(f"Unsupported deck_size {deck_size}; must be divisible by four.")
+    gr = GameRules(deck_size)
+    num_values = deck_size // 4
+    num_actions = gr.num_actions
+    check_action_id = gr.check_action_id
+    hand_vec_dim = num_values * 4
+    hist_dim = check_action_id
+    obs_dim = _compute_obs_dim(hand_vec_dim, hist_dim)
+    return DeckSpec(
+        deck_size=deck_size,
+        num_values=num_values,
+        num_actions=num_actions,
+        check_action_id=check_action_id,
+        hand_vec_dim=hand_vec_dim,
+        hist_dim=hist_dim,
+        obs_dim=obs_dim,
+    )
+
 MAX_PLAYERS = 8
-
-# Deck: values 0..5, colours 0..3 => 24 cards. Jokers value == -1.
-N_VALUES = 6
-N_COLOURS = 4
-HAND_VEC_DIM = N_VALUES * N_COLOURS  # 24
-ACT_DIM = CHECK + 1                  # 0..87 plus CHECK(88) => 89
-OBS_DIM = 326                        # Flattened observation size
 
 
 # ---------- Utilities ----------
 
 def _nickname_to_idx(players: List[dict], nick: str) -> int:
     return next((i for i, p in enumerate(players) if p["nickname"] == nick), -1)
+
+
+def _deck_spec_from_game(game: dict) -> DeckSpec:
+    rules = game.get("rules", {}) or {}
+    return _build_deck_spec(rules)
 
 
 def _current_hand(game: dict, nick: str) -> List[dict]:
@@ -46,51 +95,48 @@ def _count_jokers(cards: List[dict]) -> int:
     return sum(1 for c in cards if int(c.get("value", 0)) < 0)
 
 
-def _last_bet_action_id(game: dict) -> int:
-    """Return the last *bet* action id (0..87) if any; else -1."""
-    hist = game.get("history", [])
+def _last_bet_action_id(game: dict, spec: DeckSpec) -> int:
+    """Return the last *bet* action id (< check_action_id) if any; else -1."""
+    hist = game.get("history", []) or []
     if not hist:
         return -1
-    last = hist[-1]["action_id"]
-    if last == CHECK:
-        # If last is CHECK, the round should be resolved already in this manager.
-        # But just in case we ever see it in-flight, look one step earlier.
-        for ev in reversed(hist[:-1]):
-            if 0 <= int(ev["action_id"]) < CHECK:
-                return int(ev["action_id"])
-        return -1
-    return int(last)
+    check = spec.check_action_id
+    for ev in reversed(hist):
+        try:
+            act = int(ev.get("action_id", -1))
+        except Exception:
+            continue
+        if 0 <= act < check:
+            return act
+    return -1
 
 
-def _legal_action_mask(game: dict) -> torch.Tensor:
+def _legal_action_mask(game: dict, spec: DeckSpec) -> torch.Tensor:
     """Compute legality exactly as enforced by manager.play()."""
-    mask = np.zeros((ACT_DIM,), dtype=np.float32)
+    mask = np.zeros((spec.num_actions,), dtype=np.float32)
+    check = spec.check_action_id
 
-    hist = game.get("history", [])
+    hist = game.get("history", []) or []
     if not hist:
-        # First action in a round: any bet 0..87 is legal; CHECK is illegal.
-        mask[:CHECK] = 1.0
-        mask[CHECK] = 0.0
+        mask[:check] = 1.0
         return torch.from_numpy(mask)
 
-    last = int(hist[-1]["action_id"])
-    if last == CHECK:
-        # According to the manager: cannot act immediately after unresolved CHECK.
-        # In practice, the manager resolves and resets the round, so we shouldn't land here.
-        # But keep this guard: nothing legal until the round is reset.
-        return torch.from_numpy(mask)  # all zeros => forces resample upstream if ever hit.
+    try:
+        last = int(hist[-1].get("action_id", -1))
+    except Exception:
+        last = -1
 
-    # Otherwise last is a bet in [0..87]; legal bets are strictly greater, and CHECK is legal.
-    next_min = min(CHECK, last + 1)
-    if next_min < CHECK:
-        mask[next_min:CHECK] = 1.0
-    mask[CHECK] = 1.0
+    if last == check:
+        return torch.from_numpy(mask)
+
+    next_min = min(check, last + 1) if last >= 0 else 0
+    if next_min < check:
+        mask[next_min:check] = 1.0
+    mask[check] = 1.0
     return torch.from_numpy(mask)
 
 
 # ---------- Observation encoding ----------
-
-HIST_DIM = ACT_DIM - 1  # 88 (0..87), exclude CHECK channel for history & priors per your spec
 
 def _seat_index(players: List[dict], nick: str) -> int:
     for i, p in enumerate(players or []):
@@ -121,23 +167,20 @@ def _rules_total_blanks(rules: dict) -> int:
     """Total possible blanks per rules (not just seen on table)."""
     return int(rules.get("blanks", 0))
 
-def _card_idx_24(value: int, colour: int) -> int:
-    """
-    Map (value, colour) to [0..23] = value*4 + colour.
-    Ignore jokers (-1,-1) and blanks (-2,-2) by returning -1.
-    """
+def _card_index(value: int, colour: int, spec: DeckSpec) -> int:
     if value < 0 or colour < 0:
         return -1
-    if value >= N_VALUES or colour >= N_COLOURS:
+    if value >= spec.num_values or colour >= 4:
         return -1
-    return value * N_COLOURS + colour
+    return value * 4 + colour
 
-def _multi_hot_cards24_from_ints(cards: List[dict]) -> np.ndarray:
-    vec = np.zeros((HAND_VEC_DIM,), dtype=np.float32)
-    for c in cards or []:
-        v = int(c.get("value", -2))
-        s = int(c.get("colour", -2))
-        idx = _card_idx_24(v, s)
+
+def _multi_hot_cards(cards: List[dict], spec: DeckSpec) -> np.ndarray:
+    vec = np.zeros((spec.hand_vec_dim,), dtype=np.float32)
+    for card in cards or []:
+        v = int(card.get("value", -2))
+        c = int(card.get("colour", -2))
+        idx = _card_index(v, c, spec)
         if idx >= 0:
             vec[idx] = 1.0
     return vec
@@ -157,38 +200,32 @@ def _current_hand_int(game: dict, nick: str) -> List[dict]:
 def _common_hand_int(game: dict) -> List[dict]:
     return game.get("common_hand", []) or []
 
-def _round_history_action_ids_88(game: dict) -> List[int]:
-    """
-    Return action_ids in this round, clipped to [0..87].
-    We assume game['history'] contains current round only (as in your example).
-    """
+def _round_history_action_ids(game: dict, hist_dim: int) -> List[int]:
     ids = []
     for ev in game.get("history", []) or []:
         try:
             a = int(ev.get("action_id"))
-            if 0 <= a < HIST_DIM:
+            if 0 <= a < hist_dim:
                 ids.append(a)
         except Exception:
             continue
     return ids
 
-def vectorize_obs(game: dict, nick: str) -> torch.Tensor:
+
+def vectorize_obs(game: dict, nick: str, spec: DeckSpec) -> torch.Tensor:
     """
     Updated observation for current player (nick) with minimal allocations.
     """
     rules = game.get("rules", {}) or {}
     players = game.get("players", []) or []
 
-    obs = np.zeros((OBS_DIM,), dtype=np.float32)
+    obs = np.zeros((spec.obs_dim,), dtype=np.float32)
     idx = 0
 
     # Private hand multi-hot
     my_hand = _current_hand_int(game, nick)
-    for card in my_hand or []:
-        pos = _card_idx_24(int(card.get("value", -2)), int(card.get("colour", -2)))
-        if pos >= 0:
-            obs[idx + pos] = 1.0
-    idx += HAND_VEC_DIM
+    obs[idx:idx + spec.hand_vec_dim] = _multi_hot_cards(my_hand, spec)
+    idx += spec.hand_vec_dim
 
     # Totals & joker counts
     obs[idx] = float(_rules_total_jokers(rules)); idx += 1
@@ -197,12 +234,8 @@ def vectorize_obs(game: dict, nick: str) -> torch.Tensor:
     obs[idx] = float(_count_jokers_from_ints(common_hand)); idx += 1
 
     # Common cards multi-hot
-    common_base = idx
-    for card in common_hand or []:
-        pos = _card_idx_24(int(card.get("value", -2)), int(card.get("colour", -2)))
-        if pos >= 0:
-            obs[common_base + pos] = 1.0
-    idx += HAND_VEC_DIM
+    obs[idx:idx + spec.hand_vec_dim] = _multi_hot_cards(common_hand, spec)
+    idx += spec.hand_vec_dim
 
     # Seat counts rotated so current player is seat 0
     my_seat = _seat_index(players, game.get("cp_nickname", nick))
@@ -219,13 +252,13 @@ def vectorize_obs(game: dict, nick: str) -> torch.Tensor:
     idx += 1
 
     # Action history multi-hot
-    hist_ids = _round_history_action_ids_88(game)
+    hist_ids = _round_history_action_ids(game, spec.hist_dim)
     if hist_ids:
         obs[idx + np.unique(hist_ids)] = 1.0
-    idx += HIST_DIM
+    idx += spec.hist_dim
 
     # Last bet probability
-    last_bet_id = _last_bet_action_id(game)
+    last_bet_id = _last_bet_action_id(game, spec)
     prob_last_bet_exists = get_bet_probabilities(
         game_state=game,
         for_betting=False,
@@ -235,36 +268,40 @@ def vectorize_obs(game: dict, nick: str) -> torch.Tensor:
     idx += 1
 
     # Private priors (depends on my hand)
-    pvt_slice = slice(idx, idx + HIST_DIM)
+    pvt_slice = slice(idx, idx + spec.hist_dim)
     pvt_prior = get_bet_probabilities(
         game_state=game,
         for_betting=True,
         last_bet=last_bet_id,
     )
     obs[pvt_slice] = pvt_prior
-    idx += HIST_DIM
+    idx += spec.hist_dim
 
     # Public priors
-    pub_slice = slice(idx, idx + HIST_DIM)
+    pub_slice = slice(idx, idx + spec.hist_dim)
     pub_prior = get_generic_bet_probabilities(
         game_state=game,
         last_bet=last_bet_id,
     )
     obs[pub_slice] = pub_prior
-    idx += HIST_DIM
+    idx += spec.hist_dim
 
     # Total blanks
     obs[idx] = float(_rules_total_blanks(rules))
     idx += 1
 
-    if idx != OBS_DIM:
-        raise ValueError(f"vectorize_obs produced dim {idx}, expected {OBS_DIM}")
+    if idx != spec.obs_dim:
+        raise ValueError(f"vectorize_obs produced dim {idx}, expected {spec.obs_dim}")
 
     # Validations on probability slices
-    if len(pvt_prior) != HIST_DIM:
-        raise ValueError(f"get_bet_probabilities() returned length {len(pvt_prior)}, expected {HIST_DIM}")
-    if len(pub_prior) != HIST_DIM:
-        raise ValueError(f"get_generic_bet_probabilities() returned length {len(pub_prior)}, expected {HIST_DIM}")
+    if len(pvt_prior) != spec.hist_dim:
+        raise ValueError(
+            f"get_bet_probabilities() returned length {len(pvt_prior)}, expected {spec.hist_dim}"
+        )
+    if len(pub_prior) != spec.hist_dim:
+        raise ValueError(
+            f"get_generic_bet_probabilities() returned length {len(pub_prior)}, expected {spec.hist_dim}"
+        )
 
     if not np.isfinite(obs[pvt_slice]).all():
         raise ValueError("get_bet_probabilities() returned non-finite values")
@@ -291,11 +328,24 @@ class MyEnv:
     done: True only when the game finishes or after the reference player is eliminated.
     """
 
-    def __init__(self, n_agents: int = 2, max_cards: int = 11, verbose: bool = False, illegal_penalty: float = -0.01, game_save_dir: Optional[str] = None, save_sample_rate: int = 5000):
+    def __init__(
+        self,
+        n_agents: int = 2,
+        max_cards: int = 11,
+        deck_size: int = 24,
+        jokers: int = 0,
+        blanks: int = 0,
+        verbose: bool = False,
+        illegal_penalty: float = -0.01,
+        game_save_dir: Optional[str] = None,
+        save_sample_rate: int = 5000,
+    ):
         if n_agents < 2 or n_agents > 8:
             raise ValueError("n_agents must be in [2, 8]")
         self.n_agents = n_agents
         self.max_cards = max_cards
+        self.rules = {"deck_size": int(deck_size), "jokers": int(jokers), "blanks": int(blanks)}
+        self.deck_spec = _build_deck_spec(self.rules)
         self.verbose = verbose
         self.illegal_penalty = float(illegal_penalty)
         self.game_save_dir = game_save_dir
@@ -311,15 +361,25 @@ class MyEnv:
         return _nickname_to_idx(self.game["players"], self.game.get("cp_nickname", ""))
 
     def reset(self) -> Tuple[torch.Tensor, torch.Tensor, int]:
-        self.game = gm.create_game(self.n_agents, max_cards=self.max_cards, verbose=self.verbose)
+        self.game = gm.create_game(
+            self.n_agents,
+            deck_size=self.rules["deck_size"],
+            max_cards=self.max_cards,
+            jokers=self.rules["jokers"],
+            blanks=self.rules["blanks"],
+            verbose=self.verbose,
+        )
+        self.rules = dict(self.game.get("rules", self.rules))
+        self.rules = dict(self.game.get("rules", self.rules))
+        self.deck_spec = _deck_spec_from_game(self.game)
         self.rounds_since_reset = 0
         players = self.game.get("players", []) or []
         if not players:
             raise RuntimeError("Game manager returned no players")
         self._ref_nick = random.choice([p["nickname"] for p in players])
         cp = self.game["cp_nickname"]
-        obs = vectorize_obs(self.game, cp).float()
-        mask = _legal_action_mask(self.game).float()
+        obs = vectorize_obs(self.game, cp, self.deck_spec).float()
+        mask = _legal_action_mask(self.game, self.deck_spec).float()
         pid = self._pid()
         self._last_obs, self._last_mask = obs, mask
         return obs, mask, pid
@@ -328,7 +388,7 @@ class MyEnv:
         """
         Apply action for the current player.
         - If action is illegal (shouldn't happen if mask is used), return same state + small penalty.
-        - If action == CHECK: the manager resolves the round internally; we compute reward by
+        - If the chosen action is the check action: the manager resolves the round internally; we compute reward by
           comparing players' n_cards before vs after the move.
         """
         actor_nick = self.game.get("cp_nickname")
@@ -347,12 +407,21 @@ class MyEnv:
                 save_dir = self.game_save_dir
                 should_save = True
         try:
-            gm.play(self.game, int(action), save_dir=save_dir, verbose=self.verbose)
+            action_int = int(action)
+        except Exception:
+            obs = self._last_obs.clone()
+            mask = self._last_mask.clone()
+            pid = self._pid()
+            info = {"next_pid": pid, "illegal": 1}
+            return obs, mask, float(self.illegal_penalty), False, info
+        is_check = action_int == self.deck_spec.check_action_id
+        try:
+            gm.play(self.game, action_int, save_dir=save_dir, verbose=self.verbose)
             if should_save:
                 self._save_counter = 0
             elif self.game_save_dir:
                 self._save_counter += 1
-        except Exception as e:
+        except Exception:
             # Return same obs/mask/pid with a penalty; do NOT advance player.
             obs = self._last_obs.clone()
             mask = self._last_mask.clone()
@@ -360,10 +429,11 @@ class MyEnv:
             info = {"next_pid": pid, "illegal": 1}
             return obs, mask, float(self.illegal_penalty), False, info
 
-        # New observation / mask / pid after the move (may be a new round if CHECK)
+        self.deck_spec = _deck_spec_from_game(self.game)
+        # New observation / mask / pid after the move (may be a new round if the last action was a check)
         cp = self.game.get("cp_nickname")
-        obs = vectorize_obs(self.game, cp).float()
-        mask = _legal_action_mask(self.game).float()
+        obs = vectorize_obs(self.game, cp, self.deck_spec).float()
+        mask = _legal_action_mask(self.game, self.deck_spec).float()
         pid = self._pid()
 
         # Determine terminal and reward
@@ -372,7 +442,7 @@ class MyEnv:
         round_result = None
         history_for_log = None
 
-        if int(action) == CHECK:
+        if is_check:
             # Round has been resolved by the manager, and a new round likely started.
             # Identify loser by delta in n_cards (one player +1, possibly -> 0 on elimination).
             self.rounds_since_reset += 1
@@ -422,7 +492,7 @@ class MyEnv:
         info = {
             "next_pid": pid,
             "illegal": 0,
-            "action": int(action),
+            "action": action_int,
             "history": history_for_log,
             "round_result": round_result,
             "reward": float(reward),
@@ -459,6 +529,27 @@ def main():
         type=int,
         default=11,
         help="Maximum cards per player for Blef variant (default: 3).",
+    )
+    parser.add_argument(
+        "--deck-size",
+        dest="deck_size",
+        type=int,
+        default=24,
+        help="Deck size to use (24 or 32).",
+    )
+    parser.add_argument(
+        "--jokers",
+        dest="jokers",
+        type=int,
+        default=0,
+        help="Number of jokers to include in the deck (default: 0).",
+    )
+    parser.add_argument(
+        "--blanks",
+        dest="blanks",
+        type=int,
+        default=0,
+        help="Number of blanks to include in the deck (default: 0).",
     )
     parser.add_argument(
         "--verbose",
@@ -525,6 +616,9 @@ def main():
     env = MyEnv(
         n_agents=args.n_agents,
         max_cards=args.max_cards,
+        deck_size=args.deck_size,
+        jokers=args.jokers,
+        blanks=args.blanks,
         verbose=args.verbose,
         game_save_dir=game_save_dir,
         save_sample_rate=args.save_game_every,
@@ -582,6 +676,9 @@ def main():
         eval_env_factory=lambda: MyEnv(
             n_agents=env.n_agents,
             max_cards=env.max_cards,
+            deck_size=env.rules["deck_size"],
+            jokers=env.rules["jokers"],
+            blanks=env.rules["blanks"],
             verbose=env.verbose,
             illegal_penalty=env.illegal_penalty,
             game_save_dir=None,
