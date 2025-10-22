@@ -2,10 +2,10 @@
 """
 Pretrain card embeddings for input vectorisation for a neural network based agent.
 
-The task: given a player's private cards and shared common cards (both sampled from
-the 24-card Blef deck), predict which of the 88 bet actions are valid. Labels use
-`shared.api.simpleschema_local_manager.determine_set_existence`, matching runtime
-legality (including jokers and blanks).
+The task: given a player's private cards and shared common cards (sampled from the
+Blef deck, default 24-card but optionally 32-card), predict which bet actions are
+valid. Labels use `shared.api.simpleschema_local_manager.determine_set_existence`,
+matching runtime legality (including jokers and blanks).
 
 The output: `artifacts/card_embedding_pretrain.pt` — a pretrained checkpoint with
 encoder configuration, encoder/head weights, training hyperparameters, and best
@@ -15,6 +15,7 @@ validation metrics ready for NFSP integration or fine-tuning.
 import argparse
 import json
 from pathlib import Path
+from dataclasses import dataclass
 from typing import Iterable, List, Sequence, Tuple
 
 import numpy as np
@@ -24,9 +25,39 @@ from torch.utils.data import DataLoader, IterableDataset, get_worker_info
 
 from nfsp_ai.embedding import CardEmbeddingEncoder, CardEmbeddingConfig
 from shared.api.simpleschema_local_manager import determine_set_existence
+from shared.game_utils import GameRules
 
-NUM_ACTIONS = 88  # All bet ids (0..87); CHECK is excluded from the classifier
-DECK_SIZE = 24
+
+RANK_LABELS = {
+    6: ["9", "T", "J", "Q", "K", "A"],
+    8: ["7", "8", "9", "T", "J", "Q", "K", "A"],
+}
+
+
+@dataclass
+class DeckDomain:
+    deck_size: int
+    num_values: int
+    rank_labels: List[str]
+    check_action_id: int  # exclusion of CHECK action itself
+
+    @property
+    def num_actions(self) -> int:
+        return self.check_action_id
+
+
+def build_deck_domain(deck_size: int) -> DeckDomain:
+    if deck_size % 4 != 0:
+        raise ValueError("deck_size must be divisible by 4")
+    rules = GameRules(deck_size)
+    num_values = deck_size // 4
+    rank_labels = RANK_LABELS.get(num_values, [str(v) for v in range(num_values)])
+    return DeckDomain(
+        deck_size=deck_size,
+        num_values=num_values,
+        rank_labels=rank_labels,
+        check_action_id=rules.check_action_id,
+    )
 
 
 def parse_int_list(raw: str) -> List[int]:
@@ -59,11 +90,11 @@ def parse_card_count_list(raw: str) -> List[int]:
     return deduped
 
 
-def to_manager_cards(card_ids: np.ndarray, num_jokers: int, num_blanks: int) -> Tuple[List[dict], int, int]:
+def to_manager_cards(card_ids: np.ndarray, domain: DeckDomain, num_jokers: int, num_blanks: int) -> Tuple[List[dict], int, int]:
     cards = []
     jokers = 0
     blanks = 0
-    base = DECK_SIZE
+    base = domain.deck_size
     joker_limit = base + max(0, num_jokers)
     blank_limit = joker_limit + max(0, num_blanks)
     for card in card_ids.tolist():
@@ -81,23 +112,25 @@ def to_manager_cards(card_ids: np.ndarray, num_jokers: int, num_blanks: int) -> 
     return cards, jokers, blanks
 
 
-def compute_existence_vector(card_ids: np.ndarray, num_jokers: int, num_blanks: int) -> np.ndarray:
-    cards, joker_count, blank_count = to_manager_cards(card_ids, num_jokers=num_jokers, num_blanks=num_blanks)
-    labels = np.zeros(NUM_ACTIONS, dtype=np.float32)
-    for action_id in range(NUM_ACTIONS):
+def compute_existence_vector(card_ids: np.ndarray, domain: DeckDomain, num_jokers: int, num_blanks: int) -> np.ndarray:
+    cards, joker_count, blank_count = to_manager_cards(card_ids, domain, num_jokers=num_jokers, num_blanks=num_blanks)
+    labels = np.zeros(domain.num_actions, dtype=np.float32)
+    rules = {"deck_size": domain.deck_size}
+    for action_id in range(domain.num_actions):
         labels[action_id] = 1.0 if determine_set_existence(
             cards,
             action_id,
+            rules,
             num_jokers=joker_count,
             num_blanks=blank_count,
         ) else 0.0
     return labels
 
 
-def decode_card(card_id: int, num_jokers: int, num_blanks: int) -> str:
+def decode_card(card_id: int, domain: DeckDomain, num_jokers: int, num_blanks: int) -> str:
     if card_id < 0:
         return "PAD"
-    base = DECK_SIZE
+    base = domain.deck_size
     joker_start = base
     joker_end = joker_start + max(0, num_jokers)
     blank_start = joker_end
@@ -105,7 +138,7 @@ def decode_card(card_id: int, num_jokers: int, num_blanks: int) -> str:
     if card_id < base:
         rank = card_id // 4
         suit = card_id % 4
-        ranks = ["9", "T", "J", "Q", "K", "A"]
+        ranks = domain.rank_labels
         suits = ["C", "D", "H", "S"]
         return f"{ranks[rank]}{suits[suit]}"
     if card_id < joker_end:
@@ -115,9 +148,9 @@ def decode_card(card_id: int, num_jokers: int, num_blanks: int) -> str:
     return f"Card{card_id}"
 
 
-def cards_to_str(card_ids: Sequence[int], num_jokers: int, num_blanks: int) -> str:
+def cards_to_str(card_ids: Sequence[int], domain: DeckDomain, num_jokers: int, num_blanks: int) -> str:
     visible = [
-        decode_card(int(cid), num_jokers=num_jokers, num_blanks=num_blanks)
+        decode_card(int(cid), domain, num_jokers=num_jokers, num_blanks=num_blanks)
         for cid in card_ids
         if cid >= 0
     ]
@@ -133,6 +166,7 @@ class CardExistenceIterableDataset(IterableDataset):
         private_card_options: Sequence[int],
         common_card_options: Sequence[int],
         seed: int,
+        domain: DeckDomain,
         num_jokers: int = 0,
         num_blanks: int = 0,
     ):
@@ -141,21 +175,22 @@ class CardExistenceIterableDataset(IterableDataset):
         self.private_card_options = tuple(int(x) for x in private_card_options)
         self.common_card_options = tuple(int(x) for x in common_card_options)
         self.base_seed = int(seed)
+        self.domain = domain
         self.num_jokers = max(0, int(num_jokers))
         self.num_blanks = max(0, int(num_blanks))
-        base_deck = np.arange(DECK_SIZE, dtype=np.int64)
+        base_deck = np.arange(domain.deck_size, dtype=np.int64)
         deck_parts = [base_deck]
         if self.num_jokers:
-            joker_ids = np.arange(DECK_SIZE, DECK_SIZE + self.num_jokers, dtype=np.int64)
+            joker_ids = np.arange(domain.deck_size, domain.deck_size + self.num_jokers, dtype=np.int64)
             deck_parts.append(joker_ids)
         if self.num_blanks:
-            blank_start = DECK_SIZE + self.num_jokers
+            blank_start = domain.deck_size + self.num_jokers
             blank_ids = np.arange(blank_start, blank_start + self.num_blanks, dtype=np.int64)
             deck_parts.append(blank_ids)
         self.deck = np.concatenate(deck_parts).astype(np.int64)
         self.deck_size = self.deck.size
-        self.max_private = max(self.private_card_options)
-        self.max_common = max(self.common_card_options)
+        self.max_private = max(self.private_card_options) if self.private_card_options else 0
+        self.max_common = max(self.common_card_options) if self.common_card_options else 0
         self._epoch = 0
 
     def set_epoch(self, epoch: int) -> None:
@@ -194,6 +229,7 @@ class CardExistenceIterableDataset(IterableDataset):
             combined = np.concatenate((private_cards, common_cards), dtype=np.int64)
             existence = compute_existence_vector(
                 combined,
+                self.domain,
                 num_jokers=self.num_jokers,
                 num_blanks=self.num_blanks,
             ).astype(np.float32)
@@ -219,7 +255,7 @@ class CardExistenceIterableDataset(IterableDataset):
 class CardExistenceModel(nn.Module):
     """Wraps the encoder with a lightweight classifier head."""
 
-    def __init__(self, encoder: CardEmbeddingEncoder, hidden_sizes: Sequence[int], dropout: float):
+    def __init__(self, encoder: CardEmbeddingEncoder, hidden_sizes: Sequence[int], dropout: float, num_actions: int):
         super().__init__()
         self.encoder = encoder
         features = encoder.output_dim * 2 + 2  # private emb, common emb, counts
@@ -232,7 +268,7 @@ class CardExistenceModel(nn.Module):
             if dropout > 0:
                 layers.append(nn.Dropout(dropout))
             in_dim = hidden
-        layers.append(nn.Linear(in_dim, NUM_ACTIONS))
+        layers.append(nn.Linear(in_dim, num_actions))
         self.head = nn.Sequential(*layers)
 
     def forward(self, private_ids: torch.LongTensor, common_ids: torch.LongTensor) -> torch.Tensor:
@@ -277,18 +313,22 @@ def train(args: argparse.Namespace) -> None:
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
+    domain = build_deck_domain(args.deck_size)
+
     encoder_cfg = CardEmbeddingConfig(
         rank_dim=args.rank_dim,
         suit_dim=args.suit_dim,
         aggregator=args.aggregator,
         use_layer_norm=not args.no_layer_norm,
+        num_ranks=domain.num_values,
         num_joker_ids=args.num_jokers,
         num_blank_ids=args.num_blanks,
         num_joker_embeddings=args.num_joker_embeddings,
         num_blank_embeddings=args.num_blank_embeddings,
+        base_deck_size=domain.deck_size,
     )
     encoder = CardEmbeddingEncoder(encoder_cfg)
-    model = CardExistenceModel(encoder, args.hidden_sizes, args.dropout)
+    model = CardExistenceModel(encoder, args.hidden_sizes, args.dropout, num_actions=domain.num_actions)
     model.to(device)
 
     criterion = nn.BCEWithLogitsLoss()
@@ -307,6 +347,7 @@ def train(args: argparse.Namespace) -> None:
         private_card_options=private_options,
         common_card_options=common_options,
         seed=args.seed,
+        domain=domain,
         num_jokers=args.num_jokers,
         num_blanks=args.num_blanks,
     )
@@ -315,6 +356,7 @@ def train(args: argparse.Namespace) -> None:
         private_card_options=private_options,
         common_card_options=common_options,
         seed=args.seed + 10_000,
+        domain=domain,
         num_jokers=args.num_jokers,
         num_blanks=args.num_blanks,
     )
@@ -385,11 +427,13 @@ def train(args: argparse.Namespace) -> None:
                                     "sample": printed_samples + 1,
                                     "private": cards_to_str(
                                         priv_cpu[i],
+                                        domain,
                                         num_jokers=args.num_jokers,
                                         num_blanks=args.num_blanks,
                                     ),
                                     "common": cards_to_str(
                                         common_cpu[i],
+                                        domain,
                                         num_jokers=args.num_jokers,
                                         num_blanks=args.num_blanks,
                                     ),
@@ -437,6 +481,8 @@ def train(args: argparse.Namespace) -> None:
                     "grad_clip": args.grad_clip,
                     "train_batches_per_epoch": args.train_batches_per_epoch,
                     "val_batches": args.val_batches,
+                    "deck_size": domain.deck_size,
+                    "num_actions": domain.num_actions,
                     "private_card_options": list(private_options),
                     "common_card_options": list(common_options),
                     "num_jokers": args.num_jokers,
@@ -469,6 +515,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-joker-embeddings", type=int, default=1)
     parser.add_argument("--num-blank-embeddings", type=int, default=1)
     parser.add_argument("--aggregator", choices=("mean", "sum"), default="mean")
+    parser.add_argument(
+        "--deck-size",
+        type=int,
+        choices=[24, 32],
+        default=24,
+        help="Deck size to sample from (24 or 32).",
+    )
     parser.add_argument(
         "--hidden-sizes",
         type=parse_int_list,
