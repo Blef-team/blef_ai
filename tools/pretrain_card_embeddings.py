@@ -2,9 +2,10 @@
 """
 Pretrain card embeddings for input vectorisation for a neural network based agent.
 
-The task: given a player's private cards and shared common cards (sampled from the
-Blef deck, default 24-card but optionally 32-card), predict which bet actions are
-valid. Labels use `shared.api.simpleschema_local_manager.determine_set_existence`,
+The task: given a single hand snapshot (private or common cards sampled from the
+Blef deck, default 24-card but optionally 32-card) represented as 32 padded card
+ids plus aggregate counts (ranks, suits, jokers, blanks), predict which bet actions
+are valid. Labels use `shared.api.simpleschema_local_manager.determine_set_existence`,
 matching runtime legality (including jokers and blanks).
 
 The output: `artifacts/card_embedding_pretrain.pt` — a pretrained checkpoint with
@@ -32,6 +33,11 @@ RANK_LABELS = {
     6: ["9", "T", "J", "Q", "K", "A"],
     8: ["7", "8", "9", "T", "J", "Q", "K", "A"],
 }
+
+MAX_HAND_CARDS = 32
+RANK_FEATURE_DIM = 8
+SUIT_FEATURE_DIM = 4
+EXTRA_COUNT_FEATURES = RANK_FEATURE_DIM + SUIT_FEATURE_DIM + 2  # ranks + suits + jokers + blanks
 
 
 @dataclass
@@ -158,7 +164,7 @@ def cards_to_str(card_ids: Sequence[int], domain: DeckDomain, num_jokers: int, n
 
 
 class CardExistenceIterableDataset(IterableDataset):
-    """Generates synthetic (private, common, labels) tuples for the classifier."""
+    """Generates synthetic (hand_ids, aux_features, labels) tuples for the classifier."""
 
     def __init__(
         self,
@@ -191,6 +197,12 @@ class CardExistenceIterableDataset(IterableDataset):
         self.deck_size = self.deck.size
         self.max_private = max(self.private_card_options) if self.private_card_options else 0
         self.max_common = max(self.common_card_options) if self.common_card_options else 0
+        self.max_hand_cards = MAX_HAND_CARDS
+        if self.max_private > self.max_hand_cards or self.max_common > self.max_hand_cards:
+            raise ValueError(
+                f"Hand size exceeds supported maximum ({MAX_HAND_CARDS}); "
+                "adjust --max-private-cards/--max-common-cards or limit options."
+            )
         self._epoch = 0
 
     def set_epoch(self, epoch: int) -> None:
@@ -200,7 +212,7 @@ class CardExistenceIterableDataset(IterableDataset):
         seed = self.base_seed + 9973 * self._epoch + 53 * worker_id
         return np.random.default_rng(seed)
 
-    def __iter__(self) -> Iterable[Tuple[torch.LongTensor, torch.LongTensor, torch.FloatTensor]]:
+    def __iter__(self) -> Iterable[Tuple[torch.LongTensor, torch.FloatTensor, torch.FloatTensor]]:
         worker = get_worker_info()
         worker_id = worker.id if worker else 0
         stride = worker.num_workers if worker else 1
@@ -226,25 +238,59 @@ class CardExistenceIterableDataset(IterableDataset):
             private_cards = np.sort(draw[:private_count]) if private_count else np.array([], dtype=np.int64)
             common_cards = np.sort(draw[private_count:]) if common_count else np.array([], dtype=np.int64)
 
-            combined = np.concatenate((private_cards, common_cards), dtype=np.int64)
+            # Choose which partition to emit this iteration (default uniform choice).
+            use_private = True
+            if private_cards.size and common_cards.size:
+                use_private = bool(rng.integers(0, 2))
+            elif private_cards.size == 0 and common_cards.size > 0:
+                use_private = False
+            hand_cards = private_cards if use_private else common_cards
+
             existence = compute_existence_vector(
-                combined,
+                hand_cards,
                 self.domain,
                 num_jokers=self.num_jokers,
                 num_blanks=self.num_blanks,
             ).astype(np.float32)
 
-            priv_pad = np.full(max_private, -1, dtype=np.int64)
-            if private_count:
-                priv_pad[:private_count] = private_cards
+            hand_pad = np.full(self.max_hand_cards, -1, dtype=np.int64)
+            if hand_cards.size:
+                if hand_cards.size > self.max_hand_cards:
+                    raise ValueError("Hand size exceeds maximum supported card slots.")
+                hand_pad[:hand_cards.size] = hand_cards
 
-            common_pad = np.full(max_common, -1, dtype=np.int64)
-            if common_count:
-                common_pad[:common_count] = common_cards
+            rank_counts = np.zeros(RANK_FEATURE_DIM, dtype=np.float32)
+            suit_counts = np.zeros(SUIT_FEATURE_DIM, dtype=np.float32)
+            joker_count = 0.0
+            blank_count = 0.0
+            for cid in hand_cards:
+                cid_int = int(cid)
+                if cid_int < self.domain.deck_size:
+                    rank_idx = cid_int // SUIT_FEATURE_DIM
+                    suit_idx = cid_int % SUIT_FEATURE_DIM
+                    if 0 <= rank_idx < RANK_FEATURE_DIM:
+                        rank_counts[rank_idx] += 1.0
+                    else:
+                        raise ValueError(f"Rank index {rank_idx} exceeds configured feature dim.")
+                    suit_counts[suit_idx] += 1.0
+                elif cid_int < self.domain.deck_size + self.num_jokers:
+                    joker_count += 1.0
+                elif cid_int < self.domain.deck_size + self.num_jokers + self.num_blanks:
+                    blank_count += 1.0
+                else:
+                    raise ValueError("Card id outside configured deck range.")
+
+            aux_features = np.concatenate(
+                (
+                    rank_counts,
+                    suit_counts,
+                    np.array([joker_count, blank_count], dtype=np.float32),
+                )
+            ).astype(np.float32, copy=False)
 
             yield (
-                torch.from_numpy(priv_pad),
-                torch.from_numpy(common_pad),
+                torch.from_numpy(hand_pad),
+                torch.from_numpy(aux_features),
                 torch.from_numpy(existence),
             )
             produced += 1
@@ -255,10 +301,18 @@ class CardExistenceIterableDataset(IterableDataset):
 class CardExistenceModel(nn.Module):
     """Wraps the encoder with a lightweight classifier head."""
 
-    def __init__(self, encoder: CardEmbeddingEncoder, hidden_sizes: Sequence[int], dropout: float, num_actions: int):
+    def __init__(
+        self,
+        encoder: CardEmbeddingEncoder,
+        hidden_sizes: Sequence[int],
+        dropout: float,
+        num_actions: int,
+        extra_features: int,
+    ):
         super().__init__()
         self.encoder = encoder
-        features = encoder.output_dim * 2 + 2  # private emb, common emb, counts
+        self.extra_features = extra_features
+        features = encoder.output_dim + 1 + extra_features  # embedding + card count + aux stats
 
         layers: List[nn.Module] = []
         in_dim = features
@@ -271,18 +325,15 @@ class CardExistenceModel(nn.Module):
         layers.append(nn.Linear(in_dim, num_actions))
         self.head = nn.Sequential(*layers)
 
-    def forward(self, private_ids: torch.LongTensor, common_ids: torch.LongTensor) -> torch.Tensor:
-        priv_emb, priv_count = self.encoder(private_ids)
-        common_emb, common_count = self.encoder(common_ids)
-        features = torch.cat(
-            (
-                priv_emb,
-                common_emb,
-                priv_count,
-                common_count,
-            ),
-            dim=1,
-        )
+    def forward(self, hand_ids: torch.LongTensor, aux_features: torch.Tensor) -> torch.Tensor:
+        emb, count = self.encoder(hand_ids)
+        if aux_features.dtype != emb.dtype:
+            aux_features = aux_features.to(dtype=emb.dtype)
+        if aux_features.dim() != 2 or aux_features.shape[1] != self.extra_features:
+            raise ValueError(
+                f"Expected auxiliary features with shape [B, {self.extra_features}], got {tuple(aux_features.shape)}"
+            )
+        features = torch.cat((emb, count, aux_features), dim=1)
         return self.head(features)
 
 
@@ -328,7 +379,13 @@ def train(args: argparse.Namespace) -> None:
         base_deck_size=domain.deck_size,
     )
     encoder = CardEmbeddingEncoder(encoder_cfg)
-    model = CardExistenceModel(encoder, args.hidden_sizes, args.dropout, num_actions=domain.num_actions)
+    model = CardExistenceModel(
+        encoder,
+        args.hidden_sizes,
+        args.dropout,
+        num_actions=domain.num_actions,
+        extra_features=EXTRA_COUNT_FEATURES,
+    )
     model.to(device)
 
     criterion = nn.BCEWithLogitsLoss()
@@ -373,13 +430,13 @@ def train(args: argparse.Namespace) -> None:
         train_dataset.set_epoch(epoch)
         running_loss = 0.0
         total_batches = 0
-        for private_ids, common_ids, labels in train_loader:
-            private_ids = private_ids.to(device=device, dtype=torch.long)
-            common_ids = common_ids.to(device=device, dtype=torch.long)
+        for hand_ids, aux_features, labels in train_loader:
+            hand_ids = hand_ids.to(device=device, dtype=torch.long)
+            aux_features = aux_features.to(device=device, dtype=torch.float32)
             labels = labels.to(device=device, dtype=torch.float32)
 
             optimizer.zero_grad(set_to_none=True)
-            logits = model(private_ids, common_ids)
+            logits = model(hand_ids, aux_features)
             loss = criterion(logits, labels)
             loss.backward()
             if args.grad_clip is not None and args.grad_clip > 0:
@@ -399,12 +456,12 @@ def train(args: argparse.Namespace) -> None:
         samples_to_print = args.print_val_samples
         printed_samples = 0
         with torch.no_grad():
-            for private_ids, common_ids, labels in val_loader:
-                private_ids = private_ids.to(device=device, dtype=torch.long)
-                common_ids = common_ids.to(device=device, dtype=torch.long)
+            for hand_ids, aux_features, labels in val_loader:
+                hand_ids = hand_ids.to(device=device, dtype=torch.long)
+                aux_features = aux_features.to(device=device, dtype=torch.float32)
                 labels = labels.to(device=device, dtype=torch.float32)
 
-                logits = model(private_ids, common_ids)
+                logits = model(hand_ids, aux_features)
                 loss, acc = compute_metrics(logits, labels)
                 val_loss_accum += loss
                 val_accuracy_accum += acc
@@ -412,8 +469,8 @@ def train(args: argparse.Namespace) -> None:
 
                 if printed_samples < samples_to_print:
                     probs = torch.sigmoid(logits).cpu().numpy()
-                    priv_cpu = private_ids.cpu().numpy()
-                    common_cpu = common_ids.cpu().numpy()
+                    hand_cpu = hand_ids.cpu().numpy()
+                    aux_cpu = aux_features.cpu().numpy()
                     labels_cpu = labels.cpu().numpy()
                     batch = probs.shape[0]
                     for i in range(batch):
@@ -425,18 +482,16 @@ def train(args: argparse.Namespace) -> None:
                             json.dumps(
                                 {
                                     "sample": printed_samples + 1,
-                                    "private": cards_to_str(
-                                        priv_cpu[i],
+                                    "hand": cards_to_str(
+                                        hand_cpu[i],
                                         domain,
                                         num_jokers=args.num_jokers,
                                         num_blanks=args.num_blanks,
                                     ),
-                                    "common": cards_to_str(
-                                        common_cpu[i],
-                                        domain,
-                                        num_jokers=args.num_jokers,
-                                        num_blanks=args.num_blanks,
-                                    ),
+                                    "rank_counts": aux_cpu[i][:RANK_FEATURE_DIM].tolist(),
+                                    "suit_counts": aux_cpu[i][RANK_FEATURE_DIM:RANK_FEATURE_DIM + SUIT_FEATURE_DIM].tolist(),
+                                    "joker_count": aux_cpu[i][-2],
+                                    "blank_count": aux_cpu[i][-1],
                                     "legal_actions": legal_actions.tolist(),
                                     "top_predictions": [
                                         {"action": int(a), "prob": float(probs[i][a])}
@@ -489,6 +544,10 @@ def train(args: argparse.Namespace) -> None:
                     "num_joker_embeddings": args.num_joker_embeddings,
                     "num_blanks": args.num_blanks,
                     "num_blank_embeddings": args.num_blank_embeddings,
+                    "max_hand_cards": MAX_HAND_CARDS,
+                    "rank_feature_dim": RANK_FEATURE_DIM,
+                    "suit_feature_dim": SUIT_FEATURE_DIM,
+                    "aux_feature_dim": EXTRA_COUNT_FEATURES,
                 },
                 "metrics": {
                     "best_val_loss": best_val_loss,

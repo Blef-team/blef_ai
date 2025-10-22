@@ -7,6 +7,8 @@ from tools.pretrain_card_embeddings import (
     CardExistenceIterableDataset,
     CardExistenceModel,
     build_deck_domain,
+    EXTRA_COUNT_FEATURES,
+    MAX_HAND_CARDS,
 )
 from shared.api.simpleschema_local_manager import determine_set_existence
 
@@ -51,12 +53,13 @@ class CardExistencePipelineTest(unittest.TestCase):
         )
         dataset.set_epoch(0)
         sample = next(iter(dataset))
-        private_ids, common_ids, labels = sample
-        self.assertEqual(private_ids.dtype, torch.long)
-        self.assertEqual(common_ids.dtype, torch.long)
+        hand_ids, aux_features, labels = sample
+        self.assertEqual(hand_ids.dtype, torch.long)
+        self.assertEqual(aux_features.dtype, torch.float32)
         self.assertEqual(labels.dtype, torch.float32)
-        self.assertGreaterEqual(private_ids.max().item(), -1)
-        self.assertGreaterEqual(common_ids.max().item(), -1)
+        self.assertEqual(hand_ids.shape[-1], MAX_HAND_CARDS)
+        self.assertEqual(aux_features.shape[-1], EXTRA_COUNT_FEATURES)
+        self.assertGreaterEqual(hand_ids.max().item(), -1)
         self.assertEqual(labels.shape[-1], domain.num_actions)
         self.assertTrue(torch.all((labels == 0.0) | (labels == 1.0)))
 
@@ -72,7 +75,8 @@ class CardExistencePipelineTest(unittest.TestCase):
             num_blanks=0,
         )
         sample = next(iter(dataset))
-        _, _, labels = sample
+        _, aux_features, labels = sample
+        self.assertEqual(aux_features.shape[-1], EXTRA_COUNT_FEATURES)
         self.assertEqual(labels.shape[-1], domain.num_actions)
 
     def test_model_forward(self) -> None:
@@ -90,23 +94,22 @@ class CardExistencePipelineTest(unittest.TestCase):
             num_blank_embeddings=1,
         )
         encoder = CardEmbeddingEncoder(cfg)
-        model = CardExistenceModel(encoder, hidden_sizes=[16], dropout=0.0, num_actions=domain.num_actions)
+        model = CardExistenceModel(
+            encoder,
+            hidden_sizes=[16],
+            dropout=0.0,
+            num_actions=domain.num_actions,
+            extra_features=EXTRA_COUNT_FEATURES,
+        )
 
-        private_ids = torch.tensor(
-            [
-                [0, 24, -1],
-                [2, 26, -1],
-            ],
-            dtype=torch.long,
-        )
-        common_ids = torch.tensor(
-            [
-                [3, -1],
-                [-1, -1],
-            ],
-            dtype=torch.long,
-        )
-        logits = model(private_ids, common_ids)
+        hand_ids = torch.full((2, MAX_HAND_CARDS), -1, dtype=torch.long)
+        hand_ids[0, :3] = torch.tensor([0, 1, 24])  # include a joker id
+        hand_ids[1, :2] = torch.tensor([2, 3])
+        aux_features = torch.zeros((2, EXTRA_COUNT_FEATURES), dtype=torch.float32)
+        aux_features[0, 0] = 2.0  # rank count indicator
+        aux_features[0, -2] = 1.0  # joker count
+        aux_features[1, 1] = 1.0
+        logits = model(hand_ids, aux_features)
         self.assertEqual(logits.shape, (2, domain.num_actions))
 
 
