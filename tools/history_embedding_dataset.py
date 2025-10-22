@@ -171,7 +171,8 @@ class ClosureIterableDataset(IterableDataset):
             chosen = rng.choice(action_ids, size=min(k, len(action_ids)), replace=False)
             history = -np.ones((self.history_len,), dtype=np.int64)
             mask = np.zeros((self.history_len,), dtype=bool)
-            history[: len(chosen)] = chosen[::-1]  # most recent first
+            ordered = sorted(chosen, reverse=True)
+            history[: len(ordered)] = ordered
             mask[: len(chosen)] = True
 
             # Sample one minimal hand per action and merge cards.
