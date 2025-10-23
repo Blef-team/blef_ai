@@ -41,10 +41,27 @@ def _masked_entropy(logits: torch.Tensor, mask: torch.Tensor) -> float:
 
 @torch.no_grad()
 @torch.no_grad()
-def _evaluate_policy(agent, env_source, episodes: int = 200) -> dict:
+def _evaluate_policy(
+    agent,
+    env_source,
+    episodes: int = 200,
+    *,
+    save_dir: Optional[str] = None,
+    save_games: int = 0,
+) -> dict:
     wins = losses = total_r = total_len = 0
+    managed_env = callable(env_source)
+
     for _ in range(episodes):
-        env = env_source()
+        env = env_source() if managed_env else env_source
+
+        if save_dir and save_games > 0 and hasattr(env, "game_save_dir"):
+            env.game_save_dir = save_dir
+            env.save_sample_rate = max(1, episodes // max(1, save_games))
+            env._save_counter = env.save_sample_rate - 1
+            if hasattr(env, "_saved_games"):
+                env._saved_games = 0
+
         obs, mask, pid = env.reset()
         done, ep_r, steps = False, 0.0, 0
 
@@ -68,6 +85,9 @@ def _evaluate_policy(agent, env_source, episodes: int = 200) -> dict:
 
         total_r += ep_r
         total_len += steps
+
+        if managed_env:
+            del env
 
     return {
         "avg_reward": total_r / episodes,
@@ -999,6 +1019,8 @@ class NFSPAgent:
         eval_every: int = 50_000,
         eval_episodes: int = 200,
         eval_env_factory: Optional[Callable[[], "TurnEnvAdapter"]] = None,
+        eval_save_dir: Optional[str] = None,
+        eval_save_games: int = 0,
         apply_phase_schedules_every: int = 1_000,
         save_checkpoint_every: int = 2000,
         control_plane: Optional["JsonControlPlane"] = None,
@@ -1348,7 +1370,13 @@ class NFSPAgent:
             # Periodic evaluation (no exploration, greedy avg policy)
             if eval_every and (self.total_env_steps % eval_every == 0):
                 eval_source = eval_env_factory if eval_env_factory is not None else env
-                eval_stats = _evaluate_policy(self, eval_source, episodes=eval_episodes)
+                eval_stats = _evaluate_policy(
+                    self,
+                    eval_source,
+                    episodes=eval_episodes,
+                    save_dir=eval_save_dir,
+                    save_games=eval_save_games,
+                )
                 print(
                     "EVALUATION:\n"
                     f"[steps={self.total_env_steps}] "

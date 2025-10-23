@@ -745,6 +745,7 @@ class MyEnv:
         self._ref_nick: Optional[str] = None
         self.rounds_since_reset = 0
         self._save_counter = 0
+        self._saved_games = 0
 
     def _pid(self) -> int:
         return _nickname_to_idx(self.game["players"], self.game.get("cp_nickname", ""))
@@ -801,10 +802,6 @@ class MyEnv:
         # Try to act; catch and handle illegal attempts gracefully.
         save_dir = None
         should_save = False
-        if self.game_save_dir:
-            if self._save_counter >= self.save_sample_rate - 1:
-                save_dir = self.game_save_dir
-                should_save = True
         try:
             action_int = int(action)
         except Exception:
@@ -814,11 +811,16 @@ class MyEnv:
             info = {"next_pid": pid, "illegal": 1}
             return obs, mask, float(self.illegal_penalty), False, info
         is_check = action_int == self.deck_spec.check_action_id
+        if self.game_save_dir and is_check:
+            if self._save_counter >= self.save_sample_rate - 1:
+                save_dir = self.game_save_dir
+                should_save = True
         try:
             gm.play(self.game, action_int, save_dir=save_dir, verbose=self.verbose)
             if should_save:
                 self._save_counter = 0
-            elif self.game_save_dir:
+                self._saved_games += 1
+            elif self.game_save_dir and is_check:
                 self._save_counter += 1
         except Exception:
             # Return same obs/mask/pid with a penalty; do NOT advance player.
@@ -1047,6 +1049,8 @@ def main():
     model_save_path = f"nfsp_blef_{postfix}.pt"
     game_save_dir = f"games_{postfix}"
     os.makedirs(game_save_dir, exist_ok=True)
+    eval_game_save_dir = f"{game_save_dir}_eval"
+    os.makedirs(eval_game_save_dir, exist_ok=True)
     history_sample_limit = None if args.history_sample_limit <= 0 else args.history_sample_limit
     history_sample_path = args.history_sample_path or os.path.join(
         "logs", f"action_samples_{postfix}.jsonl"
@@ -1055,6 +1059,11 @@ def main():
         print(
             f"[history] samples -> {history_sample_path} (every {args.history_sample_every} steps)"
         )
+
+    EVAL_SAVED_GAMES = 10
+    print(
+        f"[games] eval samples -> {eval_game_save_dir} ({EVAL_SAVED_GAMES} per eval run)"
+    )
 
     card_embedding_bundle: Optional[CardEmbeddingRuntime] = None
     embedding_flag = args.use_card_embeddings
@@ -1181,10 +1190,13 @@ def main():
             blanks=env.rules["blanks"],
             verbose=env.verbose,
             illegal_penalty=env.illegal_penalty,
-            game_save_dir=None,
+            game_save_dir=eval_game_save_dir,
+            save_sample_rate=1,
             card_embedding=card_embedding_bundle,
             history_embedding=history_embedding_bundle,
         ),
+        eval_save_dir=eval_game_save_dir,
+        eval_save_games=EVAL_SAVED_GAMES,
         control_plane=control_plane,
         history_sample_path=history_sample_path,
         history_sample_every=args.history_sample_every,
