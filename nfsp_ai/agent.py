@@ -1396,12 +1396,8 @@ class NFSPAgent:
                 print(
                     "EVALUATION:\n"
                     f"[steps={self.total_env_steps}] "
-                    f"avgR={eval_stats['avg_reward']:.4f} win={eval_stats['win_rate']:.3f} len={avg_len:.1f} "
-                    f"Qloss={ql:.5f} SLloss={sll:.5f} H(pi)={pent:.3f} "
-                    f"illegal={illegal_rt:.3f} eps={eps:.3f} "
-                    f"RL_buf={self.rl_buf.size} SL_buf≈{min(self.sl_buf.size, self.sl_buf.capacity)} "
-                    f"RL_upd={self.rl_updates} SL_upd={self.sl_updates} "
-                    f"episodes_tracked={episodes_logged}"
+                    f"avgR={eval_stats['avg_reward']:.4f} win={eval_stats['win_rate']:.3f} "
+                    f"illegal={illegal_rt:.3f}"
                 )
                 if writer:
                     writer.add_scalar("Eval/avg_reward", eval_stats["avg_reward"], self.total_env_steps)
@@ -1502,6 +1498,8 @@ class NFSPAgent:
             self._eps_current = None
             self._check_explore_prob = 0.0
         else:
+            # Resize buffers etc. to what the checkpoint was at
+            self._apply_phase_schedules(self.total_env_steps)
             if "opt_q" in ckpt:
                 self.opt_q.load_state_dict(ckpt["opt_q"])
             if "opt_pi" in ckpt:
