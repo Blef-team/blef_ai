@@ -725,9 +725,15 @@ class MyEnv:
     ):
         if n_agents < 2 or n_agents > 8:
             raise ValueError("n_agents must be in [2, 8]")
+
         self.n_agents = n_agents
         self.max_cards = max_cards
-        self.rules = {"deck_size": int(deck_size), "jokers": int(jokers), "blanks": int(blanks)}
+        self.rules = {
+            "deck_size": int(deck_size),
+            "jokers": int(jokers),
+            "blanks": int(blanks),
+        }
+
         self.card_embedding = card_embedding
         self.history_embedding = history_embedding
         self.deck_spec = _build_deck_spec(
@@ -735,22 +741,60 @@ class MyEnv:
             card_embedding=self.card_embedding,
             history_embedding=self.history_embedding,
         )
+
         self.verbose = verbose
         self.illegal_penalty = float(illegal_penalty)
         self.game_save_dir = game_save_dir
         self.save_sample_rate = max(1, int(save_sample_rate))
+
         self.game: Dict = {}
         self._last_obs = None
         self._last_mask = None
         self._ref_nick: Optional[str] = None
-        self.rounds_since_reset = 0
+
+        # --- Added state for multi-round handling ---
+        self.rounds_since_reset = 0           # counts rounds in current game
+        self._round_boundary_pending = False  # True if last step ended a round (not full game)
+        # --------------------------------------------
+
         self._save_counter = 0
         self._saved_games = 0
+
 
     def _pid(self) -> int:
         return _nickname_to_idx(self.game["players"], self.game.get("cp_nickname", ""))
 
     def reset(self) -> Tuple[torch.Tensor, torch.Tensor, int]:
+        """
+        Reset for the learner:
+        - If the last step ended a ROUND (self._round_boundary_pending == True) and the game is still running,
+          continue the SAME GAME at the start of the next round, but as a NEW EPISODE for learning.
+        - Otherwise (game finished or no game yet), create a brand new game.
+        """
+        # Fast path: start of next round within the same game, as a new learning episode
+        if getattr(self, "_round_boundary_pending", False) and self.game and self.game.get("status") != "Finished":
+            self._round_boundary_pending = False  # we've consumed the boundary
+            # Keep rules and ref nick as-is; do NOT reset rounds_since_reset here.
+            # Rebuild deck_spec in case embeddings/rules changed.
+            self.deck_spec = _deck_spec_from_game(
+                self.game,
+                card_embedding=self.card_embedding,
+                history_embedding=self.history_embedding,
+            )
+            cp = self.game.get("cp_nickname")
+            obs = vectorize_obs(
+                self.game,
+                cp,
+                self.deck_spec,
+                card_embedding=self.card_embedding,
+                history_embedding=self.history_embedding,
+            ).float()
+            mask = _legal_action_mask(self.game, self.deck_spec).float()
+            pid = self._pid()
+            self._last_obs, self._last_mask = obs, mask
+            return obs, mask, pid
+
+        # Normal path: start a completely new game (either there was no pending round boundary or the game finished)
         self.game = gm.create_game(
             self.n_agents,
             deck_size=self.rules["deck_size"],
@@ -759,18 +803,27 @@ class MyEnv:
             blanks=self.rules["blanks"],
             verbose=self.verbose,
         )
+        # Sync rules from the created game (single assignment; remove duplicate)
         self.rules = dict(self.game.get("rules", self.rules))
-        self.rules = dict(self.game.get("rules", self.rules))
+
+        # Fresh deck spec for the new game
         self.deck_spec = _deck_spec_from_game(
             self.game,
             card_embedding=self.card_embedding,
             history_embedding=self.history_embedding,
         )
+
+        # New match bookkeeping
         self.rounds_since_reset = 0
+        self._round_boundary_pending = False  # starting a truly new match
+
+        # Choose/refresh the reference player ONLY at the start of a new match
         players = self.game.get("players", []) or []
         if not players:
             raise RuntimeError("Game manager returned no players")
         self._ref_nick = random.choice([p["nickname"] for p in players])
+
+        # Build initial observation/mask for the new match
         cp = self.game["cp_nickname"]
         obs = vectorize_obs(
             self.game,
@@ -810,11 +863,13 @@ class MyEnv:
             pid = self._pid()
             info = {"next_pid": pid, "illegal": 1}
             return obs, mask, float(self.illegal_penalty), False, info
+
         is_check = action_int == self.deck_spec.check_action_id
         if self.game_save_dir and is_check:
             if self._save_counter >= self.save_sample_rate - 1:
                 save_dir = self.game_save_dir
                 should_save = True
+
         try:
             gm.play(self.game, action_int, save_dir=save_dir, verbose=self.verbose)
             if should_save:
@@ -830,12 +885,12 @@ class MyEnv:
             info = {"next_pid": pid, "illegal": 1}
             return obs, mask, float(self.illegal_penalty), False, info
 
+        # Refresh deck spec and compute new obs/mask/pid (state may already be at the next round)
         self.deck_spec = _deck_spec_from_game(
             self.game,
             card_embedding=self.card_embedding,
             history_embedding=self.history_embedding,
         )
-        # New observation / mask / pid after the move (may be a new round if the last action was a check)
         cp = self.game.get("cp_nickname")
         obs = vectorize_obs(
             self.game,
@@ -852,6 +907,7 @@ class MyEnv:
         reward = 0.0
         round_result = None
         history_for_log = None
+        done_reason = None
 
         if is_check:
             # Round has been resolved by the manager, and a new round likely started.
@@ -877,6 +933,7 @@ class MyEnv:
                 reward = -1.0
             else:
                 reward = 1.0
+
             round_result = {
                 "actor": actor_nick,
                 "loser": loser,
@@ -886,14 +943,26 @@ class MyEnv:
             }
             history_for_log = history_before
 
-        # Game finished? Mark terminal regardless of action.
+            # --- Key change: make the round boundary terminal ---
+            done = True
+            done_reason = "round_terminal"
+            self._round_boundary_pending = True  # tell reset() to continue same game
+            # ----------------------------------------------------
+
+        # Game finished? Mark terminal regardless of action (overrides reason).
         if self.game.get("status") == "Finished" and status_before != "Finished":
             done = True
+            done_reason = "game_finished"
+            self._round_boundary_pending = False  # force new game on reset
+
         else:
-            # If the reference player has been eliminated from the table, we treat the episode as done.
+            # If the reference player has been eliminated from the table, we treat the episode as done
+            # and also force a new game on reset (no ref left to act in current game).
             players_now = {p["nickname"] for p in self.game.get("players", []) if p["n_cards"] > 0}
             if self._ref_nick is not None and self._ref_nick not in players_now:
                 done = True
+                done_reason = "ref_eliminated"
+                self._round_boundary_pending = False  # start a new game on reset
 
         # safety cap to avoid non-terminating matches
         MAX_ROUNDS = 50
@@ -907,8 +976,13 @@ class MyEnv:
             "history": history_for_log,
             "round_result": round_result,
             "reward": float(reward),
+            # Helpful breadcrumbs for debugging:
+            "round_terminal": bool(is_check),
+            "game_status": self.game.get("status", ""),
+            "done_reason": done_reason,
         }
         return obs, mask, float(reward), bool(done), info
+
 
 
 def main():
