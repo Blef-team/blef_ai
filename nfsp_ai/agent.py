@@ -818,9 +818,13 @@ class NFSPAgent:
                 eta = 0.15
             elif step < 20_000_000:
                 eta = 0.12
+            elif step < 40_000_000:
+                eta = self._interp(step, 20_000_000, 40_000_000, 0.10, 0.08)
+            elif step < 70_000_000:
+                eta = self._interp(step, 40_000_000, 70_000_000, 0.08, 0.05)
             else:
-                eta = 0.10
-            self.cfg.anticipatory_eta = eta
+                eta = self._interp(step, 70_000_000, 100_000_000, 0.05, 0.03)
+            self.cfg.anticipatory_eta = max(0.02, eta)
 
         if not self._is_pinned("epsilon"):
             if step < 10_000_000:
@@ -829,8 +833,12 @@ class NFSPAgent:
                 eps = self._interp(step, 10_000_000, 15_000_000, 0.04, 0.03)
             elif step < 20_000_000:
                 eps = self._interp(step, 15_000_000, 20_000_000, 0.03, 0.025)
+            elif step < 40_000_000:
+                eps = self._interp(step, 20_000_000, 40_000_000, 0.025, 0.015)
+            elif step < 70_000_000:
+                eps = self._interp(step, 40_000_000, 70_000_000, 0.015, 0.01)
             else:
-                eps = self._interp(step, 20_000_000, 25_000_000, 0.025, 0.02)
+                eps = self._interp(step, 70_000_000, 100_000_000, 0.01, 0.0075)
             self._eps_current = max(0.0, min(1.0, eps))
 
         if not self._is_pinned("lr_q"):
@@ -838,10 +846,12 @@ class NFSPAgent:
                 lr_q = self._interp(step, 5_000_000, 10_000_000, 1e-4, 7e-5)
             elif step < 15_000_000:
                 lr_q = self._interp(step, 10_000_000, 15_000_000, 7e-5, 5e-5)
-            elif step < 23_000_000:
-                lr_q = 5e-5
+            elif step < 40_000_000:
+                lr_q = self._interp(step, 15_000_000, 40_000_000, 5e-5, 2e-5)
+            elif step < 70_000_000:
+                lr_q = self._interp(step, 40_000_000, 70_000_000, 2e-5, 1.5e-5)
             else:
-                lr_q = self._interp(step, 23_000_000, 25_000_000, 5e-5, 3e-5)
+                lr_q = self._interp(step, 70_000_000, 100_000_000, 1.5e-5, 1e-5)
             self._set_lr(self.opt_q, lr_q)
             self.cfg.lr_q = lr_q
 
@@ -850,19 +860,23 @@ class NFSPAgent:
                 self.cfg.train_rl_every = 32
             elif step < 12_000_000:
                 self.cfg.train_rl_every = 32
-            elif step < 15_000_000:
-                self.cfg.train_rl_every = 48
             elif step < 20_000_000:
                 self.cfg.train_rl_every = 48
-            else:
+            elif step < 50_000_000:
                 self.cfg.train_rl_every = 64
+            elif step < 80_000_000:
+                self.cfg.train_rl_every = 80
+            else:
+                self.cfg.train_rl_every = 96
 
         if step < 12_000_000:
             target_n = 5
         elif step < 20_000_000:
             target_n = 7
-        else:
+        elif step < 50_000_000:
             target_n = 10
+        else:
+            target_n = 12
         target_n = max(1, target_n)
         if not self._is_pinned("n_step") and target_n != self._active_n_step:
             self._flush_nstep(force=True)
@@ -871,10 +885,19 @@ class NFSPAgent:
             self.cfg.n_step = target_n
 
         if not self._is_pinned("lr_pi"):
-            self.cfg.lr_pi = 3e-4
+            if step < 40_000_000:
+                lr_pi = 3e-4
+            elif step < 70_000_000:
+                lr_pi = 2e-4
+            else:
+                lr_pi = 1.5e-4
+            self.cfg.lr_pi = lr_pi
             self._set_lr(self.opt_pi, self.cfg.lr_pi)
         if not self._is_pinned("train_sl_every"):
-            self.cfg.train_sl_every = 8
+            if step < 60_000_000:
+                self.cfg.train_sl_every = 8
+            else:
+                self.cfg.train_sl_every = 12
         if not self._is_pinned("batch_sl"):
             self.cfg.batch_sl = max(256, self.cfg.batch_sl)
 
@@ -1183,7 +1206,7 @@ class NFSPAgent:
 
             self.total_env_steps += 1
             # per-million checkpointing
-            if save_path and self.total_env_steps % save_checkpoint_every == 0:
+            if save_path and self.total_env_steps % save_checkpoint_every == 100_000:
                 current_million = self.total_env_steps // 1_000_000
                 if current_million > self._last_checkpoint_million:
                     base, ext = os.path.splitext(save_path)
