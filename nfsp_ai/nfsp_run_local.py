@@ -18,7 +18,12 @@ import shared.api.simpleschema_local_manager as gm                 # local manag
 from shared.probabilities.dynamic_probabilities import get_bet_probabilities, get_generic_bet_probabilities
 from nfsp_ai.agent import NFSPAgent, NFSPConfig          # your NFSP implementation
 from nfsp_ai.control_plane import JsonControlPlane, build_control_snapshot, write_control_file
-from nfsp_ai.embedding import CardEmbeddingEncoder, CardEmbeddingConfig
+from nfsp_ai.embedding import (
+    CardEmbeddingEncoder,
+    CardEmbeddingConfig,
+    HistoryEmbeddingEncoder,
+    HistoryEmbeddingConfig,
+)
 from shared.game_utils import GameRules
 
 
@@ -32,11 +37,19 @@ class DeckSpec:
     hist_dim: int
     obs_dim: int
     card_feature_dim: int
+    history_feature_dim: int
     use_card_embeddings: bool
+    use_history_embeddings: bool
 
 
-def _compute_obs_dim(hand_vec_dim: int, hist_dim: int, card_feature_dim: Optional[int] = None) -> int:
+def _compute_obs_dim(
+    hand_vec_dim: int,
+    hist_dim: int,
+    card_feature_dim: Optional[int] = None,
+    history_feature_dim: Optional[int] = None,
+) -> int:
     card_dim = card_feature_dim if card_feature_dim is not None else hand_vec_dim
+    history_dim = history_feature_dim if history_feature_dim is not None else hist_dim
     return (
         card_dim
         + 1  # rules jokers
@@ -45,7 +58,7 @@ def _compute_obs_dim(hand_vec_dim: int, hist_dim: int, card_feature_dim: Optiona
         + card_dim
         + MAX_PLAYERS
         + 1  # round scaling
-        + hist_dim
+        + history_dim
         + 1  # last bet prob
         + hist_dim  # private priors
         + hist_dim  # public priors
@@ -53,7 +66,11 @@ def _compute_obs_dim(hand_vec_dim: int, hist_dim: int, card_feature_dim: Optiona
     )
 
 
-def _build_deck_spec(rules: Dict, card_embedding: Optional["CardEmbeddingRuntime"] = None) -> DeckSpec:
+def _build_deck_spec(
+    rules: Dict,
+    card_embedding: Optional["CardEmbeddingRuntime"] = None,
+    history_embedding: Optional["HistoryEmbeddingRuntime"] = None,
+) -> DeckSpec:
     deck_size = int(rules.get("deck_size", 24))
     if deck_size % 4 != 0:
         raise ValueError(f"Unsupported deck_size {deck_size}; must be divisible by four.")
@@ -64,6 +81,7 @@ def _build_deck_spec(rules: Dict, card_embedding: Optional["CardEmbeddingRuntime
     hand_vec_dim = num_values * 4
     hist_dim = check_action_id
     use_card_embeddings = card_embedding is not None
+    use_history_embeddings = history_embedding is not None
     if use_card_embeddings:
         base_deck = int(card_embedding.config.base_deck_size)
         if base_deck != deck_size:
@@ -78,7 +96,16 @@ def _build_deck_spec(rules: Dict, card_embedding: Optional["CardEmbeddingRuntime
         card_feature_dim = card_embedding.feature_dim
     else:
         card_feature_dim = hand_vec_dim
-    obs_dim = _compute_obs_dim(hand_vec_dim, hist_dim, card_feature_dim=card_feature_dim)
+    if use_history_embeddings:
+        history_feature_dim = history_embedding.feature_dim
+    else:
+        history_feature_dim = hist_dim
+    obs_dim = _compute_obs_dim(
+        hand_vec_dim,
+        hist_dim,
+        card_feature_dim=card_feature_dim,
+        history_feature_dim=history_feature_dim,
+    )
     return DeckSpec(
         deck_size=deck_size,
         num_values=num_values,
@@ -88,11 +115,16 @@ def _build_deck_spec(rules: Dict, card_embedding: Optional["CardEmbeddingRuntime
         hist_dim=hist_dim,
         obs_dim=obs_dim,
         card_feature_dim=card_feature_dim,
+        history_feature_dim=history_feature_dim,
         use_card_embeddings=use_card_embeddings,
+        use_history_embeddings=use_history_embeddings,
     )
 
 MAX_PLAYERS = 8
+HISTORY_SLOTS = 8
+HISTORY_LEN = 8
 DEFAULT_CARD_EMBEDDING_PATH = "artifacts/card_embedding_pretrain.pt"
+DEFAULT_HISTORY_EMBEDDING_PATH = "artifacts/history_embedding_pretrain.pt"
 
 
 @dataclass
@@ -110,15 +142,31 @@ class CardEmbeddingRuntime:
     source_path: Optional[str] = None
 
 
+@dataclass
+class HistoryEmbeddingRuntime:
+    encoder: HistoryEmbeddingEncoder
+    config: HistoryEmbeddingConfig
+    device: torch.device
+    feature_dim: int  # flattened across slots
+    history_len: int
+    slots: int
+    num_actions: int
+    source_path: Optional[str] = None
+
+
 # ---------- Utilities ----------
 
 def _nickname_to_idx(players: List[dict], nick: str) -> int:
     return next((i for i, p in enumerate(players) if p["nickname"] == nick), -1)
 
 
-def _deck_spec_from_game(game: dict, card_embedding: Optional["CardEmbeddingRuntime"] = None) -> DeckSpec:
+def _deck_spec_from_game(
+    game: dict,
+    card_embedding: Optional["CardEmbeddingRuntime"] = None,
+    history_embedding: Optional["HistoryEmbeddingRuntime"] = None,
+) -> DeckSpec:
     rules = game.get("rules", {}) or {}
-    return _build_deck_spec(rules, card_embedding=card_embedding)
+    return _build_deck_spec(rules, card_embedding=card_embedding, history_embedding=history_embedding)
 
 
 def _current_hand(game: dict, nick: str) -> List[dict]:
@@ -279,6 +327,41 @@ def _load_card_embedding(
     )
 
 
+def _load_history_embedding(
+    artifact_path: str,
+    device: Optional[str] = None,
+) -> "HistoryEmbeddingRuntime":
+    if not os.path.exists(artifact_path):
+        raise FileNotFoundError(f"History embedding artifact not found at '{artifact_path}'")
+
+    payload = torch.load(artifact_path, map_location="cpu")
+    cfg_dict = payload.get("encoder_config")
+    if not isinstance(cfg_dict, dict):
+        raise ValueError("encoder_config missing from history embedding artifact")
+    encoder_cfg = HistoryEmbeddingConfig(**cfg_dict)
+    encoder = HistoryEmbeddingEncoder(encoder_cfg)
+    state = payload.get("encoder_state_dict")
+    if not isinstance(state, dict):
+        raise ValueError("encoder_state_dict missing from history embedding artifact")
+    encoder.load_state_dict(state)
+    encoder.eval()
+
+    target_device = torch.device(device) if device else torch.device("cpu")
+    encoder.to(target_device)
+    feature_dim = encoder.config.embedding_dim * HISTORY_SLOTS
+
+    return HistoryEmbeddingRuntime(
+        encoder=encoder,
+        config=encoder_cfg,
+        device=target_device,
+        feature_dim=feature_dim,
+        history_len=encoder_cfg.history_len,
+        slots=HISTORY_SLOTS,
+        num_actions=encoder_cfg.num_actions,
+        source_path=os.path.abspath(artifact_path),
+    )
+
+
 def _legal_action_mask(game: dict, spec: DeckSpec) -> torch.Tensor:
     """Compute legality exactly as enforced by manager.play()."""
     mask = np.zeros((spec.num_actions,), dtype=np.float32)
@@ -380,11 +463,98 @@ def _round_history_action_ids(game: dict, hist_dim: int) -> List[int]:
     return ids
 
 
+_HISTORY_SLOT_MAP = {
+    2: [None, None, None, 0, 1, None, None, None],
+    3: [None, None, 2, 0, 1, None, None, None],
+    4: [None, None, 3, 0, 1, 2, None, None],
+    5: [None, 3, 4, 0, 1, 2, None, None],
+    6: [None, 4, 5, 0, 1, 2, 3, None],
+    7: [4, 5, 6, 0, 1, 2, 3, None],
+    8: [5, 6, 7, 0, 1, 2, 3, 4],
+}
+
+
+def _ordered_history_slots(players: List[dict], current_idx: int) -> List[Optional[str]]:
+    n = len(players)
+    mapping = _HISTORY_SLOT_MAP.get(n)
+    if mapping is None:
+        raise ValueError(f"Unsupported player count {n} for history embeddings")
+    ordered = [players[(current_idx + offset) % n] for offset in range(n)]
+    slots: List[Optional[str]] = [None] * HISTORY_SLOTS
+    for slot_idx, rel in enumerate(mapping):
+        if rel is None or rel >= n:
+            continue
+        slots[slot_idx] = ordered[rel]["nickname"]
+    return slots
+
+
+def _collect_player_histories(
+    game: dict,
+    spec: DeckSpec,
+    history_len: int,
+) -> Tuple[np.ndarray, np.ndarray]:
+    players = game.get("players", []) or []
+    if not players:
+        return (
+            np.full((HISTORY_SLOTS, history_len), -1, dtype=np.int64),
+            np.zeros((HISTORY_SLOTS, history_len), dtype=bool),
+        )
+    cp_nick = game.get("cp_nickname")
+    cp_idx = _nickname_to_idx(players, cp_nick)
+    if cp_idx < 0:
+        cp_idx = 0
+    slot_order = _ordered_history_slots(players, cp_idx)
+
+    history_map: Dict[str, List[int]] = {p.get("nickname"): [] for p in players}
+    for event in reversed(game.get("history", []) or []):
+        try:
+            action_id = int(event.get("action_id", -1))
+        except Exception:
+            continue
+        if action_id < 0 or action_id >= spec.hist_dim:
+            continue
+        nick = event.get("player")
+        if nick not in history_map:
+            continue
+        seq = history_map[nick]
+        if len(seq) < history_len:
+            seq.append(action_id)
+
+    actions = np.full((HISTORY_SLOTS, history_len), -1, dtype=np.int64)
+    mask = np.zeros((HISTORY_SLOTS, history_len), dtype=bool)
+    for slot_idx, nick in enumerate(slot_order):
+        if nick is None:
+            continue
+        seq = history_map.get(nick, [])
+        limit = min(len(seq), history_len)
+        if limit == 0:
+            continue
+        actions[slot_idx, :limit] = seq[:limit]
+        mask[slot_idx, :limit] = True
+    return actions, mask
+
+
+def _encode_histories_with_embedding(
+    actions: np.ndarray,
+    mask: np.ndarray,
+    runtime: "HistoryEmbeddingRuntime",
+) -> np.ndarray:
+    if actions.shape != (runtime.slots, runtime.history_len):
+        raise ValueError("actions shape mismatch for history embedding")
+    device = runtime.device
+    tensor_actions = torch.from_numpy(actions).to(device=device, dtype=torch.long)
+    tensor_mask = torch.from_numpy(mask).to(device=device, dtype=torch.bool)
+    with torch.no_grad():
+        emb = runtime.encoder(tensor_actions, tensor_mask)
+    return emb.detach().cpu().numpy().astype(np.float32, copy=False).reshape(-1)
+
+
 def vectorize_obs(
     game: dict,
     nick: str,
     spec: DeckSpec,
-    embedding: Optional["CardEmbeddingRuntime"] = None,
+    card_embedding: Optional["CardEmbeddingRuntime"] = None,
+    history_embedding: Optional["HistoryEmbeddingRuntime"] = None,
 ) -> torch.Tensor:
     """
     Updated observation for current player (nick) with minimal allocations.
@@ -397,8 +567,8 @@ def vectorize_obs(
 
     # Private hand multi-hot
     my_hand = _current_hand_int(game, nick)
-    if spec.use_card_embeddings and embedding is not None:
-        priv_feat = _encode_hand_with_embedding(my_hand, rules, spec, embedding)
+    if spec.use_card_embeddings and card_embedding is not None:
+        priv_feat = _encode_hand_with_embedding(my_hand, rules, spec, card_embedding)
         if priv_feat.shape[0] != spec.card_feature_dim:
             raise ValueError(
                 f"Card embedding produced dim {priv_feat.shape[0]}, expected {spec.card_feature_dim}"
@@ -416,8 +586,8 @@ def vectorize_obs(
     obs[idx] = float(_count_jokers_from_ints(common_hand)); idx += 1
 
     # Common cards features
-    if spec.use_card_embeddings and embedding is not None:
-        common_feat = _encode_hand_with_embedding(common_hand, rules, spec, embedding)
+    if spec.use_card_embeddings and card_embedding is not None:
+        common_feat = _encode_hand_with_embedding(common_hand, rules, spec, card_embedding)
         if common_feat.shape[0] != spec.card_feature_dim:
             raise ValueError(
                 f"Card embedding produced dim {common_feat.shape[0]}, expected {spec.card_feature_dim}"
@@ -430,10 +600,20 @@ def vectorize_obs(
 
     # Seat counts rotated so current player is seat 0
     my_seat = _seat_index(players, game.get("cp_nickname", nick))
-    counts = [int(p.get("n_cards", 0)) for p in players]
-    counts = (counts + [0] * (MAX_PLAYERS - len(counts)))[:MAX_PLAYERS]
-    counts = _rotate_list(counts, my_seat)
-    obs[idx:idx + MAX_PLAYERS] = counts[:MAX_PLAYERS]
+    counts_map = {p.get("nickname"): int(p.get("n_cards", 0)) for p in players}
+    try:
+        slot_order = _ordered_history_slots(players, my_seat)
+    except ValueError:
+        slot_order = [players[(my_seat + offset) % len(players)].get("nickname") for offset in range(len(players))]
+        slot_order += [None] * (MAX_PLAYERS - len(slot_order))
+    ordered_counts = np.zeros((MAX_PLAYERS,), dtype=np.float32)
+    for slot_idx in range(min(MAX_PLAYERS, len(slot_order))):
+        nick = slot_order[slot_idx] if slot_idx < len(slot_order) else None
+        if nick is None:
+            ordered_counts[slot_idx] = 0.0
+        else:
+            ordered_counts[slot_idx] = float(counts_map.get(nick, 0))
+    obs[idx:idx + MAX_PLAYERS] = ordered_counts
     idx += MAX_PLAYERS
 
     # Round scaling
@@ -442,11 +622,21 @@ def vectorize_obs(
     obs[idx] = float(min(max(cur_round / max(1, max_rounds), 0.0), 1.0))
     idx += 1
 
-    # Action history multi-hot
-    hist_ids = _round_history_action_ids(game, spec.hist_dim)
-    if hist_ids:
-        obs[idx + np.unique(hist_ids)] = 1.0
-    idx += spec.hist_dim
+    # Action history features
+    if spec.use_history_embeddings and history_embedding is not None:
+        actions_mat, mask_mat = _collect_player_histories(game, spec, history_embedding.history_len)
+        hist_feat = _encode_histories_with_embedding(actions_mat, mask_mat, history_embedding)
+        if hist_feat.shape[0] != spec.history_feature_dim:
+            raise ValueError(
+                f"History embedding produced dim {hist_feat.shape[0]}, expected {spec.history_feature_dim}"
+            )
+        obs[idx:idx + spec.history_feature_dim] = hist_feat
+        idx += spec.history_feature_dim
+    else:
+        hist_ids = _round_history_action_ids(game, spec.hist_dim)
+        if hist_ids:
+            obs[idx + np.unique(hist_ids)] = 1.0
+        idx += spec.hist_dim
 
     # Last bet probability
     last_bet_id = _last_bet_action_id(game, spec)
@@ -531,6 +721,7 @@ class MyEnv:
         game_save_dir: Optional[str] = None,
         save_sample_rate: int = 5000,
         card_embedding: Optional["CardEmbeddingRuntime"] = None,
+        history_embedding: Optional["HistoryEmbeddingRuntime"] = None,
     ):
         if n_agents < 2 or n_agents > 8:
             raise ValueError("n_agents must be in [2, 8]")
@@ -538,7 +729,12 @@ class MyEnv:
         self.max_cards = max_cards
         self.rules = {"deck_size": int(deck_size), "jokers": int(jokers), "blanks": int(blanks)}
         self.card_embedding = card_embedding
-        self.deck_spec = _build_deck_spec(self.rules, card_embedding=self.card_embedding)
+        self.history_embedding = history_embedding
+        self.deck_spec = _build_deck_spec(
+            self.rules,
+            card_embedding=self.card_embedding,
+            history_embedding=self.history_embedding,
+        )
         self.verbose = verbose
         self.illegal_penalty = float(illegal_penalty)
         self.game_save_dir = game_save_dir
@@ -564,14 +760,24 @@ class MyEnv:
         )
         self.rules = dict(self.game.get("rules", self.rules))
         self.rules = dict(self.game.get("rules", self.rules))
-        self.deck_spec = _deck_spec_from_game(self.game, card_embedding=self.card_embedding)
+        self.deck_spec = _deck_spec_from_game(
+            self.game,
+            card_embedding=self.card_embedding,
+            history_embedding=self.history_embedding,
+        )
         self.rounds_since_reset = 0
         players = self.game.get("players", []) or []
         if not players:
             raise RuntimeError("Game manager returned no players")
         self._ref_nick = random.choice([p["nickname"] for p in players])
         cp = self.game["cp_nickname"]
-        obs = vectorize_obs(self.game, cp, self.deck_spec, self.card_embedding).float()
+        obs = vectorize_obs(
+            self.game,
+            cp,
+            self.deck_spec,
+            card_embedding=self.card_embedding,
+            history_embedding=self.history_embedding,
+        ).float()
         mask = _legal_action_mask(self.game, self.deck_spec).float()
         pid = self._pid()
         self._last_obs, self._last_mask = obs, mask
@@ -622,10 +828,20 @@ class MyEnv:
             info = {"next_pid": pid, "illegal": 1}
             return obs, mask, float(self.illegal_penalty), False, info
 
-        self.deck_spec = _deck_spec_from_game(self.game, card_embedding=self.card_embedding)
+        self.deck_spec = _deck_spec_from_game(
+            self.game,
+            card_embedding=self.card_embedding,
+            history_embedding=self.history_embedding,
+        )
         # New observation / mask / pid after the move (may be a new round if the last action was a check)
         cp = self.game.get("cp_nickname")
-        obs = vectorize_obs(self.game, cp, self.deck_spec, self.card_embedding).float()
+        obs = vectorize_obs(
+            self.game,
+            cp,
+            self.deck_spec,
+            card_embedding=self.card_embedding,
+            history_embedding=self.history_embedding,
+        ).float()
         mask = _legal_action_mask(self.game, self.deck_spec).float()
         pid = self._pid()
 
@@ -808,6 +1024,23 @@ def main():
         default="cpu",
         help="Torch device for card embedding encoder (default: cpu).",
     )
+    parser.add_argument(
+        "--use-history-embeddings",
+        nargs="?",
+        const="auto",
+        default=None,
+        help=(
+            "Enable pretrained history embedding encoder; optionally provide the .pt artifact path. "
+            "If omitted, legacy history multi-hot features are used."
+        ),
+    )
+    parser.add_argument(
+        "--history-embedding-device",
+        dest="history_embedding_device",
+        type=str,
+        default="cpu",
+        help="Torch device for history embedding encoder (default: cpu).",
+    )
     args = parser.parse_args()
 
     postfix = datetime.now().strftime("%Y%m%d%H%M%S")
@@ -851,6 +1084,34 @@ def main():
     else:
         print("[embeddings] using legacy card multi-hot features.")
 
+    history_embedding_bundle: Optional[HistoryEmbeddingRuntime] = None
+    history_flag = args.use_history_embeddings
+    if history_flag:
+        history_path = (
+            DEFAULT_HISTORY_EMBEDDING_PATH
+            if history_flag == "auto" or history_flag is True
+            else history_flag
+        )
+        try:
+            history_embedding_bundle = _load_history_embedding(
+                history_path,
+                device=args.history_embedding_device,
+            )
+            print(f"[embeddings] history encoder loaded from {history_embedding_bundle.source_path}")
+        except FileNotFoundError:
+            if history_flag == "auto":
+                print(
+                    f"[embeddings] no artifact at {os.path.abspath(history_path)}; "
+                    "falling back to legacy history multi-hot features."
+                )
+                history_embedding_bundle = None
+            else:
+                raise
+        except Exception as exc:
+            raise RuntimeError(f"Failed to load history embeddings: {exc}") from exc
+    else:
+        print("[embeddings] using legacy history multi-hot features.")
+
     env = MyEnv(
         n_agents=args.n_agents,
         max_cards=args.max_cards,
@@ -861,6 +1122,7 @@ def main():
         game_save_dir=game_save_dir,
         save_sample_rate=args.save_game_every,
         card_embedding=card_embedding_bundle,
+        history_embedding=history_embedding_bundle,
     )
     obs0, mask0, _ = env.reset()
 
@@ -885,8 +1147,7 @@ def main():
             sl_capacity=200_000,
             n_step=5,
             burst_rl_updates_on_reward=4,
-            burst_reward_threshold=0.5,
-            #hidden=16
+            burst_reward_threshold=0.5
         ),
     )
 
@@ -922,6 +1183,7 @@ def main():
             illegal_penalty=env.illegal_penalty,
             game_save_dir=None,
             card_embedding=card_embedding_bundle,
+            history_embedding=history_embedding_bundle,
         ),
         control_plane=control_plane,
         history_sample_path=history_sample_path,

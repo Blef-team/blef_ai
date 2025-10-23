@@ -6,5 +6,11 @@ pretraining and downstream NFSP integration.
 """
 
 from .encoder import CardEmbeddingEncoder, CardEmbeddingConfig
+from .history import HistoryEmbeddingEncoder, HistoryEmbeddingConfig
 
-__all__ = ["CardEmbeddingEncoder", "CardEmbeddingConfig"]
+__all__ = [
+    "CardEmbeddingEncoder",
+    "CardEmbeddingConfig",
+    "HistoryEmbeddingEncoder",
+    "HistoryEmbeddingConfig",
+]
