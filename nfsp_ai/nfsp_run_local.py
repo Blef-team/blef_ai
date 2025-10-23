@@ -1264,13 +1264,7 @@ def main():
             verbose=True,
         )
 
-    agent.train_from_selfplay(
-        env,
-        total_steps=args.total_steps,
-        log_every=50_000,
-        save_path=model_save_path,
-        game_save_dir=game_save_dir,
-        eval_env_factory=lambda: MyEnv(
+    eval_env = MyEnv(
             n_agents=env.n_agents,
             max_cards=env.max_cards,
             deck_size=env.rules["deck_size"],
@@ -1282,7 +1276,14 @@ def main():
             save_sample_rate=1,
             card_embedding=card_embedding_bundle,
             history_embedding=history_embedding_bundle,
-        ),
+        )
+    agent.train_from_selfplay(
+        env,
+        total_steps=args.total_steps,
+        log_every=50_000,
+        save_path=model_save_path,
+        game_save_dir=game_save_dir,
+        eval_env_factory=lambda: eval_env,
         eval_save_dir=eval_game_save_dir,
         eval_save_games=EVAL_SAVED_GAMES,
         control_plane=control_plane,
