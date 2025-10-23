@@ -6,7 +6,11 @@ from itertools import islice, product
 import json
 import os
 
-from shared.game_utils import GameRules, get_set_details_from_action_id as _shared_get_set_details
+from shared.game_utils import (
+    GameRules,
+    get_set_details_from_action_id as _shared_get_set_details,
+    determine_set_existence as _shared_determine_set_existence,
+)
 
 
 DEFAULT_DECK_SIZE = 24
@@ -47,7 +51,20 @@ def save(game, dir="games"):
         json.dump(game, filehandle)
 
 
-def determine_set_existence(all_cards, action_id, rules=None, num_jokers=None, num_blanks=None):
+def determine_set_existence(all_cards, action_id, rules=None, num_jokers=None):
+    rules = rules or {"deck_size": DEFAULT_DECK_SIZE}
+    check_action_id = _get_check_action_id(rules)
+    if action_id == check_action_id:
+        raise ValueError("determine_set_existence called with CHECK action_id")
+
+    if num_jokers is None:
+        num_jokers = sum(1 for card in all_cards if int(card.get("value", -3)) == -1)
+    num_jokers = max(0, int(num_jokers))
+
+    return _shared_determine_set_existence(all_cards, action_id, rules, num_jokers)
+
+
+def _legacy_determine_set_existence(all_cards, action_id, rules=None, num_jokers=None, num_blanks=None):
     """Check if a claimed set exists in the combined cards, allowing for jokers."""
     rules = rules or {"deck_size": DEFAULT_DECK_SIZE}
     check_action_id = _get_check_action_id(rules)
@@ -253,15 +270,12 @@ def handle_check(game, save_dir="games"):
     bettor_hand = next((h["hand"] for h in game["hands"] if h["nickname"] == bettor_nickname), [])
     num_jokers = sum(1 for c in bettor_hand if int(c.get("value")) == -1)
     num_jokers += sum(1 for c in game.get("common_hand", []) if int(c.get("value")) == -1)
-    num_blanks = sum(1 for c in bettor_hand if int(c.get("value")) == -2)
-    num_blanks += sum(1 for c in game.get("common_hand", []) if int(c.get("value")) == -2)
 
     set_exists = determine_set_existence(
         all_cards,
         game["history"][-2]["action_id"],
         game.get("rules", {}),
         num_jokers,
-        num_blanks,
     )
 
     if set_exists:
