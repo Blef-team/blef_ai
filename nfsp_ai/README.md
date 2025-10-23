@@ -22,9 +22,11 @@ call, and adapt to different deck sizes in Blef.
        --use-history-embeddings auto \
        --total-steps 100000000 \
        --control-plane control_plane_run.json
-   ```
-   This prints progress, writes checkpoints under `nfsp_blef_<timestamp>.pt`, keeps logs in
-   `logs/`, and stores sample evaluation games under `games_<timestamp>_eval/`.
+  ```
+  This prints progress, writes checkpoints under `nfsp_blef_<timestamp>.pt`, keeps logs in
+  `logs/`, and stores sample evaluation games under `games_<timestamp>_eval/`.
+   To warm-start from an existing checkpoint but follow schedules from step 0, use
+   `--initialise-with path/to/checkpoint.pt` instead of `--resume`.
 
 Stop here if you just want a working self-play job. The defaults (two agents, 24-card deck, no
 jokers) are decent for smoke testing.

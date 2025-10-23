@@ -1467,29 +1467,41 @@ class NFSPAgent:
             "check_explore_prob": float(getattr(self, "_check_explore_prob", 0.0)),
         }, path)
 
-    def load(self, path: str, map_location=None):
+    def load(self, path: str, map_location=None, *, reset_schedules: bool = False):
         ckpt = torch.load(path, map_location=map_location or self.device)
         self.q.load_state_dict(ckpt["q"])
         self.q_tgt.load_state_dict(ckpt["q_tgt"])
         self.pi.load_state_dict(ckpt["pi"])
-        self.total_env_steps = ckpt.get("steps", 0)
-        if "opt_q" in ckpt:
-            self.opt_q.load_state_dict(ckpt["opt_q"])
-        if "opt_pi" in ckpt:
-            self.opt_pi.load_state_dict(ckpt["opt_pi"])
-        if "rl_buf" in ckpt:
-            self.rl_buf.load_state_dict(ckpt["rl_buf"])
-        if "sl_buf" in ckpt:
-            self.sl_buf.load_state_dict(ckpt["sl_buf"])
-        self.rl_updates = ckpt.get("rl_updates", getattr(self, "rl_updates", 0))
-        self.sl_updates = ckpt.get("sl_updates", getattr(self, "sl_updates", 0))
-        self._nstep_queue = deque()
-        self._pinned_overrides = dict(ckpt.get("pinned_overrides", getattr(self, "_pinned_overrides", {})))
-        self._pinned_env_overrides = dict(ckpt.get("pinned_env_overrides", getattr(self, "_pinned_env_overrides", {})))
-        if "eps_current" in ckpt and ckpt["eps_current"] is not None:
-            self._eps_current = float(ckpt["eps_current"])
-        if "check_explore_prob" in ckpt and ckpt["check_explore_prob"] is not None:
-            self._check_explore_prob = float(ckpt["check_explore_prob"])
+        self.total_env_steps = 0 if reset_schedules else ckpt.get("steps", 0)
+        if reset_schedules:
+            self.opt_q = torch.optim.Adam(self.q.parameters(), lr=self.cfg.lr_q)
+            self.opt_pi = torch.optim.Adam(self.pi.parameters(), lr=self.cfg.lr_pi)
+            self.rl_buf = ReplayBuffer(self.cfg.rl_capacity, self.obs_dim, self.act_dim, self.device)
+            self.sl_buf = ReservoirSL(self.cfg.sl_capacity, self.obs_dim, self.act_dim, self.device)
+            self.rl_updates = 0
+            self.sl_updates = 0
+            self._pinned_overrides = {}
+            self._pinned_env_overrides = {}
+            self._nstep_queue = deque()
+            self._eps_current = None
+            self._check_explore_prob = 0.0
+        else:
+            if "opt_q" in ckpt:
+                self.opt_q.load_state_dict(ckpt["opt_q"])
+            if "opt_pi" in ckpt:
+                self.opt_pi.load_state_dict(ckpt["opt_pi"])
+            if "rl_buf" in ckpt:
+                self.rl_buf.load_state_dict(ckpt["rl_buf"])
+            if "sl_buf" in ckpt:
+                self.sl_buf.load_state_dict(ckpt["sl_buf"])
+            self.rl_updates = ckpt.get("rl_updates", getattr(self, "rl_updates", 0))
+            self.sl_updates = ckpt.get("sl_updates", getattr(self, "sl_updates", 0))
+            self._pinned_overrides = dict(ckpt.get("pinned_overrides", getattr(self, "_pinned_overrides", {})))
+            self._pinned_env_overrides = dict(ckpt.get("pinned_env_overrides", getattr(self, "_pinned_env_overrides", {})))
+            if "eps_current" in ckpt and ckpt["eps_current"] is not None:
+                self._eps_current = float(ckpt["eps_current"])
+            if "check_explore_prob" in ckpt and ckpt["check_explore_prob"] is not None:
+                self._check_explore_prob = float(ckpt["check_explore_prob"])
         self._ensure_schedule_state()
 
 

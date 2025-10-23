@@ -921,6 +921,13 @@ def main():
         help="Optional path to an NFSP checkpoint (.pt) to resume from.",
     )
     parser.add_argument(
+        "--initialise-with",
+        dest="init_path",
+        type=str,
+        default=None,
+        help="Load model weights from checkpoint but restart schedules (does not carry over step counters).",
+    )
+    parser.add_argument(
         "--total-steps",
         dest="total_steps",
         type=int,
@@ -1160,7 +1167,14 @@ def main():
         ),
     )
 
-    if args.resume_path:
+    if args.resume_path and args.init_path:
+        raise ValueError("--resume and --initialise-with are mutually exclusive")
+
+    if args.init_path:
+        print(f"[load] initialising weights from {args.init_path} (resetting schedules)")
+        agent.load(args.init_path, reset_schedules=True)
+    elif args.resume_path:
+        print(f"[load] resuming from {args.resume_path}")
         agent.load(args.resume_path)
 
     control_plane = None
