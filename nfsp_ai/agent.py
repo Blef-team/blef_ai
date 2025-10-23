@@ -411,6 +411,14 @@ class NFSPAgent:
         self._pinned_overrides: dict[str, Any] = {}
         self._pinned_env_overrides: dict[str, Any] = {}
 
+        # near __init__
+        self.stats = getattr(self, "stats", {})
+        self.stats.setdefault("sl_skipped_exploration", 0)
+
+        self._took_epsilon_action = False
+        self._took_forced_check = False
+
+
     # -------- Acting (returns sampled action only) --------
     @torch.no_grad()
     def act(self, obs: torch.Tensor, mask: torch.Tensor, use_br: bool, epsilon: float) -> int:
@@ -418,17 +426,23 @@ class NFSPAgent:
         obs = obs.unsqueeze(0).to(self.device)   # [1, D]
         mask = mask.unsqueeze(0).to(self.device) # [1, A]
 
+        # Reset flags each decision
+        self._took_forced_check = False
+        self._took_epsilon_action = False
+
         # Manual override: here we force it to pick CHECK (for early exposure)
         check_prob = getattr(self, "_check_explore_prob", 0.0)
         if check_prob > 0.0:
             check_idx = mask.shape[-1] - 1
             if mask[0, check_idx] > 0 and random.random() < check_prob:
+                self._took_forced_check = True
                 return int(check_idx)
 
         if use_br:
             q = self.q(obs)                      # [1, A]
             # epsilon-greedy over legal actions
             if random.random() < epsilon:
+                self._took_epsilon_action = True
                 return epsilon_valid_sample(mask)
             a = int(masked_random_argmax(q, mask)[0].item())
             return a
@@ -437,6 +451,7 @@ class NFSPAgent:
             mlog = masked_softmax_logits(logits, mask)
             dist = torch.distributions.Categorical(logits=mlog)
             return int(dist.sample().item())
+
 
     # -------- RL (Double DQN with masking & tie-breaks) --------
     def _train_rl_step(self):
@@ -773,114 +788,121 @@ class NFSPAgent:
     def _apply_phase_schedules(self, step: int):
         self._ensure_schedule_state()
 
+        # ---------------------------
+        # Helper: set n_step safely
+        # ---------------------------
+        def set_nstep(n):
+            n = int(max(1, min(5, n)))  # hard cap at 5 given round length
+            if not self._is_pinned("n_step") and n != self._active_n_step:
+                self._flush_nstep(force=True)
+                self._active_n_step = n
+            if not self._is_pinned("n_step"):
+                self.cfg.n_step = n
+
+        # ---------------------------
+        # Early curriculum: 0–5M
+        # Goal: learn to CHECK, stabilize Q/SL targets, avoid SL pollution
+        # ---------------------------
         if step < 5_000_000:
-            # Early curriculum (bootstrapping learning signal)
+            # Anticipatory eta (prob of acting as Q/best-response)
             if not self._is_pinned("anticipatory_eta"):
-                self.cfg.anticipatory_eta = 0.25
+                # Start high to collect BR data, taper a bit to calm drift
+                if step < 2_000_000:
+                    eta = 0.25
+                else:
+                    eta = self._interp(step, 2_000_000, 5_000_000, 0.25, 0.15)
+                self.cfg.anticipatory_eta = max(0.10, eta)
 
-            if step < 1_500_000:
-                eps = self._interp(step, 0, 1_500_000, 0.20, 0.12)
-            elif step < 3_500_000:
-                eps = self._interp(step, 1_500_000, 3_500_000, 0.12, 0.07)
-            else:
-                eps = self._interp(step, 3_500_000, 5_000_000, 0.07, 0.05)
+            # Epsilon: keep healthy exploration; smooth decay
             if not self._is_pinned("epsilon"):
-                self._eps_current = max(0.05, min(1.0, eps))
+                if step < 1_500_000:
+                    eps = self._interp(step, 0, 1_500_000, 0.20, 0.12)
+                elif step < 3_500_000:
+                    eps = self._interp(step, 1_500_000, 3_500_000, 0.12, 0.07)
+                else:
+                    eps = self._interp(step, 3_500_000, 5_000_000, 0.07, 0.05)
+                self._eps_current = max(0.03, min(1.0, eps))  # floor 0.03
 
+            # Q optimizer / targets
             if not self._is_pinned("lr_q"):
-                self._set_lr(self.opt_q, 1e-4)
-                self.cfg.lr_q = 1e-4
+                self._set_lr(self.opt_q, 1e-4); self.cfg.lr_q = 1e-4
             if not self._is_pinned("tau"):
-                self.cfg.target_tau = 0.01
+                self.cfg.target_tau = 0.01           # keep Polyak updates
             if not self._is_pinned("hard_target_interval"):
-                self.cfg.hard_target_interval = 0
+                self.cfg.hard_target_interval = 0     # disable hard updates
 
+            # RL cadence
             if not self._is_pinned("train_rl_every"):
                 self.cfg.train_rl_every = 32
             if not self._is_pinned("batch_rl"):
                 self.cfg.batch_rl = 64
 
-            target_n = 5
-            if not self._is_pinned("n_step") and target_n != self._active_n_step:
-                self._flush_nstep(force=True)
-                self._active_n_step = target_n
-            if not self._is_pinned("n_step"):
-                self.cfg.n_step = target_n
+            # n-step: align to round length (fixed)
+            set_nstep(3)
 
+            # SL optimizer / cadence
             if not self._is_pinned("lr_pi"):
-                self.cfg.lr_pi = 1e-4
-                self._set_lr(self.opt_pi, self.cfg.lr_pi)
+                self.cfg.lr_pi = 1e-4; self._set_lr(self.opt_pi, self.cfg.lr_pi)
             if not self._is_pinned("train_sl_every"):
-                self.cfg.train_sl_every = 16
+                self.cfg.train_sl_every = 12   # a bit more frequent than your 16
             if not self._is_pinned("batch_sl"):
                 self.cfg.batch_sl = 256
 
+            # Forced check curriculum (SMOOTH; NEVER cliff to 0)
             if not self._is_pinned("check_prob"):
-                if step < 5_000_000:
-                    self._check_explore_prob = self._interp(step, 0, 5_000_000, 0.5, 0.2)
-                else:
-                    self._check_explore_prob = 0.0
+                # 0 → 5M: 0.50 → 0.05
+                self._check_explore_prob = self._interp(step, 0, 5_000_000, 0.50, 0.05)
             return
 
-        # From 5M onwards follow long-horizon curriculum
+        # ---------------------------
+        # Mid curriculum: 5–20M
+        # Goal: phase out forced checks smoothly; steady BR/avg learning
+        # ---------------------------
         if not self._is_pinned("check_prob"):
-            self._check_explore_prob = 0.0
+            # 5M → 10M: 0.05 → 0; 10M+: 0
+            if step < 10_000_000:
+                self._check_explore_prob = self._interp(step, 5_000_000, 10_000_000, 0.05, 0.0)
+            else:
+                self._check_explore_prob = 0.0
 
         if step >= 5_000_000 and "buffers_1m" not in self._schedule_flags:
             self.rl_buf.resize(1_000_000)
             self.sl_buf.resize(1_000_000)
             self._schedule_flags.add("buffers_1m")
 
+        # η: taper earlier to reduce teacher drift; stabilize SL
         if not self._is_pinned("anticipatory_eta"):
             if step < 10_000_000:
-                eta = 0.25
-            elif step < 15_000_000:
                 eta = 0.15
             elif step < 20_000_000:
-                eta = 0.12
-            elif step < 40_000_000:
+                eta = self._interp(step, 10_000_000, 20_000_000, 0.15, 0.10)
+            else:
                 eta = self._interp(step, 20_000_000, 40_000_000, 0.10, 0.08)
-            elif step < 70_000_000:
-                eta = self._interp(step, 40_000_000, 70_000_000, 0.08, 0.05)
-            else:
-                eta = self._interp(step, 70_000_000, 100_000_000, 0.05, 0.03)
-            self.cfg.anticipatory_eta = max(0.02, eta)
+            self.cfg.anticipatory_eta = max(0.06, eta)
 
+        # ε: gentle decay; never below 0.0075 overall
         if not self._is_pinned("epsilon"):
-            if step < 10_000_000:
-                eps = self._interp(step, 5_000_000, 10_000_000, 0.05, 0.04)
-            elif step < 15_000_000:
-                eps = self._interp(step, 10_000_000, 15_000_000, 0.04, 0.03)
-            elif step < 20_000_000:
-                eps = self._interp(step, 15_000_000, 20_000_000, 0.03, 0.025)
-            elif step < 40_000_000:
-                eps = self._interp(step, 20_000_000, 40_000_000, 0.025, 0.015)
-            elif step < 70_000_000:
-                eps = self._interp(step, 40_000_000, 70_000_000, 0.015, 0.01)
+            if step < 15_000_000:
+                eps = self._interp(step, 5_000_000, 15_000_000, 0.05, 0.02)
+            elif step < 50_000_000:
+                eps = self._interp(step, 15_000_000, 50_000_000, 0.02, 0.01)
             else:
-                eps = self._interp(step, 70_000_000, 100_000_000, 0.01, 0.0075)
+                eps = self._interp(step, 50_000_000, 100_000_000, 0.01, 0.0075)
             self._eps_current = max(0.0, min(1.0, eps))
 
+        # lr_q: smooth, conservative taper
         if not self._is_pinned("lr_q"):
-            if step < 10_000_000:
-                lr_q = self._interp(step, 5_000_000, 10_000_000, 1e-4, 7e-5)
-            elif step < 15_000_000:
-                lr_q = self._interp(step, 10_000_000, 15_000_000, 7e-5, 5e-5)
-            elif step < 40_000_000:
-                lr_q = self._interp(step, 15_000_000, 40_000_000, 5e-5, 2e-5)
+            if step < 40_000_000:
+                lr_q = self._interp(step, 5_000_000, 40_000_000, 1e-4, 3e-5)
             elif step < 70_000_000:
-                lr_q = self._interp(step, 40_000_000, 70_000_000, 2e-5, 1.5e-5)
+                lr_q = self._interp(step, 40_000_000, 70_000_000, 3e-5, 2e-5)
             else:
-                lr_q = self._interp(step, 70_000_000, 100_000_000, 1.5e-5, 1e-5)
-            self._set_lr(self.opt_q, lr_q)
-            self.cfg.lr_q = lr_q
+                lr_q = self._interp(step, 70_000_000, 100_000_000, 2e-5, 1.5e-5)
+            self._set_lr(self.opt_q, lr_q); self.cfg.lr_q = lr_q
 
+        # RL cadence: modest increases only
         if not self._is_pinned("train_rl_every"):
-            if step < 10_000_000:
-                self.cfg.train_rl_every = 32
-            elif step < 12_000_000:
-                self.cfg.train_rl_every = 32
-            elif step < 20_000_000:
+            if step < 20_000_000:
                 self.cfg.train_rl_every = 48
             elif step < 50_000_000:
                 self.cfg.train_rl_every = 64
@@ -889,21 +911,10 @@ class NFSPAgent:
             else:
                 self.cfg.train_rl_every = 96
 
-        if step < 12_000_000:
-            target_n = 5
-        elif step < 20_000_000:
-            target_n = 7
-        elif step < 50_000_000:
-            target_n = 10
-        else:
-            target_n = 12
-        target_n = max(1, target_n)
-        if not self._is_pinned("n_step") and target_n != self._active_n_step:
-            self._flush_nstep(force=True)
-            self._active_n_step = target_n
-        if not self._is_pinned("n_step"):
-            self.cfg.n_step = target_n
+        # n-step: keep fixed (don’t increase with step)
+        set_nstep(3)
 
+        # SL: a bit higher LR early, taper later
         if not self._is_pinned("lr_pi"):
             if step < 40_000_000:
                 lr_pi = 3e-4
@@ -911,15 +922,17 @@ class NFSPAgent:
                 lr_pi = 2e-4
             else:
                 lr_pi = 1.5e-4
-            self.cfg.lr_pi = lr_pi
-            self._set_lr(self.opt_pi, self.cfg.lr_pi)
+            self.cfg.lr_pi = lr_pi; self._set_lr(self.opt_pi, self.cfg.lr_pi)
+
         if not self._is_pinned("train_sl_every"):
             if step < 60_000_000:
                 self.cfg.train_sl_every = 8
             else:
                 self.cfg.train_sl_every = 12
+
         if not self._is_pinned("batch_sl"):
             self.cfg.batch_sl = max(256, self.cfg.batch_sl)
+
 
     def _store_transition(self, obs, mask, action_idx: int, reward: float, nobs, nmask, done: bool, is_br: bool):
         action_tensor = torch.tensor(action_idx, dtype=torch.long, device=self.device)
@@ -1006,6 +1019,7 @@ class NFSPAgent:
                     )
             if done_flag:
                 force = True
+
     def train_from_selfplay(
         self,
         env: "TurnEnvAdapter",
@@ -1155,40 +1169,42 @@ class NFSPAgent:
             else:
                 illegal = 0
 
-            # Store transition (all actions) but only BR steps produce replay entries
+            # Store transition (all actions), but only best-response (use_br) produces replay entries
             self._store_transition(obs, mask, action, reward, nobs, nmask, done, is_br=use_br)
+
+            # Ensure n-step buffer flushes at terminals (or if the queue head is terminal)
             if done and self._active_n_step > 1:
                 self._flush_nstep(force=True)
             elif (
                 self._active_n_step > 1
                 and self._nstep_queue
-                and self._nstep_queue[0]["done"]
+                and self._nstep_queue[0].get("done", False)
             ):
                 self._flush_nstep(force=True)
 
-            rewardful = reward >= self.cfg.burst_reward_threshold
-            if (
-                rewardful
-                and self.cfg.burst_rl_updates_on_reward > 0
-                and self.total_env_steps > self.cfg.warmup_steps
-            ):
-                extra_updates = max(0, int(self.cfg.burst_rl_updates_on_reward))
-                for _ in range(extra_updates):
-                    out_extra = self._train_rl_step()
-                    if out_extra is None:
-                        continue
-                    if isinstance(out_extra, dict):
-                        q_loss_extra = out_extra.get("q_loss", None)
-                    else:
-                        q_loss_extra = float(out_extra) if out_extra is not None else None
-                    if q_loss_extra is not None and math.isfinite(q_loss_extra):
-                        recent_q_loss.append(q_loss_extra)
-                    self.rl_updates += 1
-
-            # SL reservoir: empirical one-hot from behavior (BR or pi)
+            # SL reservoir: empirical one-hot from behavior (prefer BR-only), but skip exploration/forced/illegal
             one_hot = torch.zeros(self.act_dim, dtype=torch.float32)
             one_hot[action] = 1.0
-            self.sl_buf.add(obs.detach().cpu(), mask.detach().cpu(), one_hot)
+
+            # Flags set by self.act(...) in this step
+            took_forced_check   = self._took_forced_check
+            took_epsilon_action = self._took_epsilon_action
+
+            # Skip if forced check, epsilon action, or illegal
+            skip_sl_log = took_forced_check or took_epsilon_action or (illegal == 1)
+
+            # Safe guard in case stats wasn't initialized somewhere else
+            if not hasattr(self, "stats"):
+                self.stats = {}
+            self.stats.setdefault("sl_skipped_exploration", 0)
+
+            if skip_sl_log:
+                self.stats["sl_skipped_exploration"] += 1
+            else:
+                # NFSP: SL should clone average-policy (not BR) behavior
+                if not use_br:
+                    self.sl_buf.add(obs.detach().cpu(), mask.detach().cpu(), one_hot)
+
 
             if history_sample_path and history_sample_next is not None and info_dict:
                 history_payload = info_dict.get("history")
