@@ -207,10 +207,19 @@ class JsonControlPlane:
             setter_name = entry["setter"]
             setter = getattr(agent, setter_name)
             try:
-                if key == "max_cards":
-                    result = setter(value, env=env)
+                if value is None:
+                    if key == "max_cards":
+                        result = setter(None, env=env, pin=False)
+                    else:
+                        try:
+                            result = setter(None, pin=False)
+                        except TypeError:
+                            result = setter(None)
                 else:
-                    result = setter(value)
+                    if key == "max_cards":
+                        result = setter(value, env=env)
+                    else:
+                        result = setter(value)
             except Exception as exc:
                 if self.verbose:
                     print(f"[control] failed to apply {key}: {exc}")
@@ -226,10 +235,14 @@ class JsonControlPlane:
                     else:
                         changes.append(f"{key}: unpinned")
             else:
-                if before == after:
-                    changes.append(f"{key}: pinned at {after}")
+                if value is None:
+                    if before is not None:
+                        changes.append(f"{key}: unpinned (was {before})")
                 else:
-                    changes.append(f"{key}: {before} -> {after}")
+                    if before == after:
+                        changes.append(f"{key}: pinned at {after}")
+                    else:
+                        changes.append(f"{key}: {before} -> {after}")
         if changes:
             if not hasattr(agent, "_control_plane_events"):
                 agent._control_plane_events = []
