@@ -1141,7 +1141,7 @@ def main():
             f"[history] samples -> {history_sample_path} (every {args.history_sample_every} steps)"
         )
 
-    EVAL_SAVED_GAMES = 10
+    EVAL_SAVED_GAMES = 2
     print(
         f"[games] eval samples -> {eval_game_save_dir} ({EVAL_SAVED_GAMES} per eval run)"
     )
