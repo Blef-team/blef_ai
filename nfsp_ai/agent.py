@@ -208,8 +208,10 @@ class ReplayBuffer:
         self.nobs = torch.zeros((capacity, obs_dim), dtype=torch.float32, device=device)
         self.nmsk = torch.zeros((capacity, act_dim), dtype=torch.float32, device=device)
         self.done = torch.zeros((capacity,), dtype=torch.float32, device=device)
+        # NEW: store per-sample gamma_power (γ^k for n-step)
+        self.gpow  = torch.ones((capacity,), dtype=torch.float32, device=device)
 
-    def add(self, obs, mask, act, rew, nobs, nmask, done):
+    def add(self, obs, mask, act, rew, nobs, nmask, done, gamma_power):
         self.obs[self.ptr]  = obs
         self.mask[self.ptr] = mask
         self.act[self.ptr]  = act
@@ -219,11 +221,12 @@ class ReplayBuffer:
         self.done[self.ptr] = float(done)
         self.ptr = (self.ptr + 1) % self.capacity
         self.size = min(self.size + 1, self.capacity)
+        self.gpow = gamma_power
 
     def sample(self, batch_size: int):
         idx = torch.randint(0, self.size, (batch_size,), device=self.device)
         return (self.obs[idx], self.mask[idx], self.act[idx], self.rew[idx],
-                self.nobs[idx], self.nmsk[idx], self.done[idx])
+                self.nobs[idx], self.nmsk[idx], self.done[idx], self.gpow)
 
     def state_dict(self) -> dict:
         filled = int(self.size)
@@ -458,36 +461,38 @@ class NFSPAgent:
         if self.rl_buf.size < self.cfg.batch_rl:
             return
 
-        obs, mask, act, rew, nobs, nmask, done = self.rl_buf.sample(self.cfg.batch_rl)
-        # dtypes/shapes
-        act  = act.view(-1, 1).long()
-        done = done.float().view(-1)
-        rew  = rew.float().view(-1)
+        # NOTE: now expecting gamma_power from buffer
+        (
+            obs, mask, act, rew, nobs, nmask, done, gamma_power
+        ) = self.rl_buf.sample(self.cfg.batch_rl)
 
-        # Q(s,a)
-        q = self.q(obs)                                   # [B, A]
-        q_sa = q.gather(1, act).squeeze(1)                # [B]
+        act         = act.view(-1, 1).long()
+        done        = done.float().view(-1)
+        rew         = rew.float().view(-1)
+        gamma_power = gamma_power.float().view(-1)
+
+        # Q(s,a) (unchanged)
+        q = self.q(obs)
+        q_sa = q.gather(1, act).squeeze(1)
 
         with torch.no_grad():
-            q_next_main = self.q(nobs)                    # [B, A]
-            q_next_tgt  = self.q_tgt(nobs)                # [B, A]
+            q_next_main = self.q(nobs)
+            q_next_tgt  = self.q_tgt(nobs)
 
             if self.cfg.use_double_dqn:
-                # legal argmax using the online net
-                next_a = masked_random_argmax(q_next_main, nmask).view(-1, 1)  # [B,1]
-                q_next = q_next_tgt.gather(1, next_a).squeeze(1)               # [B]
+                next_a = masked_random_argmax(q_next_main, nmask).view(-1, 1)
+                q_next = q_next_tgt.gather(1, next_a).squeeze(1)
             else:
-                # mask illegal actions; guard all-masked rows
                 neg_inf = torch.finfo(q_next_tgt.dtype).min
                 q_masked = q_next_tgt.masked_fill(nmask == 0, neg_inf)
-                q_next = q_masked.max(dim=1).values                              # [B]
-                # if a row was all masked, set q_next=0 for that row
+                q_next = q_masked.max(dim=1).values
                 all_masked = (nmask.sum(dim=1) == 0)
                 if all_masked.any():
                     q_next = q_next.clone()
                     q_next[all_masked] = 0.0
 
-            target = rew + (1.0 - done) * self.cfg.gamma * q_next               # [B]
+            # *** n-step fix: per-sample gamma_power instead of fixed gamma ***
+            target = rew + (1.0 - done) * gamma_power * q_next
 
         loss = F.smooth_l1_loss(q_sa, target)  # Huber
 
@@ -937,6 +942,8 @@ class NFSPAgent:
     def _store_transition(self, obs, mask, action_idx: int, reward: float, nobs, nmask, done: bool, is_br: bool):
         action_tensor = torch.tensor(action_idx, dtype=torch.long, device=self.device)
         reward_val = float(reward)
+
+        # --- 1-step fast path: add gamma_power = gamma**1 ---
         if self._active_n_step <= 1:
             if is_br:
                 self.rl_buf.add(
@@ -947,9 +954,11 @@ class NFSPAgent:
                     nobs.clone(),
                     nmask.clone(),
                     done,
+                    torch.tensor(float(self.cfg.gamma), dtype=torch.float32, device=self.device),  # gamma_power = gamma**1
                 )
             return
 
+        # --- n-step path: queue the raw transition; _flush_nstep will compute R and gamma_power ---
         entry = {
             "obs": obs.clone(),
             "mask": mask.clone(),
@@ -970,6 +979,7 @@ class NFSPAgent:
         if n <= 1:
             self._nstep_queue.clear()
             return
+
         while self._nstep_queue and (
             force or len(self._nstep_queue) >= n or self._nstep_queue[0]["done"]
         ):
@@ -990,8 +1000,13 @@ class NFSPAgent:
                 done_flag = item["done"]
                 if item["done"]:
                     break
+
             first = self._nstep_queue.popleft()
+
             if first.get("is_br", False):
+                # *** n-step fix: per-sample gamma_power ***
+                gamma_power = float(self.cfg.gamma) ** steps_used
+
                 weight = 1.0 + max(0.0, self._nstep_weight_scale) * max(0, n - steps_used)
                 if done_flag:
                     weight += max(0.0, self._nstep_terminal_boost) * max(0, n - steps_used + 1)
@@ -1006,6 +1021,7 @@ class NFSPAgent:
                         next_obs,
                         next_mask,
                         done_flag,
+                        torch.tensor(gamma_power, dtype=torch.float32, device=self.device),  # <—
                     )
                 if residual > 0.0 and random.random() < residual:
                     self.rl_buf.add(
@@ -1016,7 +1032,9 @@ class NFSPAgent:
                         next_obs,
                         next_mask,
                         done_flag,
+                        torch.tensor(gamma_power, dtype=torch.float32, device=self.device),  # <—
                     )
+
             if done_flag:
                 force = True
 
