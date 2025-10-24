@@ -1054,7 +1054,7 @@ class NFSPAgent:
         eval_save_dir: Optional[str] = None,
         eval_save_games: int = 0,
         apply_phase_schedules_every: int = 1_000,
-        save_checkpoint_every: int = 2000,
+        save_checkpoint_every: int = 50_000,
         control_plane: Optional["JsonControlPlane"] = None,
         history_sample_path: Optional[str] = "./logs/action_history_samples.jsonl",
         history_sample_every: int = 100_000,
@@ -1262,7 +1262,7 @@ class NFSPAgent:
 
             self.total_env_steps += 1
             # per-million checkpointing
-            if save_path and self.total_env_steps % save_checkpoint_every == 100_000:
+            if save_path and self.total_env_steps % save_checkpoint_every == 0:
                 current_million = self.total_env_steps // 1_000_000
                 if current_million > self._last_checkpoint_million:
                     base, ext = os.path.splitext(save_path)
