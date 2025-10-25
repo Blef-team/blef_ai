@@ -135,6 +135,14 @@ def masked_softmax_logits(logits: torch.Tensor, mask: torch.Tensor) -> torch.Ten
     """Set invalid action logits to -inf so softmax/argmax ignore them."""
     neg_inf = torch.finfo(logits.dtype).min
     return logits.masked_fill(mask == 0, neg_inf)
+    neg_inf = float("-inf")
+    # Support float or bool masks robustly
+    if mask.dtype != torch.bool:
+        illegal = (mask <= 0)
+    else:
+        illegal = ~mask
+
+    return logits.masked_fill(illegal, neg_inf)
 
 def masked_random_argmax(q: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     """
@@ -157,6 +165,13 @@ def masked_random_argmax(q: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
             j = torch.randint(0, idxs.numel(), (1,)).item()
             actions.append(int(idxs[j].item()))
     return torch.tensor(actions, dtype=torch.long, device=q.device)
+
+def masked_log_softmax(logits: torch.Tensor, mask: torch.Tensor, dim: int = -1) -> torch.Tensor:
+    legal = mask if mask.dtype == torch.bool else (mask > 0)
+    has_legal = legal.any(dim=dim, keepdim=True)
+    masked = logits.masked_fill(~legal, float("-inf"))
+    safe = torch.where(has_legal, masked, torch.zeros_like(masked))
+    return torch.log_softmax(safe, dim=dim)
 
 def epsilon_valid_sample(mask: torch.Tensor) -> int:
     """Uniform sample among valid actions given [1, A] mask."""
@@ -515,20 +530,60 @@ class NFSPAgent:
 
         return {"q_loss": float(loss.detach().item())}
 
-
-    # -------- SL (policy imitation of empirical average) --------
+# -------- SL (policy imitation of empirical average) --------
     def _train_sl_step(self):
         try:
             obs, mask, one_hot = self.sl_buf.sample(self.cfg.batch_sl)
         except RuntimeError:
             return
-        logits = self.pi(obs)                    # [B, A]
-        mlog = masked_softmax_logits(logits, mask)
-        log_probs = mlog - torch.logsumexp(mlog, dim=1, keepdim=True)
-        loss = -(one_hot * log_probs).sum(dim=1).mean()  # CE on empirical action
+
+        logits = self.pi(obs)  # [B, A]
+
+        # Build legality (tolerate float masks)
+        legal = mask if mask.dtype == torch.bool else (mask > 0)          # [B, A]
+        has_legal = legal.any(dim=-1)                                     # [B]
+
+        # Filter: logits must be finite on legal actions
+        legal_logits_finite = (torch.isfinite(logits) | (~legal)).all(dim=-1)  # [B]
+
+        # Filter: target must have zero mass on illegal actions AND some mass on legal actions
+        illegal_mass = (one_hot * (~legal).to(one_hot.dtype)).sum(dim=1)       # [B]
+        no_illegal_mass = illegal_mass == 0
+        legal_mass = (one_hot * legal.to(one_hot.dtype)).sum(dim=1)            # [B]
+        has_legal_mass = legal_mass > 0
+
+        valid = has_legal & legal_logits_finite & no_illegal_mass & has_legal_mass
+        if not valid.any():
+            return  # skip step cleanly
+
+        # Slice to valid rows (no in-place on graph tensors)
+        logits  = logits[valid]
+        legal   = legal[valid]
+        one_hot = one_hot[valid]
+
+        # Mask illegals to a large negative FINITE value (safer than -inf for grads)
+        NEG_LARGE = -1e9
+        masked_logits = logits.masked_fill(~legal, NEG_LARGE)  # out-of-place
+
+        # Stable log-softmax over legal actions
+        denom = torch.logsumexp(masked_logits, dim=1, keepdim=True)       # [B,1]
+        log_probs = masked_logits - denom                                  # [B,A]
+
+        # Renormalize the empirical target over LEGAL actions only
+        tgt = one_hot * legal.to(one_hot.dtype)                            # zero-out illegals
+        tgt_sum = tgt.sum(dim=1, keepdim=True)                             # > 0 by construction
+        tgt = tgt / tgt_sum
+
+        # Cross-entropy
+        loss = -(tgt * log_probs).sum(dim=1).mean()
+
+        # Final finite check (no in-place sanitization)
+        if not torch.isfinite(loss):
+            return  # skip this step rather than poisoning grads
+
         self.opt_pi.zero_grad(set_to_none=True)
         loss.backward()
-        nn.utils.clip_grad_norm_(self.pi.parameters(), self.cfg.max_grad_norm)
+        torch.nn.utils.clip_grad_norm_(self.pi.parameters(), self.cfg.max_grad_norm)
         self.opt_pi.step()
 
         return {"sl_loss": float(loss.detach().item())}

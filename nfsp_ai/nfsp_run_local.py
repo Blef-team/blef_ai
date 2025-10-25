@@ -362,28 +362,40 @@ def _load_history_embedding(
     )
 
 
-def _legal_action_mask(game: dict, spec: DeckSpec) -> torch.Tensor:
-    """Compute legality exactly as enforced by manager.play()."""
+def _legal_action_mask(game: dict, spec: DeckSpec, pub_prior: list) -> torch.Tensor:
+    """Compute legality exactly as enforced by manager.play(),
+    then *augment* with public priors by hard-zeroing actions whose public probability is 0.
+    - Bets are action ids [0, check_id)
+    - CHECK is action id == check_id
+    """
     mask = np.zeros((spec.num_actions,), dtype=np.float32)
-    check = spec.check_action_id
-
+    check = int(spec.check_action_id)
     hist = game.get("history", []) or []
+    # Base legality from history:
     if not hist:
+        # Start of round: only bets are legal (CHECK not allowed)
         mask[:check] = 1.0
-        return torch.from_numpy(mask)
-
-    try:
-        last = int(hist[-1].get("action_id", -1))
-    except Exception:
-        last = -1
-
-    if last == check:
-        return torch.from_numpy(mask)
-
-    next_min = min(check, last + 1) if last >= 0 else 0
-    if next_min < check:
-        mask[next_min:check] = 1.0
-    mask[check] = 1.0
+    else:
+        try:
+            last = int((hist[-1] or {}).get("action_id", -1))
+        except Exception:
+            last = -1
+        # If last action was CHECK, the round is resolved; no actions legal
+        if last == check:
+            return torch.from_numpy(mask)
+        next_min = min(check, last + 1) if last >= 0 else 0
+        if next_min < check:
+            mask[next_min:check] = 1.0
+        # CHECK legal once at least one bet has happened
+        mask[check] = 1.0
+    # ---- overlay public priors (hard mask zeros with tolerance) ----
+    # pub_prior covers only bet actions; append a slot for CHECK
+    pri = np.asarray(list(pub_prior) + [1.0], dtype=np.float32)
+    if pri.shape[0] != spec.num_actions:
+        raise ValueError(f"pub_prior length {pri.shape[0]} != num_actions {spec.num_actions}")
+    # Anything <= eps is treated as 0-prob (publicly impossible)
+    PUBLIC_PRIOR_EPS = 1e-9
+    mask *= (pri > PUBLIC_PRIOR_EPS).astype(np.float32)
     return torch.from_numpy(mask)
 
 
@@ -555,7 +567,7 @@ def vectorize_obs(
     spec: DeckSpec,
     card_embedding: Optional["CardEmbeddingRuntime"] = None,
     history_embedding: Optional["HistoryEmbeddingRuntime"] = None,
-) -> torch.Tensor:
+) -> Tuple[float, List[float]]:
     """
     Updated observation for current player (nick) with minimal allocations.
     """
@@ -694,7 +706,7 @@ def vectorize_obs(
     if not ((0.0 <= obs[pub_slice]).all() and (obs[pub_slice] <= 1.0).all()):
         raise ValueError("get_generic_bet_probabilities() returned values outside [0, 1]")
 
-    return torch.from_numpy(obs)
+    return torch.from_numpy(obs).float(), pub_prior
 
 # ---------- Environment Adapter ----------
 
@@ -782,14 +794,14 @@ class MyEnv:
                 history_embedding=self.history_embedding,
             )
             cp = self.game.get("cp_nickname")
-            obs = vectorize_obs(
+            obs, pub_prior = vectorize_obs(
                 self.game,
                 cp,
                 self.deck_spec,
                 card_embedding=self.card_embedding,
                 history_embedding=self.history_embedding,
-            ).float()
-            mask = _legal_action_mask(self.game, self.deck_spec).float()
+            )
+            mask = _legal_action_mask(self.game, self.deck_spec, pub_prior).float()
             pid = self._pid()
             self._last_obs, self._last_mask = obs, mask
             return obs, mask, pid
@@ -825,14 +837,14 @@ class MyEnv:
 
         # Build initial observation/mask for the new match
         cp = self.game["cp_nickname"]
-        obs = vectorize_obs(
+        obs, pub_prior = vectorize_obs(
             self.game,
             cp,
             self.deck_spec,
             card_embedding=self.card_embedding,
             history_embedding=self.history_embedding,
-        ).float()
-        mask = _legal_action_mask(self.game, self.deck_spec).float()
+        )
+        mask = _legal_action_mask(self.game, self.deck_spec, pub_prior).float()
         pid = self._pid()
         self._last_obs, self._last_mask = obs, mask
         return obs, mask, pid
@@ -892,14 +904,14 @@ class MyEnv:
             history_embedding=self.history_embedding,
         )
         cp = self.game.get("cp_nickname")
-        obs = vectorize_obs(
+        obs, pub_prior = vectorize_obs(
             self.game,
             cp,
             self.deck_spec,
             card_embedding=self.card_embedding,
             history_embedding=self.history_embedding,
-        ).float()
-        mask = _legal_action_mask(self.game, self.deck_spec).float()
+        )
+        mask = _legal_action_mask(self.game, self.deck_spec, pub_prior).float()
         pid = self._pid()
 
         # Determine terminal and reward
