@@ -44,6 +44,7 @@ def _masked_entropy(logits: torch.Tensor, mask: torch.Tensor) -> float:
 def _evaluate_policy(
     agent,
     env_source,
+    max_cards: int = 11,
     episodes: int = 200,
     *,
     save_dir: Optional[str] = None,
@@ -54,6 +55,7 @@ def _evaluate_policy(
 
     for _ in range(episodes):
         env = env_source() if managed_env else env_source
+        env.max_cards = max_cards
 
         if save_dir and save_games > 0 and hasattr(env, "game_save_dir"):
             env.game_save_dir = save_dir
@@ -1473,6 +1475,7 @@ class NFSPAgent:
                 eval_stats = _evaluate_policy(
                     self,
                     eval_source,
+                    max_cards=env.max_cards,
                     episodes=eval_episodes,
                     save_dir=eval_save_dir,
                     save_games=eval_save_games,
