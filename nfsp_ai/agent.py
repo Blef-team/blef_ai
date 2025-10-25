@@ -845,8 +845,14 @@ class NFSPAgent:
         frac = (step - start) / max(1, end - start)
         return v_start + frac * (v_end - v_start)
 
-    def _apply_phase_schedules(self, step: int):
+    def _apply_phase_schedules(self, step: int, env: Optional["TurnEnvAdapter"] = None):
         self._ensure_schedule_state()
+
+        # ---------------------------
+        # Looping schedules, if reset point set
+        # ---------------------------
+        if env and env.reset_schedules_at > env.reset_schedules_to and self.total_env_steps >= env.reset_schedules_at:
+            self.total_env_steps = env.reset_schedules_to
 
         # ---------------------------
         # Helper: set n_step safely
@@ -1109,6 +1115,8 @@ class NFSPAgent:
         eval_save_dir: Optional[str] = None,
         eval_save_games: int = 0,
         apply_phase_schedules_every: int = 1_000,
+        loop_schedules_to: int = 100_000,
+        reset_schedules_at: int = 0,
         save_checkpoint_every: int = 50_000,
         control_plane: Optional["JsonControlPlane"] = None,
         history_sample_path: Optional[str] = "./logs/action_history_samples.jsonl",
@@ -1191,7 +1199,7 @@ class NFSPAgent:
         # main loop
         while self.total_env_steps < total_steps:
             if self.total_env_steps % apply_phase_schedules_every == 0:
-                self._apply_phase_schedules(self.total_env_steps)
+                self._apply_phase_schedules(self.total_env_steps, env=env)
             eps = self._epsilon()
             if control_plane is not None:
                 self._ensure_override_state()
@@ -1315,7 +1323,10 @@ class NFSPAgent:
             ep_reward += float(reward)
             ep_len    += 1
 
+            # Increment step counter
             self.total_env_steps += 1
+
+
             # per-million checkpointing
             if save_path and self.total_env_steps % save_checkpoint_every == 0:
                 current_million = self.total_env_steps // 1_000_000

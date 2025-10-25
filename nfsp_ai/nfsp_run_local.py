@@ -734,6 +734,8 @@ class MyEnv:
         save_sample_rate: int = 5000,
         card_embedding: Optional["CardEmbeddingRuntime"] = None,
         history_embedding: Optional["HistoryEmbeddingRuntime"] = None,
+        reset_schedules_to: int = 100_000,
+        reset_schedules_at: int = 0
     ):
         if n_agents < 2 or n_agents > 8:
             raise ValueError("n_agents must be in [2, 8]")
@@ -758,6 +760,9 @@ class MyEnv:
         self.illegal_penalty = float(illegal_penalty)
         self.game_save_dir = game_save_dir
         self.save_sample_rate = max(1, int(save_sample_rate))
+
+        self.reset_schedules_to = reset_schedules_to
+        self.reset_schedules_at = reset_schedules_at
 
         self.game: Dict = {}
         self._last_obs = None
@@ -1061,6 +1066,20 @@ def main():
         help="Enable verbose logging from the game manager.",
     )
     parser.add_argument(
+        "--reset-schedules-to",
+        dest="reset_schedules_to",
+        type=int,
+        default=100_000,
+        help="Number of environment steps to reset schedules to (default: 100,000).",
+    )
+    parser.add_argument(
+        "--reset-schedules-at",
+        dest="reset_schedules_at",
+        type=int,
+        default=0,
+        help="Number of environment steps to reset schedules at (default: 0).",
+    )
+    parser.add_argument(
         "--control-plane",
         dest="control_plane",
         type=str,
@@ -1225,6 +1244,8 @@ def main():
         save_sample_rate=args.save_game_every,
         card_embedding=card_embedding_bundle,
         history_embedding=history_embedding_bundle,
+        reset_schedules_to=args.reset_schedules_to,
+        reset_schedules_at=args.reset_schedules_at
     )
     obs0, mask0, _ = env.reset()
 
@@ -1288,6 +1309,7 @@ def main():
             save_sample_rate=1,
             card_embedding=card_embedding_bundle,
             history_embedding=history_embedding_bundle,
+
         )
     agent.train_from_selfplay(
         env,
