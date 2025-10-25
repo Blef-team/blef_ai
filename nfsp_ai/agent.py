@@ -916,8 +916,8 @@ class NFSPAgent:
 
             # Forced check curriculum (SMOOTH; NEVER cliff to 0)
             if not self._is_pinned("check_prob"):
-                # 0 → 5M: 0.50 → 0.05
-                self._check_explore_prob = self._interp(step, 0, 5_000_000, 0.50, 0.05)
+                # 0 → 5M: 0.25 → 0.05
+                self._check_explore_prob = self._interp(step, 0, 5_000_000, 0.25, 0.05)
             return
 
         # ---------------------------
