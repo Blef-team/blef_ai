@@ -405,7 +405,7 @@ class NFSPConfig:
     max_grad_norm: float = 10.0        # For nn.utils.clip_grad_norm_
     hidden: int = 256
     use_double_dqn: bool = True
-    n_step: int = 1
+    n_step: int = 6
     burst_rl_updates_on_reward: int = 2
     burst_reward_threshold: float = 0.5
 
@@ -853,7 +853,7 @@ class NFSPAgent:
         # Helper: set n_step safely
         # ---------------------------
         def set_nstep(n):
-            n = int(max(1, min(5, n)))  # hard cap at 5 given round length
+            n = int(max(1, min(6, n)))  # hard cap at 6 given round length
             if not self._is_pinned("n_step") and n != self._active_n_step:
                 self._flush_nstep(force=True)
                 self._active_n_step = n
@@ -899,9 +899,6 @@ class NFSPAgent:
                 self.cfg.batch_rl = 64
             if step >= 10_000_000 and not self._is_pinned("batch_rl"):
                 self.cfg.batch_rl = 256
-
-            # n-step: align to round length (fixed)
-            set_nstep(3)
 
             # SL optimizer / cadence
             if not self._is_pinned("lr_pi"):
@@ -971,9 +968,6 @@ class NFSPAgent:
                 self.cfg.train_rl_every = 48
             else:
                 self.cfg.train_rl_every = 64
-
-        # n-step: keep fixed (don’t increase with step)
-        set_nstep(3)
 
         # SL: a bit higher LR early, taper later
         if not self._is_pinned("lr_pi"):

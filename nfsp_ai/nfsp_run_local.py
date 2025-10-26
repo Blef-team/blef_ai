@@ -1266,7 +1266,7 @@ def main():
             use_double_dqn=True,
             rl_capacity=200_000,
             sl_capacity=200_000,
-            n_step=5,
+            n_step=6,
             burst_rl_updates_on_reward=4,
             burst_reward_threshold=0.5,
             hidden=256
