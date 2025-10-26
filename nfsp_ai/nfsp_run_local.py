@@ -946,13 +946,12 @@ class MyEnv:
                 reward = 0.0
             elif loser is None:
                 reward = 0.0
-            elif loser == ref:
+            elif loser == actor_nick:
                 reward = -1.0
             else:
                 reward = 1.0
 
             round_result = {
-                "actor": actor_nick,
                 "loser": loser,
                 "ref": ref,
                 "before_counts": before_counts,
@@ -990,6 +989,7 @@ class MyEnv:
             "next_pid": pid,
             "illegal": 0,
             "action": action_int,
+            "actor": actor_nick,
             "history": history_for_log,
             "round_result": round_result,
             "reward": float(reward),
@@ -999,8 +999,6 @@ class MyEnv:
             "done_reason": done_reason,
         }
         return obs, mask, float(reward), bool(done), info
-
-
 
 def main():
     parser = argparse.ArgumentParser(description="Run NFSP Blef self-play locally.")
@@ -1264,13 +1262,14 @@ def main():
             hard_target_interval=0,
             warmup_steps=5_000,
             max_grad_norm=10.0,
-            gamma=0.995,
+            gamma=0.666,
             use_double_dqn=True,
             rl_capacity=200_000,
             sl_capacity=200_000,
             n_step=5,
             burst_rl_updates_on_reward=4,
-            burst_reward_threshold=0.5
+            burst_reward_threshold=0.5,
+            hidden=256
         ),
     )
 

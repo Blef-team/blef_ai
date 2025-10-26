@@ -65,7 +65,7 @@ def _evaluate_policy(
                 env._saved_games = 0
 
         obs, mask, pid = env.reset()
-        done, ep_r, steps = False, 0.0, 0
+        done, steps = False, 0
 
         while not done:
             cp = env.game["cp_nickname"]
@@ -79,13 +79,19 @@ def _evaluate_policy(
                     legal = mask.nonzero(as_tuple=False).view(-1).tolist()
                     a = random.choice(legal) if legal else 0
 
-            obs, mask, r, done, _ = env.step(int(a))
-            wins += (r > 0)
-            losses += (r < 0)
-            ep_r += r
+            obs, mask, r, done, info = env.step(int(a))
+
+            loser = None
+            if info and info.get("round_result", {}) and info.get("round_result", {}).get("loser"): #Please don't "simplify", you'll break it
+                loser = info.get("round_result", {}).get("loser")
+                if loser == env._ref_nick:
+                    losses += 1
+                    total_r += -1
+                else:
+                    wins += 1
+                    total_r += 1
             steps += 1
 
-        total_r += ep_r
         total_len += steps
 
         if managed_env:
@@ -167,13 +173,6 @@ def masked_random_argmax(q: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
             j = torch.randint(0, idxs.numel(), (1,)).item()
             actions.append(int(idxs[j].item()))
     return torch.tensor(actions, dtype=torch.long, device=q.device)
-
-def masked_log_softmax(logits: torch.Tensor, mask: torch.Tensor, dim: int = -1) -> torch.Tensor:
-    legal = mask if mask.dtype == torch.bool else (mask > 0)
-    has_legal = legal.any(dim=dim, keepdim=True)
-    masked = logits.masked_fill(~legal, float("-inf"))
-    safe = torch.where(has_legal, masked, torch.zeros_like(masked))
-    return torch.log_softmax(safe, dim=dim)
 
 def epsilon_valid_sample(mask: torch.Tensor) -> int:
     """Uniform sample among valid actions given [1, A] mask."""
@@ -387,7 +386,7 @@ class TurnEnvAdapter:
 # =========================
 @dataclass
 class NFSPConfig:
-    gamma: float = 0.995
+    gamma: float = 0.666
     lr_q: float = 5e-5                 # q net learning rate
     lr_pi: float = 3e-4                # pi net learning rate
     batch_rl: int = 1024
@@ -411,7 +410,7 @@ class NFSPConfig:
     burst_reward_threshold: float = 0.5
 
 class NFSPAgent:
-    def __init__(self, obs_dim: int, act_dim: int, device: Optional[torch.device] = None, cfg: NFSPConfig = NFSPConfig()):
+    def __init__(self, obs_dim: int, act_dim: int, device: Optional[torch.device] = None, cfg: NFSPConfig = NFSPConfig(), debug=False):
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.obs_dim, self.act_dim, self.cfg = obs_dim, act_dim, cfg
 
@@ -437,6 +436,8 @@ class NFSPAgent:
 
         self._took_epsilon_action = False
         self._took_forced_check = False
+
+        self.debug = debug
 
 
     # -------- Acting (returns sampled action only) --------
@@ -473,70 +474,62 @@ class NFSPAgent:
             return int(dist.sample().item())
 
 
-    # -------- RL (Double DQN with masking & tie-breaks) --------
+    # -------- RL --------
     def _train_rl_step(self):
+        """
+        Optimized RL update for round-based (fully terminal) environments.
+
+        - Each transition in rl_buf corresponds to a complete round outcome.
+        - Rewards already include all temporal shaping (from _flush_nstep).
+        - There are no non-terminal steps to bootstrap from (done=True for all).
+        """
+
+        # --- 1. Skip if buffer too small ---
         if self.rl_buf.size < self.cfg.batch_rl:
             return
 
-        # NOTE: now expecting gamma_power from buffer
-        (
-            obs, mask, act, rew, nobs, nmask, done, gamma_power
-        ) = self.rl_buf.sample(self.cfg.batch_rl)
+        # --- 2. Sample batch ---
+        obs, mask, act, rew, _, _, _, _ = self.rl_buf.sample(self.cfg.batch_rl)
 
-        act         = act.view(-1, 1).long()
-        done        = done.float().view(-1)
-        rew         = rew.float().view(-1)
-        gamma_power = gamma_power.float().view(-1)
+        act = act.view(-1, 1).long()
+        rew = rew.float().view(-1)
 
-        # Q(s,a) (unchanged)
+        # --- 3. Compute predicted Q(s,a) ---
         q = self.q(obs)
         q_sa = q.gather(1, act).squeeze(1)
 
-        with torch.no_grad():
-            q_next_main = self.q(nobs)
-            q_next_tgt  = self.q_tgt(nobs)
+        # --- 4. Terminal-only target = reward (no bootstrap) ---
+        target = rew
 
-            if self.cfg.use_double_dqn:
-                next_a = masked_random_argmax(q_next_main, nmask).view(-1, 1)
-                q_next = q_next_tgt.gather(1, next_a).squeeze(1)
-            else:
-                neg_inf = torch.finfo(q_next_tgt.dtype).min
-                q_masked = q_next_tgt.masked_fill(nmask == 0, neg_inf)
-                q_next = q_masked.max(dim=1).values
-                all_masked = (nmask.sum(dim=1) == 0)
-                if all_masked.any():
-                    q_next = q_next.clone()
-                    q_next[all_masked] = 0.0
-
-            # *** n-step fix: per-sample gamma_power instead of fixed gamma ***
-            target = rew + (1.0 - done) * gamma_power * q_next
-
-        loss = F.smooth_l1_loss(q_sa, target)  # Huber
+        # --- 5. Compute Huber loss and apply update ---
+        loss = F.smooth_l1_loss(q_sa, target)
 
         self.opt_q.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(self.q.parameters(), self.cfg.max_grad_norm)
         self.opt_q.step()
 
-        # Target updates: prefer RL-update-based cadence
+        # --- 6. Update target network ---
         self.rl_updates = getattr(self, "rl_updates", 0) + 1
         if self.cfg.hard_target_interval and (self.rl_updates % self.cfg.hard_target_interval == 0):
             self.q_tgt.load_state_dict(self.q.state_dict())
         else:
-            # Polyak / EMA
             tau = self.cfg.target_tau
             if tau and tau > 0:
                 with torch.no_grad():
                     for p, pt in zip(self.q.parameters(), self.q_tgt.parameters()):
                         pt.data.mul_(1 - tau).add_(tau * p.data)
 
+        # --- 7. Return loss metric ---
         return {"q_loss": float(loss.detach().item())}
 
-# -------- SL (policy imitation of empirical average) --------
+
+    # -------- SL (policy imitation of empirical average) --------
     def _train_sl_step(self):
         try:
             obs, mask, one_hot = self.sl_buf.sample(self.cfg.batch_sl)
         except RuntimeError:
+            print(RuntimeError in _train_sl_step)
             return
 
         logits = self.pi(obs)  # [B, A]
@@ -1002,13 +995,45 @@ class NFSPAgent:
             self.cfg.batch_sl = max(256, self.cfg.batch_sl)
 
 
-    def _store_transition(self, obs, mask, action_idx: int, reward: float, nobs, nmask, done: bool, is_br: bool):
+    def _store_transition(
+        self,
+        obs,
+        mask,
+        action_idx: int,
+        reward: float,
+        nobs,
+        nmask,
+        done: bool,
+        is_br: bool,
+        *,
+        actor=None,          # <-- seat index or nickname of the actor for this step
+        loser=None           # <-- loser id ONLY on terminal step (None otherwise)
+    ):
+        if not hasattr(self, "_nstep_queue"):
+            raise ValueError("_nstep_queue not in self!")
+            self._nstep_queue = collections.deque()  # or list, your choice
+
+        if self.debug:
+            #DEBUG
+            print("_store_transition DEBUG:")
+            print(f"action_idx: {action_idx}")
+            print(f"reward: {reward}")
+            print(f"done: {done}")
+            print(f"actor: {actor}")
+            print(f"loser: {loser}")
+            print("_store_transition DEBUG ------ END")
+            #DEUBG
+
+
         action_tensor = torch.tensor(action_idx, dtype=torch.long, device=self.device)
         reward_val = float(reward)
 
-        # --- 1-step fast path: add gamma_power = gamma**1 ---
+        # --- 1-step fast path (TD(0)) ---
         if self._active_n_step <= 1:
             if is_br:
+                # For TD(0), write exactly what the env emitted.
+                # gamma_power: keep your current convention; often 1.0 if done else gamma.
+                gamma_power = 1.0 if done else float(self.cfg.gamma)
                 self.rl_buf.add(
                     obs.clone(),
                     mask.clone(),
@@ -1016,90 +1041,149 @@ class NFSPAgent:
                     torch.tensor(reward_val, dtype=torch.float32, device=self.device),
                     nobs.clone(),
                     nmask.clone(),
-                    done,
-                    torch.tensor(float(self.cfg.gamma), dtype=torch.float32, device=self.device),  # gamma_power = gamma**1
+                    bool(done),
+                    torch.tensor(gamma_power, dtype=torch.float32, device=self.device),
                 )
             return
 
-        # --- n-step path: queue the raw transition; _flush_nstep will compute R and gamma_power ---
+        # --- n-step path: queue raw transition; _flush_nstep will compute shaped R for non-terminals
         entry = {
-            "obs": obs.clone(),
-            "mask": mask.clone(),
+            "obs":   obs.clone(),
+            "mask":  mask.clone(),
             "action": action_tensor,
-            "reward": reward_val,
-            "nobs": nobs.clone(),
+            "reward": reward_val,            # terminal step already carries true env reward; earlier steps are 0
+            "nobs":  nobs.clone(),
             "nmask": nmask.clone(),
-            "done": bool(done),
+            "done":  bool(done),
             "is_br": bool(is_br),
+            "actor": actor,                  # REQUIRED for all steps (2–8 players)
+            "loser": loser if done else None # ONLY present on terminal step
         }
         self._nstep_queue.append(entry)
+
+        # Flush only when the last appended transition is terminal (or when forced elsewhere)
         self._flush_nstep(force=False)
 
+
     def _flush_nstep(self, force: bool = False):
-        if not hasattr(self, "_nstep_queue"):
+        """
+        Custom n-step flush for round-based multi-player games (2–8 players).
+
+        - Each round ends with exactly one terminal ('check') step that determines the loser.
+        - Non-terminal actions get shaped rewards propagated back from the terminal result:
+              if actor == loser:  R = -gamma**distance
+              else:               R = +gamma**distance
+          where distance = 0 for penultimate (γ⁰ = 1), 1 for one before (γ¹), etc.
+        - The terminal step itself already has its true environment reward and is written as-is.
+        """
+
+        # --- Safety and trivial cases ---
+        if not hasattr(self, "_nstep_queue") or not self._nstep_queue:
             return
+
         n = max(1, self._active_n_step)
         if n <= 1:
             self._nstep_queue.clear()
             return
 
-        while self._nstep_queue and (
-            force or len(self._nstep_queue) >= n or self._nstep_queue[0]["done"]
-        ):
-            R = 0.0
-            gamma = 1.0
-            done_flag = False
-            next_obs = self._nstep_queue[0]["nobs"]
-            next_mask = self._nstep_queue[0]["nmask"]
-            limit = min(n, len(self._nstep_queue))
-            steps_used = 0
-            for i in range(limit):
-                item = self._nstep_queue[i]
-                R += gamma * item["reward"]
-                gamma *= self.cfg.gamma
-                steps_used += 1
-                next_obs = item["nobs"]
-                next_mask = item["nmask"]
-                done_flag = item["done"]
-                if item["done"]:
-                    break
+        # Only flush when the round actually ended (last transition done=True)
+        if not force and not self._nstep_queue[-1]["done"]:
+            return
 
-            first = self._nstep_queue.popleft()
+        seq = list(self._nstep_queue)
+        self._nstep_queue.clear()
 
-            if first.get("is_br", False):
-                # *** n-step fix: per-sample gamma_power ***
-                gamma_power = float(self.cfg.gamma) ** steps_used
+        # Identify terminal and loser
+        term = seq[-1]
+        assert term["done"], "Expected last transition in round to be terminal."
+        loser_id = term.get("loser", None)
+        total_steps = len(seq)
+        gamma = float(self.cfg.gamma)
 
-                weight = 1.0 + max(0.0, self._nstep_weight_scale) * max(0, n - steps_used)
-                if done_flag:
-                    weight += max(0.0, self._nstep_terminal_boost) * max(0, n - steps_used + 1)
-                repeats = max(1, int(weight))
-                residual = max(0.0, weight - repeats)
-                for _ in range(repeats):
-                    self.rl_buf.add(
-                        first["obs"],
-                        first["mask"],
-                        first["action"],
-                        torch.tensor(R, dtype=torch.float32, device=self.device),
-                        next_obs,
-                        next_mask,
-                        done_flag,
-                        torch.tensor(gamma_power, dtype=torch.float32, device=self.device),  # <—
-                    )
-                if residual > 0.0 and random.random() < residual:
-                    self.rl_buf.add(
-                        first["obs"],
-                        first["mask"],
-                        first["action"],
-                        torch.tensor(R, dtype=torch.float32, device=self.device),
-                        next_obs,
-                        next_mask,
-                        done_flag,
-                        torch.tensor(gamma_power, dtype=torch.float32, device=self.device),  # <—
-                    )
+        if self.debug:
+            #DEBUG
+            print(f"term['action']: {term['action']}")
+            print(f"term['reward']: {term['reward']}")
+            #DEUBG
 
-            if done_flag:
-                force = True
+        # --- 1) Store the terminal step exactly as emitted by env ---
+        if term.get("is_br", False):
+            self.rl_buf.add(
+                term["obs"],
+                term["mask"],
+                term["action"],
+                torch.tensor(term["reward"], dtype=torch.float32, device=self.device),
+                term["nobs"],
+                term["nmask"],
+                True,
+                torch.tensor(1.0, dtype=torch.float32, device=self.device),
+            )
+
+        # --- 2) Back-propagate credit/blame to earlier steps ---
+        for i, step in enumerate(seq[:-1]):  # skip terminal
+            # distance to terminal: penultimate=0, earlier=1,2,...
+            distance = max(0, (total_steps - 2) - i)
+            g = gamma ** distance
+
+            actor_id = step.get("actor", None)
+            if actor_id is None or loser_id is None:
+                raise ValueError(f"actor and or loser info missing! actor: {str(actor)}, loser: {str(loser)}")
+                R = 0.0
+            else:
+                sign = -1.0 if actor_id == loser_id else +1.0
+                R = sign * g
+
+            if self.debug:
+                #DEBUG
+                print(f"step['action']: {step['action']}")
+                print(f"R: {R}")
+                print(f"step.get('is_br'): {step.get('is_br')}")
+                #DEUBG
+
+            if not step.get("is_br", False):
+                continue
+
+            done_flag = True  # every round ends at terminal
+            gamma_power = gamma ** max(1, distance + 1)  # not really used, but kept for consistency
+
+            # Keep your weighting / oversampling logic
+            weight = 1.0 + max(0.0, getattr(self, "_nstep_weight_scale", 0.0)) * max(0, n - (distance + 1))
+            weight += max(0.0, getattr(self, "_nstep_terminal_boost", 0.0)) * max(0, n - (distance + 1))
+            repeats = max(1, int(weight))
+            residual = max(0.0, weight - repeats)
+
+            if self.debug:
+                #DEBUG
+                print(f"step['action']: {step['action']}")
+                print(f"R: {R}")
+                #DEUBG
+
+            for _ in range(repeats):
+                self.rl_buf.add(
+                    step["obs"],
+                    step["mask"],
+                    step["action"],
+                    torch.tensor(R, dtype=torch.float32, device=self.device),
+                    term["nobs"],
+                    term["nmask"],
+                    done_flag,
+                    torch.tensor(gamma_power, dtype=torch.float32, device=self.device),
+                )
+            if residual > 0.0 and random.random() < residual:
+                self.rl_buf.add(
+                    step["obs"],
+                    step["mask"],
+                    step["action"],
+                    torch.tensor(R, dtype=torch.float32, device=self.device),
+                    term["nobs"],
+                    term["nmask"],
+                    done_flag,
+                    torch.tensor(gamma_power, dtype=torch.float32, device=self.device),
+                )
+
+        # --- 3) Cleanup ---
+        if force:
+            self._nstep_queue.clear()
 
     def train_from_selfplay(
         self,
@@ -1160,6 +1244,7 @@ class NFSPAgent:
 
         # rolling gameplay stats
         recent_rewards = deque(maxlen=5_000)
+        recent_winloss_results = deque(maxlen=5_000)
         recent_lens    = deque(maxlen=5_000)
         recent_illegal  = deque(maxlen=20_000)  # if env reports illegal flags in info
 
@@ -1245,6 +1330,7 @@ class NFSPAgent:
             action = self.act(obs, mask, use_br=use_br, epsilon=eps)
             nobs, nmask, reward, done, info = env.step(action)
             nobs, nmask = nobs.to(self.device), nmask.to(self.device)
+
             info_dict = info if isinstance(info, dict) else {}
             if info_dict:
                 illegal = int(info_dict.get("illegal", 0))
@@ -1252,17 +1338,21 @@ class NFSPAgent:
             else:
                 illegal = 0
 
-            # Store transition (all actions), but only best-response (use_br) produces replay entries
-            self._store_transition(obs, mask, action, reward, nobs, nmask, done, is_br=use_br)
+            # Extract actor every step; loser only on terminal
+            actor = info_dict.get("actor", None) if info_dict else None
+            loser = None
+            rr = info_dict.get("round_result")
+            if rr is not None:
+                loser = rr.get("loser", None)
 
-            # Ensure n-step buffer flushes at terminals (or if the queue head is terminal)
+            # Pass actor/loser so _flush_nstep can distribute rewards
+            self._store_transition(
+                obs, mask, action, reward, nobs, nmask, done, is_br=use_br,
+                actor=actor, loser=loser
+            )
+
+            # Ensure n-step buffer flushes at terminals (round end)
             if done and self._active_n_step > 1:
-                self._flush_nstep(force=True)
-            elif (
-                self._active_n_step > 1
-                and self._nstep_queue
-                and self._nstep_queue[0].get("done", False)
-            ):
                 self._flush_nstep(force=True)
 
             # SL reservoir: empirical one-hot from behavior (prefer BR-only), but skip exploration/forced/illegal
@@ -1328,7 +1418,6 @@ class NFSPAgent:
             # Increment step counter
             self.total_env_steps += 1
 
-
             # per-million checkpointing
             if save_path and self.total_env_steps % save_checkpoint_every == 0:
                 current_million = self.total_env_steps // 1_000_000
@@ -1377,7 +1466,10 @@ class NFSPAgent:
             # Episode handling
             if done:
                 self._flush_nstep(force=True)
-                recent_rewards.append(ep_reward)
+                if loser:
+                    recent_winloss_results.append(loser!=env._ref_nick)
+                if loser:
+                    recent_rewards.append(1 if loser!=env._ref_nick else -1)
                 recent_lens.append(ep_len)
                 ep_reward, ep_len = 0.0, 0
                 obs, mask, pid = env.reset()
@@ -1389,8 +1481,7 @@ class NFSPAgent:
             if self.total_env_steps % log_every == 0:
                 avg_reward = float(np.mean(recent_rewards)) if recent_rewards else 0.0
                 avg_len    = float(np.mean(recent_lens)) if recent_lens else 0.0
-                # If positive reward means “win”
-                win_rate   = float(np.mean([r > 0 for r in recent_rewards])) if recent_rewards else 0.0
+                win_rate   = float(np.mean(recent_winloss_results)) if recent_winloss_results else float("nan")
                 ql         = float(np.mean(recent_q_loss)) if recent_q_loss else float("nan")
                 sll        = float(np.mean(recent_sl_loss)) if recent_sl_loss else float("nan")
                 pent       = float(np.mean(recent_pi_ent)) if recent_pi_ent else float("nan")
@@ -1418,8 +1509,8 @@ class NFSPAgent:
                 control_change_summary = ";".join(control_changes)
 
                 print(
-                    f"[steps={self.total_env_steps}] "
-                    f"avgR={avg_reward:.4f} win={win_rate:.3f} len={avg_len:.1f} "
+                    f"[steps={self.total_env_steps}] len={avg_len:.1f} "
+                    f"avgR={avg_reward:.4f} win={win_rate:.3f} "
                     f"Qloss={ql:.5f} SLloss={sll:.5f} H(pi)={pent:.3f} "
                     f"illegal={illegal_rt:.3f} eps={eps:.3f} "
                     f"RL_buf={self.rl_buf.size} SL_buf≈{min(self.sl_buf.size, self.sl_buf.capacity)} "
@@ -1482,7 +1573,7 @@ class NFSPAgent:
                 )
                 print(
                     "EVALUATION:\n"
-                    f"[steps={self.total_env_steps}] "
+                    f"[steps={self.total_env_steps}] len={eval_stats["avg_len"]:.3f} "
                     f"avgR={eval_stats['avg_reward']:.4f} win={eval_stats['win_rate']:.3f} "
                     f"illegal={illegal_rt:.3f}"
                 )
