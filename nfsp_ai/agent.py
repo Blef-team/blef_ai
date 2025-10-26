@@ -897,6 +897,8 @@ class NFSPAgent:
                 self.cfg.train_rl_every = 32
             if not self._is_pinned("batch_rl"):
                 self.cfg.batch_rl = 64
+            if step >= 10_000_000 and not self._is_pinned("batch_rl"):
+                self.cfg.batch_rl = 256
 
             # n-step: align to round length (fixed)
             set_nstep(3)
@@ -964,13 +966,11 @@ class NFSPAgent:
         # RL cadence: modest increases only
         if not self._is_pinned("train_rl_every"):
             if step < 20_000_000:
-                self.cfg.train_rl_every = 48
+                self.cfg.train_rl_every = 32
             elif step < 50_000_000:
-                self.cfg.train_rl_every = 64
-            elif step < 80_000_000:
-                self.cfg.train_rl_every = 80
+                self.cfg.train_rl_every = 48
             else:
-                self.cfg.train_rl_every = 96
+                self.cfg.train_rl_every = 64
 
         # n-step: keep fixed (don’t increase with step)
         set_nstep(3)
