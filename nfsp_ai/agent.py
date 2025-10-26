@@ -1420,14 +1420,19 @@ class NFSPAgent:
             for k in ["sl_added", "sl_skipped"]:
                 self.stats.setdefault(k, 0)
 
-            # --- NFSP: log BR behavior into the SL reservoir ---
+            # --- NFSP: log full behavior (BR + SL) into the SL reservoir ---
             if skip_sl_log:
                 self.stats["sl_skipped"] += 1
             else:
-                if use_br:  # <-- CHANGED: log when BR generated the action
-                    self.sl_buf.add(obs.detach().cpu(), mask.detach().cpu(), one_hot)
-                    self.stats["sl_added"] += 1
-
+                self.sl_buf.add(obs.detach().cpu(), mask.detach().cpu(), one_hot)
+                self.stats["sl_added"] += 1
+                # Optional bookkeeping to inspect composition
+                if use_br:
+                    self.stats.setdefault("sl_added_from_br", 0)
+                    self.stats["sl_added_from_br"] += 1
+                else:
+                    self.stats.setdefault("sl_added_from_sl", 0)
+                    self.stats["sl_added_from_sl"] += 1
 
             if history_sample_path and history_sample_next is not None and info_dict:
                 history_payload = info_dict.get("history")
