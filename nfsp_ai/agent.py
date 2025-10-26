@@ -529,7 +529,7 @@ class NFSPAgent:
         try:
             obs, mask, one_hot = self.sl_buf.sample(self.cfg.batch_sl)
         except RuntimeError:
-            print(RuntimeError in _train_sl_step)
+            # Reservoir is empty
             return
 
         logits = self.pi(obs)  # [B, A]
@@ -1359,24 +1359,26 @@ class NFSPAgent:
             one_hot = torch.zeros(self.act_dim, dtype=torch.float32)
             one_hot[action] = 1.0
 
-            # Flags set by self.act(...) in this step
             took_forced_check   = self._took_forced_check
             took_epsilon_action = self._took_epsilon_action
 
-            # Skip if forced check, epsilon action, or illegal
-            skip_sl_log = took_forced_check or took_epsilon_action or (illegal == 1)
+            # You can keep skipping illegal/forced. Consider NOT skipping epsilon;
+            # NFSP typically logs the behavior policy including exploration.
+            skip_sl_log = took_forced_check or (illegal == 1)  # <- removed epsilon skip here
 
-            # Safe guard in case stats wasn't initialized somewhere else
+            # init stats once
             if not hasattr(self, "stats"):
                 self.stats = {}
-            self.stats.setdefault("sl_skipped_exploration", 0)
+            for k in ["sl_added", "sl_skipped"]:
+                self.stats.setdefault(k, 0)
 
+            # --- NFSP: log BR behavior into the SL reservoir ---
             if skip_sl_log:
-                self.stats["sl_skipped_exploration"] += 1
+                self.stats["sl_skipped"] += 1
             else:
-                # NFSP: SL should clone average-policy (not BR) behavior
-                if not use_br:
+                if use_br:  # <-- CHANGED: log when BR generated the action
                     self.sl_buf.add(obs.detach().cpu(), mask.detach().cpu(), one_hot)
+                    self.stats["sl_added"] += 1
 
 
             if history_sample_path and history_sample_next is not None and info_dict:
