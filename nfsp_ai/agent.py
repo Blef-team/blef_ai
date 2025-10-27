@@ -45,6 +45,7 @@ def _evaluate_policy(
     agent,
     env_source,
     max_cards: int = 11,
+    n_agents: int = 2,
     episodes: int = 200,
     *,
     save_dir: Optional[str] = None,
@@ -56,6 +57,7 @@ def _evaluate_policy(
     for _ in range(episodes):
         env = env_source() if managed_env else env_source
         env.max_cards = max_cards
+        env.n_agents = n_agents
 
         if save_dir and save_games > 0 and hasattr(env, "game_save_dir"):
             env.game_save_dir = save_dir
@@ -848,6 +850,20 @@ class NFSPAgent:
         self._apply_pin(key, val, pin)
         return val
 
+    def set_n_agents(self, value: Optional[int], *, env: Optional["TurnEnvAdapter"] = None, pin: bool = True) -> Optional[int]:
+        print(f"set_n_agents: {value}") #DEBUG
+        print(f"set_n_agents, env: {env}") #DEBUG
+        print(f"set_n_agents, pin: {pin}") #DEBUG
+        key = "n_agents"
+        if value is None:
+            self._apply_env_pin(key, None, pin=False)
+            return None
+        val = int(max(2, min(8, value)))
+        self._apply_env_pin(key, val, pin)
+        if env is not None:
+            self._sync_env_n_agents(env, val)
+        return val
+
     def _ensure_schedule_state(self):
         self._ensure_override_state()
         if not hasattr(self, "_schedule_flags"):
@@ -900,6 +916,15 @@ class NFSPAgent:
             rules = env.game.get("rules")
             if isinstance(rules, dict):
                 rules["max_cards"] = target
+
+    def _sync_env_n_agents(self, env: Optional["TurnEnvAdapter"], target: int):
+        print(f"_sync_env_n_agents: {target}") #DEBUG
+        if env is None:
+            return
+        if getattr(env, "n_agents", None) != target:
+            print(f"env.n_agents: {env.n_agents}") #DEBUG
+            env.n_agents = target
+            print(f"env.n_agents after: {env.n_agents}") #DEBUG
 
     def _interp(self, step: int, start: int, end: int, v_start: float, v_end: float) -> float:
         if step <= start:
@@ -1637,6 +1662,7 @@ class NFSPAgent:
                     self,
                     eval_source,
                     max_cards=env.max_cards,
+                    n_agents=env.n_agents,
                     episodes=eval_episodes,
                     save_dir=eval_save_dir,
                     save_games=eval_save_games,

@@ -27,6 +27,7 @@ CONTROL_SCHEMA: Dict[str, Dict[str, Any]] = {
     "burst_reward_threshold": {"type": "float", "bounds": (-1.0, 1.0), "setter": "set_burst_reward_threshold", "current": lambda agent, env: float(agent.cfg.burst_reward_threshold)},
     "check_prob": {"type": "float", "bounds": (0.0, 1.0), "setter": "set_check_explore_prob", "current": lambda agent, env: float(getattr(agent, "_check_explore_prob", 0.0))},
     "sl_learning_off": {"type": "bool", "setter": "set_sl_learning_off", "current": lambda agent, env: bool(agent.cfg.sl_learning_off)},
+    "n_agents": {"type": "int", "bounds": (2, 8), "setter": "set_n_agents", "current": lambda agent, env: int(getattr(env, "n_agents", 2))},
 }
 
 
@@ -214,7 +215,7 @@ class JsonControlPlane:
             setter = getattr(agent, setter_name)
             try:
                 if value is None:
-                    if key == "max_cards":
+                    if key in ["max_cards", "n_agents"]:
                         result = setter(None, env=env, pin=False)
                     else:
                         try:
@@ -222,7 +223,7 @@ class JsonControlPlane:
                         except TypeError:
                             result = setter(None)
                 else:
-                    if key == "max_cards":
+                    if key in ["max_cards", "n_agents"]:
                         result = setter(value, env=env)
                     else:
                         result = setter(value)
