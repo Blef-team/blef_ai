@@ -1,6 +1,6 @@
 # Card Embedding Usage Guide
 
-This note explains how to pretrain card embeddings and plug them into the NFSP Blef agent.
+This note explains how to pretrain card embeddings and plug them into the NFSP Blef agent. These embeddings can be used to build any neural network-based agent for Blef.
 
 ## 1. Pretraining
 - Run `tools/pretrain_card_embeddings.py` with the desired coverage. Example:

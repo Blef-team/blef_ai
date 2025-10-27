@@ -1,6 +1,6 @@
 # History Embedding Usage Guide
 
-Use this note when you want NFSP to replace the legacy one-hot action-history features with the pretrained history encoder that ships with the project.
+This note explains how to pretrain action history embeddings and plug them into the NFSP Blef agent. These embeddings can be used to build any neural network-based agent for Blef.
 
 ## 1. Pretrain (or refresh) the encoder
 - Script: `tools/pretrain_history_embeddings.py`
