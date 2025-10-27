@@ -411,6 +411,7 @@ class NFSPConfig:
     burst_rl_updates_on_reward: int = 2
     burst_reward_threshold: float = 0.5
     sl_learning_off: bool = False
+    min_round: int = 1
 
 class NFSPAgent:
     def __init__(self, obs_dim: int, act_dim: int, device: Optional[torch.device] = None, cfg: NFSPConfig = NFSPConfig(), debug: bool = False):
@@ -850,13 +851,17 @@ class NFSPAgent:
         self._apply_pin(key, val, pin)
         return val
 
+    def set_min_round(self, value: Optional[int], *, env: Optional["TurnEnvAdapter"] = None, pin: bool = True) -> Optional[int]:
+        key = "min_round"
+        if value is None:
+            self._pinned_overrides.pop(key, None)
+            return None
+        val = int(max(1, min(20, value)))
+        self.cfg.min_round = val
+        self._apply_pin(key, val, pin)
+        return val
+
     def set_n_agents(self, value: Optional[int], *, env: Optional["TurnEnvAdapter"] = None, pin: bool = True) -> Optional[int]:
-        if self.debug:
-            # DEBUG
-            print(f"set_n_agents: {value}")
-            print(f"set_n_agents, env: {env}")
-            print(f"set_n_agents, pin: {pin}")
-            # DEBUG
         key = "n_agents"
         if value is None:
             self._apply_env_pin(key, None, pin=False)
@@ -921,13 +926,10 @@ class NFSPAgent:
                 rules["max_cards"] = target
 
     def _sync_env_n_agents(self, env: Optional["TurnEnvAdapter"], target: int):
-        print(f"_sync_env_n_agents: {target}") #DEBUG
         if env is None:
             return
         if getattr(env, "n_agents", None) != target:
-            print(f"env.n_agents: {env.n_agents}") #DEBUG
             env.n_agents = target
-            print(f"env.n_agents after: {env.n_agents}") #DEBUG
 
     def _interp(self, step: int, start: int, end: int, v_start: float, v_end: float) -> float:
         if step <= start:
@@ -1437,10 +1439,11 @@ class NFSPAgent:
                 loser = rr.get("loser", None)
 
             # Pass actor/loser so _flush_nstep can distribute rewards
-            self._store_transition(
-                obs, mask, action, reward, nobs, nmask, done, is_br=use_br,
-                actor=actor, loser=loser
-            )
+            if env.game["round_number"] >= self.cfg.min_round:
+                self._store_transition(
+                    obs, mask, action, reward, nobs, nmask, done, is_br=use_br,
+                    actor=actor, loser=loser
+                )
 
             # Ensure n-step buffer flushes at terminals (round end)
             if done and self._active_n_step > 1:
@@ -1455,7 +1458,7 @@ class NFSPAgent:
 
             # You can keep skipping illegal/forced. Consider NOT skipping epsilon;
             # NFSP typically logs the behavior policy including exploration.
-            skip_sl_log = took_forced_check or (illegal == 1) or self.cfg.sl_learning_off # <- removed epsilon skip here
+            skip_sl_log = took_forced_check or (illegal == 1) or self.cfg.sl_learning_off or env.game["round_number"] < self.cfg.min_round # <- removed epsilon skip here
 
             # init stats once
             if not hasattr(self, "stats"):
@@ -1528,7 +1531,7 @@ class NFSPAgent:
                     self._last_checkpoint_million = current_million
 
             # Online updates (after warmup)
-            if self.total_env_steps > self.cfg.warmup_steps:
+            if self.total_env_steps > self.cfg.warmup_steps and env.game["round_number"] >= self.cfg.min_round:
                 if self.total_env_steps % self.cfg.train_rl_every == 0:
                     # Expect dict or scalar; handle None gracefully.
                     out = self._train_rl_step()

@@ -28,6 +28,7 @@ CONTROL_SCHEMA: Dict[str, Dict[str, Any]] = {
     "check_prob": {"type": "float", "bounds": (0.0, 1.0), "setter": "set_check_explore_prob", "current": lambda agent, env: float(getattr(agent, "_check_explore_prob", 0.0))},
     "sl_learning_off": {"type": "bool", "setter": "set_sl_learning_off", "current": lambda agent, env: bool(agent.cfg.sl_learning_off)},
     "n_agents": {"type": "int", "bounds": (2, 8), "setter": "set_n_agents", "current": lambda agent, env: int(getattr(env, "n_agents", 2))},
+    "min_round": {"type": "int", "bounds": (1, 20), "setter": "set_min_round", "current": lambda agent, env: int(getattr(agent.cfg, "min_round", 1))}
 }
 
 
@@ -234,6 +235,7 @@ class JsonControlPlane:
             after = None
             try:
                 after = getter(agent, env)
+                print(f"key: {key}, value: {value}")
             except Exception:
                 after = result
                 if value is None:
