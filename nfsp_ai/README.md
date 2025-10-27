@@ -145,13 +145,11 @@ See the [**Control Plane Operator Guide**](../docs/control_plane_guide.md) for:
 ---
 
 ### 🧠 Embedding Systems
-The agent can leverage **card embeddings** (and optionally **history embeddings**) to represent input state features in a more structured, learnable space.  
+The agent can leverage **card embeddings** and **history embeddings** to represent input state features in a more structured, learnable space.  
 This significantly improves generalization and sample efficiency, especially in large or variant decks.
 
 Pretrained embeddings can be plugged directly into the NFSP agent, or fine-tuned during self-play with controlled learning rates.
 
-See the [**Card Embedding Usage Guide**](../docs/card_embedding_usage.md) for:
-- pretraining instructions and artifact contents,
-- integration into the observation pipeline,
-- fine-tuning and stability tips, and
-- regeneration workflows for deck-rule changes.
+Get started with:
+- [**Card Embedding Usage Guide**](../docs/card_embedding_usage.md) for hand/common card encoders (pretraining, integration, fine-tuning).
+- [**History Embedding Usage Guide**](../docs/history_embedding_usage.md) for action-history encoders (dataset, runtime wiring, validation).
