@@ -26,6 +26,7 @@ CONTROL_SCHEMA: Dict[str, Dict[str, Any]] = {
     "burst_rl_updates_on_reward": {"type": "int", "bounds": (0, 16), "setter": "set_burst_rl_updates", "current": lambda agent, env: int(agent.cfg.burst_rl_updates_on_reward)},
     "burst_reward_threshold": {"type": "float", "bounds": (-1.0, 1.0), "setter": "set_burst_reward_threshold", "current": lambda agent, env: float(agent.cfg.burst_reward_threshold)},
     "check_prob": {"type": "float", "bounds": (0.0, 1.0), "setter": "set_check_explore_prob", "current": lambda agent, env: float(getattr(agent, "_check_explore_prob", 0.0))},
+    "sl_learning_off": {"type": "bool", "setter": "set_sl_learning_off", "current": lambda agent, env: bool(agent.cfg.sl_learning_off)},
 }
 
 
@@ -40,6 +41,11 @@ def _coerce_value(entry: Dict[str, Any], value: Any) -> Any:
             coerced = int(value)
         else:
             raise TypeError("expected integer")
+    elif entry["type"] == "bool":
+        if isinstance(value, bool):
+            coerced = bool(value)
+        else:
+            raise TypeError("expected boolean")
     else:
         raise TypeError("unsupported type")
 

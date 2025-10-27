@@ -408,9 +408,10 @@ class NFSPConfig:
     n_step: int = 6
     burst_rl_updates_on_reward: int = 2
     burst_reward_threshold: float = 0.5
+    sl_learning_off: bool = False
 
 class NFSPAgent:
-    def __init__(self, obs_dim: int, act_dim: int, device: Optional[torch.device] = None, cfg: NFSPConfig = NFSPConfig(), debug=False):
+    def __init__(self, obs_dim: int, act_dim: int, device: Optional[torch.device] = None, cfg: NFSPConfig = NFSPConfig(), debug: bool = False):
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.obs_dim, self.act_dim, self.cfg = obs_dim, act_dim, cfg
 
@@ -533,6 +534,10 @@ class NFSPAgent:
         - Optional temperature, legal-only label smoothing, and SL entropy bonus.
           All defaults keep behavior identical to your current implementation.
         """
+        # ---- Manual override ----
+        if self.cfg.sl_learning_off:
+            return
+
         # ---- Sample ----
         try:
             obs, mask, one_hot = self.sl_buf.sample(self.cfg.batch_sl)
@@ -831,6 +836,16 @@ class NFSPAgent:
         self._apply_env_pin(key, val, pin)
         if env is not None:
             self._sync_env_max_cards(env, val)
+        return val
+
+    def set_sl_learning_off(self, value: Optional[bool], *, env: Optional["TurnEnvAdapter"] = None, pin: bool = True) -> Optional[int]:
+        key = "sl_learning_off"
+        if value is None:
+            self._pinned_overrides.pop(key, None)
+            return None
+        val = bool(value)
+        self.cfg.sl_learning_off = val
+        self._apply_pin(key, val, pin)
         return val
 
     def _ensure_schedule_state(self):
@@ -1412,7 +1427,7 @@ class NFSPAgent:
 
             # You can keep skipping illegal/forced. Consider NOT skipping epsilon;
             # NFSP typically logs the behavior policy including exploration.
-            skip_sl_log = took_forced_check or (illegal == 1)  # <- removed epsilon skip here
+            skip_sl_log = took_forced_check or (illegal == 1) or self.cfg.sl_learning_off # <- removed epsilon skip here
 
             # init stats once
             if not hasattr(self, "stats"):
@@ -1499,7 +1514,7 @@ class NFSPAgent:
                     if performed_rl_update:
                         self.rl_updates += 1
 
-                if self.total_env_steps % self.cfg.train_sl_every == 0:
+                if self.total_env_steps % self.cfg.train_sl_every == 0 and not self.cfg.sl_learning_off:
                     out = self._train_sl_step()
                     performed_sl_update = out is not None
                     if isinstance(out, dict):
