@@ -851,9 +851,12 @@ class NFSPAgent:
         return val
 
     def set_n_agents(self, value: Optional[int], *, env: Optional["TurnEnvAdapter"] = None, pin: bool = True) -> Optional[int]:
-        print(f"set_n_agents: {value}") #DEBUG
-        print(f"set_n_agents, env: {env}") #DEBUG
-        print(f"set_n_agents, pin: {pin}") #DEBUG
+        if self.debug:
+            # DEBUG
+            print(f"set_n_agents: {value}")
+            print(f"set_n_agents, env: {env}")
+            print(f"set_n_agents, pin: {pin}")
+            # DEBUG
         key = "n_agents"
         if value is None:
             self._apply_env_pin(key, None, pin=False)
