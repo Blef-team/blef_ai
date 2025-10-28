@@ -173,6 +173,13 @@ def draw_cards(players, rules):
     for _ in range(int(rules.get("blanks", 0))):
         deck.append({"value": -2, "colour": -1})
     shuffle(deck)
+
+    common_count = max(0, int(rules.get("common_cards", 0)))
+    if common_count > len(deck):
+        raise ValueError("Not enough cards in deck to deal common cards.")
+    common_hand = list(islice(deck, common_count))
+    del deck[:common_count]
+
     hands = []
     for p in players:
         if p["n_cards"] == 0:
@@ -180,7 +187,7 @@ def draw_cards(players, rules):
         hand = list(islice(deck, p["n_cards"]))
         del deck[:p["n_cards"]]
         hands.append({"nickname": p["nickname"], "hand": hand})
-    return hands
+    return hands, common_hand
 
 
 def get_player_by_nickname(players, nickname):
@@ -225,7 +232,15 @@ def arrange_players(players):
 
     return players
 
-def create_game(n_agents, deck_size=DEFAULT_DECK_SIZE, max_cards=None, jokers=0, blanks=0, verbose=False):
+def create_game(
+    n_agents,
+    deck_size=DEFAULT_DECK_SIZE,
+    max_cards=None,
+    jokers=0,
+    blanks=0,
+    common_cards=0,
+    verbose=False,
+):
     if n_agents < 2:
         raise ValueError("n_agents < 2")
     if n_agents > 8:
@@ -237,8 +252,16 @@ def create_game(n_agents, deck_size=DEFAULT_DECK_SIZE, max_cards=None, jokers=0,
     else:
         default_max_cards = max(1, deck_size // 2 - 1)
 
-    rules = {"deck_size": int(deck_size), "jokers": int(jokers), "blanks": int(blanks)}
-    
+    if common_cards < 0:
+        raise ValueError("common_cards must be non-negative")
+    rules = {
+        "deck_size": int(deck_size),
+        "jokers": int(jokers),
+        "blanks": int(blanks),
+        "common_cards": int(common_cards),
+    }
+    hands, common_hand = draw_cards(players, rules)
+
     max_cards_value = default_max_cards
     if max_cards is not None and max_cards > 0:
         max_cards_value = min(max_cards, default_max_cards)
@@ -246,10 +269,10 @@ def create_game(n_agents, deck_size=DEFAULT_DECK_SIZE, max_cards=None, jokers=0,
         "game_uuid": game_uuid,
         "status": "Running",
         "rules": rules,
-        "common_hand": [],
+        "common_hand": common_hand,
         "round_number": 1,
         "max_cards": max_cards_value,
-        "hands": draw_cards(players, rules),
+        "hands": hands,
         "players": players,
         "cp_nickname": players[0]["nickname"],
         "history": []
@@ -313,7 +336,7 @@ def handle_check(game, save_dir="games"):
     # New round: reset history, re-deal
     game["round_number"] += 1
     game["history"] = []
-    game["hands"] = draw_cards(game["players"], game["rules"])
+    game["hands"], game["common_hand"] = draw_cards(game["players"], game["rules"])
 
     save(game, dir=save_dir)
 

@@ -10,6 +10,16 @@ class SimpleschemaManagerDeckSizeTest(unittest.TestCase):
         self.assertEqual(game["rules"]["deck_size"], 32)
         self.assertEqual(len(game["hands"]), 2)
         self.assertEqual(len(game["hands"][0]["hand"]), 1)
+        self.assertEqual(game["common_hand"], [])
+
+    def test_create_game_with_common_cards(self):
+        game = create_game(3, deck_size=24, common_cards=3)
+        self.assertEqual(game["rules"]["common_cards"], 3)
+        self.assertEqual(len(game["common_hand"]), 3)
+        board_ids = set((card["value"], card["colour"]) for card in game["common_hand"])
+        for hand in game["hands"]:
+            for card in hand["hand"]:
+                self.assertNotIn((card["value"], card["colour"]), board_ids)
 
     def test_determine_set_existence_straight_flush_32(self):
         rules = {"deck_size": 32}
