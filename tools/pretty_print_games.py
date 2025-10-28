@@ -167,6 +167,14 @@ def format_hand(hand: dict) -> str:
     return f"{nickname}: {','.join(cards)}"
 
 
+def format_common_hand(hand: dict) -> str:
+    cards = [
+        f"{value_to_str(c.get('value'))}{suit_to_str(c.get('colour'))}"
+        for c in hand
+    ]
+    return f"COMMON: {','.join(cards)}"
+
+
 def load_game(path: Path) -> dict | None:
     try:
         with path.open("r", encoding="utf-8") as handle:
@@ -195,6 +203,7 @@ def pretty_print(path: Path) -> None:
         return
 
     hands = [format_hand(hand) for hand in data.get("hands", [])]
+    common_hand = format_common_hand(data.get("common_hand", []))
     history = [
         f"{event.get('player')}: {to_action_name(event.get('action_id'))}"
         for event in data.get("history", [])
@@ -202,7 +211,7 @@ def pretty_print(path: Path) -> None:
     if not history:
         return
 
-    print("     ".join(hands + ["///"] + history))
+    print("     ".join(hands + [common_hand] + ["///"] + history))
 
 
 def parse_args(argv: List[str]) -> argparse.Namespace:
