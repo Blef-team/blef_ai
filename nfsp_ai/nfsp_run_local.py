@@ -728,6 +728,7 @@ class MyEnv:
         deck_size: int = 24,
         jokers: int = 0,
         blanks: int = 0,
+        common_cards: int = 0,
         verbose: bool = False,
         illegal_penalty: float = -0.01,
         game_save_dir: Optional[str] = None,
@@ -747,6 +748,7 @@ class MyEnv:
             "deck_size": int(deck_size),
             "jokers": int(jokers),
             "blanks": int(blanks),
+            "common_cards": int(common_cards)
         }
 
         self.card_embedding = card_embedding
@@ -824,6 +826,7 @@ class MyEnv:
             max_cards=self.max_cards,
             jokers=self.rules["jokers"],
             blanks=self.rules["blanks"],
+            common_cards=self.rules.get("common_cards", 0),
             verbose=self.verbose,
         )
         # Sync rules from the created game (single assignment; remove duplicate)
@@ -1065,6 +1068,13 @@ def main():
         help="Number of blanks to include in the deck (default: 0).",
     )
     parser.add_argument(
+        "--common-cards",
+        dest="common_cards",
+        type=int,
+        default=0,
+        help="Number of community cards dealt each round (default: 0).",
+    )
+    parser.add_argument(
         "--verbose",
         action="store_true",
         help="Enable verbose logging from the game manager.",
@@ -1249,6 +1259,7 @@ def main():
         deck_size=args.deck_size,
         jokers=args.jokers,
         blanks=args.blanks,
+        common_cards=args.common_cards,
         verbose=args.verbose,
         game_save_dir=game_save_dir,
         save_sample_rate=args.save_game_every,
@@ -1310,19 +1321,19 @@ def main():
         )
 
     eval_env = MyEnv(
-            n_agents=env.n_agents,
-            max_cards=env.max_cards,
-            deck_size=env.rules["deck_size"],
-            jokers=env.rules["jokers"],
-            blanks=env.rules["blanks"],
-            verbose=env.verbose,
-            illegal_penalty=env.illegal_penalty,
-            game_save_dir=eval_game_save_dir,
-            save_sample_rate=1,
-            card_embedding=card_embedding_bundle,
-            history_embedding=history_embedding_bundle,
-
-        )
+        n_agents=env.n_agents,
+        max_cards=env.max_cards,
+        deck_size=env.rules["deck_size"],
+        jokers=env.rules["jokers"],
+        blanks=env.rules["blanks"],
+        common_cards=env.rules.get("common_cards", 0),
+        verbose=env.verbose,
+        illegal_penalty=env.illegal_penalty,
+        game_save_dir=eval_game_save_dir,
+        save_sample_rate=1,
+        card_embedding=card_embedding_bundle,
+        history_embedding=history_embedding_bundle,
+    )
     agent.train_from_selfplay(
         env,
         total_steps=args.total_steps,
