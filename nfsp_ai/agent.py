@@ -50,6 +50,7 @@ def _evaluate_policy(
     *,
     save_dir: Optional[str] = None,
     save_games: int = 0,
+    pick_n_agents_in_range: bool = False
 ) -> dict:
     wins = losses = total_r = total_len = 0
     managed_env = callable(env_source)
@@ -58,6 +59,8 @@ def _evaluate_policy(
         env = env_source() if managed_env else env_source
         env.max_cards = max_cards
         env.n_agents = n_agents
+        if pick_n_agents_in_range:
+            env.n_agents = random.choice(range(2,n_agents+1)) # Run a game with up to n_agents
 
         if save_dir and save_games > 0 and hasattr(env, "game_save_dir"):
             env.game_save_dir = save_dir
@@ -70,6 +73,7 @@ def _evaluate_policy(
         done, steps = False, 0
 
         while not done:
+
             cp = env.game["cp_nickname"]
             if cp == env._ref_nick:
                 a = agent.select_action(obs, mask, use_average_policy=True, greedy=True)
@@ -1672,6 +1676,7 @@ class NFSPAgent:
                     episodes=eval_episodes,
                     save_dir=eval_save_dir,
                     save_games=eval_save_games,
+                    pick_n_agents_in_range=env.pick_n_agents_in_range
                 )
                 print(
                     "EVALUATION:\n"
