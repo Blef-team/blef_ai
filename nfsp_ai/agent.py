@@ -46,7 +46,7 @@ def _evaluate_policy(
     env_source,
     max_cards: int = 11,
     n_agents: int = 2,
-    episodes: int = 200,
+    episodes: int = 2000,
     *,
     save_dir: Optional[str] = None,
     save_games: int = 0,
