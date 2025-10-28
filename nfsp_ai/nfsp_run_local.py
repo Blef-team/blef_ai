@@ -735,7 +735,8 @@ class MyEnv:
         card_embedding: Optional["CardEmbeddingRuntime"] = None,
         history_embedding: Optional["HistoryEmbeddingRuntime"] = None,
         reset_schedules_to: int = 100_000,
-        reset_schedules_at: int = 0
+        reset_schedules_at: int = 0,
+        pick_n_agents_in_range: bool = False
     ):
         if n_agents < 2 or n_agents > 8:
             raise ValueError("n_agents must be in [2, 8]")
@@ -763,6 +764,8 @@ class MyEnv:
 
         self.reset_schedules_to = reset_schedules_to
         self.reset_schedules_at = reset_schedules_at
+
+        self.pick_n_agents_in_range = pick_n_agents_in_range
 
         self.game: Dict = {}
         self._last_obs = None
@@ -811,9 +814,12 @@ class MyEnv:
             self._last_obs, self._last_mask = obs, mask
             return obs, mask, pid
 
+        n_agents = self.n_agents
+        if self.pick_n_agents_in_range:
+            n_agents = random.choice(range(2,self.n_agents+1)) # Run a game with up to n_agents
         # Normal path: start a completely new game (either there was no pending round boundary or the game finished)
         self.game = gm.create_game(
-            self.n_agents,
+            n_agents,
             deck_size=self.rules["deck_size"],
             max_cards=self.max_cards,
             jokers=self.rules["jokers"],
@@ -1153,6 +1159,12 @@ def main():
         default="cpu",
         help="Torch device for history embedding encoder (default: cpu).",
     )
+    parser.add_argument(
+        "--pick_n_agents_in_range",
+        action="store_true",
+        help="If set, will pick n_agents in range from 2 to n_agents."
+    )
+
     args = parser.parse_args()
 
     postfix = datetime.now().strftime("%Y%m%d%H%M%S")
@@ -1243,7 +1255,8 @@ def main():
         card_embedding=card_embedding_bundle,
         history_embedding=history_embedding_bundle,
         reset_schedules_to=args.reset_schedules_to,
-        reset_schedules_at=args.reset_schedules_at
+        reset_schedules_at=args.reset_schedules_at,
+        pick_n_agents_in_range=args.pick_n_agents_in_range
     )
     obs0, mask0, _ = env.reset()
 

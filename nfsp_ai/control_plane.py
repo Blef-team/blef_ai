@@ -235,7 +235,6 @@ class JsonControlPlane:
             after = None
             try:
                 after = getter(agent, env)
-                print(f"key: {key}, value: {value}")
             except Exception:
                 after = result
                 if value is None:
