@@ -29,6 +29,8 @@ from typing import Iterable, List, Optional
 
 # --- Card metadata (24-card deck: ranks 9..A) ---
 CARD_VALUES = {
+    -2: "-",
+    -1: "Joker",
     0: "9",
     1: "10",
     2: "J",
@@ -38,6 +40,7 @@ CARD_VALUES = {
 }
 
 CARD_SUITS = {
+    -1: "",
     0: "♣",
     1: "♦",
     2: "♥",
