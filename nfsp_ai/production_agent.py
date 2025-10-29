@@ -82,7 +82,22 @@ class NFSPProductionAgent:
                 "Checkpoint missing obs_dim/act_dim. Please export with `nfsp_run_local.py --export-inference`."
             )
 
-        cfg = replace(NFSPConfig(), **checkpoint.get("cfg", {}))
+        ckpt_cfg = checkpoint.get("cfg", {})
+        base_cfg = NFSPConfig()
+        cfg = replace(
+            base_cfg,
+            hidden=ckpt_cfg.get("hidden", base_cfg.hidden),
+            anticipatory_eta=ckpt_cfg.get("anticipatory_eta", base_cfg.anticipatory_eta),
+        )
+        # Minimise buffer sizes and training metadata for inference-only usage
+        cfg.rl_capacity = 1
+        cfg.sl_capacity = 1
+        cfg.batch_rl = 1
+        cfg.batch_sl = 1
+        cfg.train_rl_every = 1
+        cfg.train_sl_every = 1
+        cfg.warmup_steps = 0
+
         self.agent = NFSPAgent(
             obs_dim=int(checkpoint["obs_dim"]),
             act_dim=int(checkpoint["act_dim"]),
@@ -93,6 +108,9 @@ class NFSPProductionAgent:
         self.agent.pi.load_state_dict(checkpoint["pi"])
         self.agent.q.eval()
         self.agent.pi.eval()
+        # Release replay/supervised buffers immediately to keep memory low
+        self.agent.rl_buf = None
+        self.agent.sl_buf = None
 
         self.card_embedding = _maybe_load_card_embedding(card_embedding_path, self.device)
         self.history_embedding = _maybe_load_history_embedding(history_embedding_path, self.device)
