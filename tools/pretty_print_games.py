@@ -168,6 +168,8 @@ def format_hand(hand: dict) -> str:
 
 
 def format_common_hand(hand: dict) -> str:
+    if not hand:
+        return ""
     cards = [
         f"{value_to_str(c.get('value'))}{suit_to_str(c.get('colour'))}"
         for c in hand
@@ -204,6 +206,8 @@ def pretty_print(path: Path) -> None:
 
     hands = [format_hand(hand) for hand in data.get("hands", [])]
     common_hand = format_common_hand(data.get("common_hand", []))
+    if common_hand:
+        hands.extend([common_hand])
     history = [
         f"{event.get('player')}: {to_action_name(event.get('action_id'))}"
         for event in data.get("history", [])
@@ -211,7 +215,7 @@ def pretty_print(path: Path) -> None:
     if not history:
         return
 
-    print("     ".join(hands + [common_hand] + ["///"] + history))
+    print("     ".join(hands + ["///"] + history))
 
 
 def parse_args(argv: List[str]) -> argparse.Namespace:
