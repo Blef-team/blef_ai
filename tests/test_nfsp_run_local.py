@@ -16,6 +16,24 @@ class NFSPRunLocalDeckSizeTest(unittest.TestCase):
         self.assertEqual(obs.numel(), env.deck_spec.obs_dim)
         self.assertEqual(mask.numel(), env.deck_spec.num_actions)
 
+    def test_pick_jokers_blanks_common_in_range(self):
+        env = MyEnv(
+            n_agents=2,
+            deck_size=24,
+            jokers=2,
+            blanks=3,
+            common_cards=4,
+            pick_jokers_in_range=True,
+            pick_blanks_in_range=True,
+            pick_common_cards_in_range=True,
+        )
+        for _ in range(5):
+            env.reset()
+            rules = env.rules
+            self.assertTrue(0 <= rules.get("jokers", 0) <= 2)
+            self.assertTrue(0 <= rules.get("blanks", 0) <= 3)
+            self.assertTrue(0 <= rules.get("common_cards", 0) <= 4)
+
 
 if __name__ == "__main__":
     unittest.main()

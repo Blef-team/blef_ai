@@ -737,18 +737,24 @@ class MyEnv:
         history_embedding: Optional["HistoryEmbeddingRuntime"] = None,
         reset_schedules_to: int = 100_000,
         reset_schedules_at: int = 0,
-        pick_n_agents_in_range: bool = False
+        pick_n_agents_in_range: bool = False,
+        pick_jokers_in_range: bool = False,
+        pick_blanks_in_range: bool = False,
+        pick_common_cards_in_range: bool = False,
     ):
         if n_agents < 2 or n_agents > 8:
             raise ValueError("n_agents must be in [2, 8]")
 
         self.n_agents = n_agents
         self.max_cards = max_cards
+        self.joker_cap = max(0, int(jokers))
+        self.blank_cap = max(0, int(blanks))
+        self.common_card_cap = max(0, int(common_cards))
         self.rules = {
             "deck_size": int(deck_size),
-            "jokers": int(jokers),
-            "blanks": int(blanks),
-            "common_cards": int(common_cards)
+            "jokers": self.joker_cap,
+            "blanks": self.blank_cap,
+            "common_cards": self.common_card_cap,
         }
 
         self.card_embedding = card_embedding
@@ -768,6 +774,9 @@ class MyEnv:
         self.reset_schedules_at = reset_schedules_at
 
         self.pick_n_agents_in_range = pick_n_agents_in_range
+        self.pick_jokers_in_range = pick_jokers_in_range
+        self.pick_blanks_in_range = pick_blanks_in_range
+        self.pick_common_cards_in_range = pick_common_cards_in_range
 
         self.game: Dict = {}
         self._last_obs = None
@@ -818,15 +827,24 @@ class MyEnv:
 
         n_agents = self.n_agents
         if self.pick_n_agents_in_range:
-            n_agents = random.choice(range(2,self.n_agents+1)) # Run a game with up to n_agents
+            n_agents = random.choice(range(2, self.n_agents + 1))  # Run a game with up to n_agents
+        jokers = self.joker_cap
+        if self.pick_jokers_in_range:
+            jokers = random.randint(0, self.joker_cap)
+        blanks = self.blank_cap
+        if self.pick_blanks_in_range:
+            blanks = random.randint(0, self.blank_cap)
+        common_cards = self.common_card_cap
+        if self.pick_common_cards_in_range:
+            common_cards = random.randint(0, self.common_card_cap)
         # Normal path: start a completely new game (either there was no pending round boundary or the game finished)
         self.game = gm.create_game(
             n_agents,
             deck_size=self.rules["deck_size"],
             max_cards=self.max_cards,
-            jokers=self.rules["jokers"],
-            blanks=self.rules["blanks"],
-            common_cards=self.rules.get("common_cards", 0),
+            jokers=jokers,
+            blanks=blanks,
+            common_cards=common_cards,
             verbose=self.verbose,
         )
         # Sync rules from the created game (single assignment; remove duplicate)
@@ -1075,6 +1093,36 @@ def main():
         help="Number of community cards dealt each round (default: 0).",
     )
     parser.add_argument(
+        "--pick-n-agents-in-range",
+        dest="pick_n_agents_in_range",
+        action="store_true",
+        help="Sample the number of seated agents uniformly from [2, --n-agents] for each new game.",
+    )
+    parser.add_argument(
+        "--pick_n_agents_in_range",
+        dest="pick_n_agents_in_range",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--pick-jokers-in-range",
+        dest="pick_jokers_in_range",
+        action="store_true",
+        help="Sample the number of jokers uniformly from [0, --jokers] for each new game.",
+    )
+    parser.add_argument(
+        "--pick-blanks-in-range",
+        dest="pick_blanks_in_range",
+        action="store_true",
+        help="Sample the number of blanks uniformly from [0, --blanks] for each new game.",
+    )
+    parser.add_argument(
+        "--pick-common-cards-in-range",
+        dest="pick_common_cards_in_range",
+        action="store_true",
+        help="Sample the number of community cards uniformly from [0, --common-cards] for each new game.",
+    )
+    parser.add_argument(
         "--verbose",
         action="store_true",
         help="Enable verbose logging from the game manager.",
@@ -1169,12 +1217,6 @@ def main():
         default="cpu",
         help="Torch device for history embedding encoder (default: cpu).",
     )
-    parser.add_argument(
-        "--pick_n_agents_in_range",
-        action="store_true",
-        help="If set, will pick n_agents in range from 2 to n_agents."
-    )
-
     args = parser.parse_args()
 
     postfix = datetime.now().strftime("%Y%m%d%H%M%S")
@@ -1267,7 +1309,10 @@ def main():
         history_embedding=history_embedding_bundle,
         reset_schedules_to=args.reset_schedules_to,
         reset_schedules_at=args.reset_schedules_at,
-        pick_n_agents_in_range=args.pick_n_agents_in_range
+        pick_n_agents_in_range=args.pick_n_agents_in_range,
+        pick_jokers_in_range=args.pick_jokers_in_range,
+        pick_blanks_in_range=args.pick_blanks_in_range,
+        pick_common_cards_in_range=args.pick_common_cards_in_range,
     )
     obs0, mask0, _ = env.reset()
 
@@ -1293,7 +1338,7 @@ def main():
             n_step=6,
             burst_rl_updates_on_reward=4,
             burst_reward_threshold=0.5,
-            hidden=256
+            hidden=128
         ),
     )
 
@@ -1333,6 +1378,10 @@ def main():
         save_sample_rate=1,
         card_embedding=card_embedding_bundle,
         history_embedding=history_embedding_bundle,
+        pick_n_agents_in_range=args.pick_n_agents_in_range,
+        pick_jokers_in_range=args.pick_jokers_in_range,
+        pick_blanks_in_range=args.pick_blanks_in_range,
+        pick_common_cards_in_range=args.pick_common_cards_in_range,
     )
     agent.train_from_selfplay(
         env,

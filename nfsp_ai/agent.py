@@ -50,17 +50,28 @@ def _evaluate_policy(
     *,
     save_dir: Optional[str] = None,
     save_games: int = 0,
-    pick_n_agents_in_range: bool = False
+    pick_n_agents_in_range: bool = False,
+    pick_jokers_in_range: bool = False,
+    pick_blanks_in_range: bool = False,
+    pick_common_cards_in_range: bool = False,
 ) -> dict:
     wins = losses = total_r = total_len = 0
     managed_env = callable(env_source)
 
     for _ in range(episodes):
         env = env_source() if managed_env else env_source
-        env.max_cards = max_cards
-        env.n_agents = n_agents
-        if pick_n_agents_in_range:
-            env.n_agents = random.choice(range(2,n_agents+1)) # Run a game with up to n_agents
+        if hasattr(env, "max_cards"):
+            env.max_cards = max_cards
+        if hasattr(env, "n_agents"):
+            env.n_agents = n_agents
+        if hasattr(env, "pick_n_agents_in_range"):
+            env.pick_n_agents_in_range = pick_n_agents_in_range
+        if hasattr(env, "pick_jokers_in_range"):
+            env.pick_jokers_in_range = pick_jokers_in_range
+        if hasattr(env, "pick_blanks_in_range"):
+            env.pick_blanks_in_range = pick_blanks_in_range
+        if hasattr(env, "pick_common_cards_in_range"):
+            env.pick_common_cards_in_range = pick_common_cards_in_range
 
         if save_dir and save_games > 0 and hasattr(env, "game_save_dir"):
             env.game_save_dir = save_dir
@@ -1676,11 +1687,14 @@ class NFSPAgent:
                     episodes=eval_episodes,
                     save_dir=eval_save_dir,
                     save_games=eval_save_games,
-                    pick_n_agents_in_range=env.pick_n_agents_in_range
+                    pick_n_agents_in_range=getattr(env, "pick_n_agents_in_range", False),
+                    pick_jokers_in_range=getattr(env, "pick_jokers_in_range", False),
+                    pick_blanks_in_range=getattr(env, "pick_blanks_in_range", False),
+                    pick_common_cards_in_range=getattr(env, "pick_common_cards_in_range", False),
                 )
                 print(
                     "EVALUATION:\n"
-                    f"[steps={self.total_env_steps}] len={eval_stats["avg_len"]:.3f} "
+                    f"[steps={self.total_env_steps}] len={eval_stats['avg_len']:.3f} "
                     f"avgR={eval_stats['avg_reward']:.4f} win={eval_stats['win_rate']:.3f} "
                     f"illegal={illegal_rt:.3f}"
                 )
