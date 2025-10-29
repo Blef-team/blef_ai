@@ -16,7 +16,7 @@ import torch
 
 import shared.api.simpleschema_local_manager as gm                 # local manager
 from shared.probabilities.dynamic_probabilities import get_bet_probabilities, get_generic_bet_probabilities
-from nfsp_ai.agent import NFSPAgent, NFSPConfig          # your NFSP implementation
+from nfsp_ai.agent import NFSPAgent, NFSPConfig, _evaluate_policy          # your NFSP implementation
 from nfsp_ai.control_plane import JsonControlPlane, build_control_snapshot, write_control_file
 from nfsp_ai.embedding import (
     CardEmbeddingEncoder,
@@ -1123,6 +1123,19 @@ def main():
         help="Sample the number of community cards uniformly from [0, --common-cards] for each new game.",
     )
     parser.add_argument(
+        "--eval-only",
+        dest="eval_only",
+        action="store_true",
+        help="Run evaluation only (no training, buffers, or self-play logging).",
+    )
+    parser.add_argument(
+        "--eval-episodes",
+        dest="eval_episodes",
+        type=int,
+        default=200,
+        help="Number of evaluation episodes to run when eval-only is enabled (default: 200).",
+    )
+    parser.add_argument(
         "--verbose",
         action="store_true",
         help="Enable verbose logging from the game manager.",
@@ -1338,7 +1351,7 @@ def main():
             n_step=6,
             burst_rl_updates_on_reward=4,
             burst_reward_threshold=0.5,
-            hidden=128
+            hidden=256
         ),
     )
 
@@ -1351,19 +1364,6 @@ def main():
     elif args.resume_path:
         print(f"[load] resuming from {args.resume_path}")
         agent.load(args.resume_path)
-
-    control_plane = None
-    if args.control_plane:
-        cp_path = os.path.abspath(args.control_plane)
-        if not os.path.exists(cp_path):
-            snapshot = build_control_snapshot(agent, env, cooldown_steps=args.control_plane_cooldown)
-            write_control_file(cp_path, snapshot)
-            print(f"[control] bootstrap control-plane file written to {cp_path}")
-        control_plane = JsonControlPlane(
-            cp_path,
-            cooldown_steps=args.control_plane_cooldown,
-            verbose=True,
-        )
 
     eval_env = MyEnv(
         n_agents=env.n_agents,
@@ -1383,6 +1383,40 @@ def main():
         pick_blanks_in_range=args.pick_blanks_in_range,
         pick_common_cards_in_range=args.pick_common_cards_in_range,
     )
+
+    if args.eval_only:
+        eval_stats = _evaluate_policy(
+            agent,
+            eval_env,
+            max_cards=env.max_cards,
+            n_agents=env.n_agents,
+            episodes=args.eval_episodes,
+            save_dir=eval_game_save_dir,
+            save_games=EVAL_SAVED_GAMES,
+            pick_n_agents_in_range=args.pick_n_agents_in_range,
+            pick_jokers_in_range=args.pick_jokers_in_range,
+            pick_blanks_in_range=args.pick_blanks_in_range,
+            pick_common_cards_in_range=args.pick_common_cards_in_range,
+        )
+        print(
+            "EVALUATION (eval-only mode):\n"
+            f"[steps=0] len={eval_stats['avg_len']:.3f} "
+            f"avgR={eval_stats['avg_reward']:.4f} win={eval_stats['win_rate']:.3f}"
+        )
+        return
+
+    control_plane = None
+    if args.control_plane:
+        cp_path = os.path.abspath(args.control_plane)
+        if not os.path.exists(cp_path):
+            snapshot = build_control_snapshot(agent, env, cooldown_steps=args.control_plane_cooldown)
+            write_control_file(cp_path, snapshot)
+            print(f"[control] bootstrap control-plane file written to {cp_path}")
+        control_plane = JsonControlPlane(
+            cp_path,
+            cooldown_steps=args.control_plane_cooldown,
+            verbose=True,
+        )
     agent.train_from_selfplay(
         env,
         total_steps=args.total_steps,
