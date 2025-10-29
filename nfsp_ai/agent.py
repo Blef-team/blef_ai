@@ -1778,6 +1778,22 @@ class NFSPAgent:
             "check_explore_prob": float(getattr(self, "_check_explore_prob", 0.0)),
         }, path)
 
+    def export_inference(self, path: str):
+        payload = {
+            "version": 1,
+            "obs_dim": int(self.obs_dim),
+            "act_dim": int(self.act_dim),
+            "q": self.q.state_dict(),
+            "pi": self.pi.state_dict(),
+            "cfg": {
+                "gamma": float(self.cfg.gamma),
+                "anticipatory_eta": float(self.cfg.anticipatory_eta),
+                "eps_start": float(self.cfg.eps_start),
+                "eps_end": float(self.cfg.eps_end),
+            },
+        }
+        torch.save(payload, path)
+
     def load(self, path: str, map_location=None, *, reset_schedules: bool = False):
         ckpt = torch.load(path, map_location=map_location or self.device)
         self.q.load_state_dict(ckpt["q"])

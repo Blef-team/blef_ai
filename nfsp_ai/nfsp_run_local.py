@@ -1136,6 +1136,13 @@ def main():
         help="Number of evaluation episodes to run when eval-only is enabled (default: 200).",
     )
     parser.add_argument(
+        "--export-inference",
+        dest="export_inference",
+        type=str,
+        default=None,
+        help="Optional path to save an inference-only checkpoint (no training buffers).",
+    )
+    parser.add_argument(
         "--verbose",
         action="store_true",
         help="Enable verbose logging from the game manager.",
@@ -1383,6 +1390,13 @@ def main():
         pick_blanks_in_range=args.pick_blanks_in_range,
         pick_common_cards_in_range=args.pick_common_cards_in_range,
     )
+
+    if args.export_inference:
+        export_path = os.path.abspath(args.export_inference)
+        os.makedirs(os.path.dirname(export_path) or ".", exist_ok=True)
+        agent.export_inference(export_path)
+        print(f"[export] inference-only checkpoint saved to {export_path}")
+        return
 
     if args.eval_only:
         eval_stats = _evaluate_policy(
