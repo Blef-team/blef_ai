@@ -1358,7 +1358,7 @@ def main():
             n_step=6,
             burst_rl_updates_on_reward=4,
             burst_reward_threshold=0.5,
-            hidden=256
+            hidden=128
         ),
     )
 

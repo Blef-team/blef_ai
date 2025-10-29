@@ -202,7 +202,7 @@ def epsilon_valid_sample(mask: torch.Tensor) -> int:
 # Models (separate nets)
 # =========================
 class QNet(nn.Module):
-    def __init__(self, obs_dim: int, act_dim: int, hidden: int = 256):
+    def __init__(self, obs_dim: int, act_dim: int, hidden: int = 128):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(obs_dim, hidden), nn.ReLU(),
@@ -213,7 +213,7 @@ class QNet(nn.Module):
         return self.net(x)
 
 class PolicyNet(nn.Module):
-    def __init__(self, obs_dim: int, act_dim: int, hidden: int = 256):
+    def __init__(self, obs_dim: int, act_dim: int, hidden: int = 128):
         super().__init__()
         self.enc = nn.Sequential(
             nn.Linear(obs_dim, hidden), nn.ReLU(),
@@ -420,7 +420,7 @@ class NFSPConfig:
     train_sl_every: int = 10           # pi update cadence
     warmup_steps: int = 10_000
     max_grad_norm: float = 10.0        # For nn.utils.clip_grad_norm_
-    hidden: int = 256
+    hidden: int = 128
     use_double_dqn: bool = True
     n_step: int = 6
     burst_rl_updates_on_reward: int = 2
