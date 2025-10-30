@@ -126,6 +126,39 @@ HISTORY_LEN = 8
 DEFAULT_CARD_EMBEDDING_PATH = "artifacts/card_embedding_pretrain.pt"
 DEFAULT_HISTORY_EMBEDDING_PATH = "artifacts/history_embedding_pretrain.pt"
 
+def _resolve_card_embedding_path(flag_value, deck_size: int) -> Optional[str]:
+    if not flag_value:
+        return None
+    candidates = []
+    if flag_value in ("auto", True):
+        candidates.append(f"artifacts/card_embedding_pretrain_{deck_size}.pt")
+        candidates.append(DEFAULT_CARD_EMBEDDING_PATH)
+    else:
+        candidates.append(str(flag_value))
+    for cand in candidates:
+        if cand and os.path.exists(cand):
+            return cand
+    if flag_value not in ("auto", True):
+        raise FileNotFoundError(f"Card embedding artifact not found at '{flag_value}'")
+    return None
+
+
+def _resolve_history_embedding_path(flag_value, deck_size: int) -> Optional[str]:
+    if not flag_value:
+        return None
+    candidates = []
+    if flag_value in ("auto", True):
+        candidates.append(f"artifacts/history_embedding_pretrain_{deck_size}.pt")
+        candidates.append(DEFAULT_HISTORY_EMBEDDING_PATH)
+    else:
+        candidates.append(str(flag_value))
+    for cand in candidates:
+        if cand and os.path.exists(cand):
+            return cand
+    if flag_value not in ("auto", True):
+        raise FileNotFoundError(f"History embedding artifact not found at '{flag_value}'")
+    return None
+
 
 @dataclass
 class CardEmbeddingRuntime:
@@ -1262,22 +1295,24 @@ def main():
     card_embedding_bundle: Optional[CardEmbeddingRuntime] = None
     embedding_flag = args.use_card_embeddings
     if embedding_flag:
-        embedding_path = (
-            DEFAULT_CARD_EMBEDDING_PATH
-            if embedding_flag == "auto" or embedding_flag is True
-            else embedding_flag
-        )
+        embedding_path = _resolve_card_embedding_path(embedding_flag, args.deck_size)
         try:
-            card_embedding_bundle = _load_card_embedding(
-                embedding_path,
-                device=args.card_embedding_device,
-            )
-            print(f"[embeddings] card encoder loaded from {card_embedding_bundle.source_path}")
+            if embedding_path:
+                card_embedding_bundle = _load_card_embedding(
+                    embedding_path,
+                    device=args.card_embedding_device,
+                )
+                print(f"[embeddings] card encoder loaded from {card_embedding_bundle.source_path}")
+            else:
+                print(
+                    "[embeddings] no card embedding artifact found for deck size "
+                    f"{args.deck_size}; falling back to legacy multi-hot features."
+                )
         except FileNotFoundError:
             if embedding_flag == "auto":
                 print(
-                    f"[embeddings] no artifact at {os.path.abspath(embedding_path)}; "
-                    "falling back to legacy multi-hot features."
+                    "[embeddings] no card embedding artifact found for deck size "
+                    f"{args.deck_size}; falling back to legacy multi-hot features."
                 )
                 card_embedding_bundle = None
             else:
@@ -1290,22 +1325,25 @@ def main():
     history_embedding_bundle: Optional[HistoryEmbeddingRuntime] = None
     history_flag = args.use_history_embeddings
     if history_flag:
-        history_path = (
-            DEFAULT_HISTORY_EMBEDDING_PATH
-            if history_flag == "auto" or history_flag is True
-            else history_flag
-        )
+        history_path = _resolve_history_embedding_path(history_flag, args.deck_size)
         try:
-            history_embedding_bundle = _load_history_embedding(
-                history_path,
-                device=args.history_embedding_device,
-            )
-            print(f"[embeddings] history encoder loaded from {history_embedding_bundle.source_path}")
+            if history_path:
+                history_embedding_bundle = _load_history_embedding(
+                    history_path,
+                    device=args.history_embedding_device,
+                )
+                print(f"[embeddings] history encoder loaded from {history_embedding_bundle.source_path}")
+            else:
+                print(
+                    "[embeddings] no history embedding artifact found for deck size "
+                    f"{args.deck_size}; falling back to legacy history multi-hot features."
+                )
+                history_embedding_bundle = None
         except FileNotFoundError:
             if history_flag == "auto":
                 print(
-                    f"[embeddings] no artifact at {os.path.abspath(history_path)}; "
-                    "falling back to legacy history multi-hot features."
+                    "[embeddings] no history embedding artifact found for deck size "
+                    f"{args.deck_size}; falling back to legacy history multi-hot features."
                 )
                 history_embedding_bundle = None
             else:
@@ -1358,7 +1396,7 @@ def main():
             n_step=6,
             burst_rl_updates_on_reward=4,
             burst_reward_threshold=0.5,
-            hidden=128
+            hidden=256
         ),
     )
 

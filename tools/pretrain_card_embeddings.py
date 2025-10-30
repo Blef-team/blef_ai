@@ -123,7 +123,6 @@ def compute_existence_vector(card_ids: np.ndarray, domain: DeckDomain, num_joker
             action_id,
             rules,
             num_jokers=joker_count,
-            num_blanks=blank_count,
         ) else 0.0
     return labels
 
@@ -439,7 +438,10 @@ def train(args: argparse.Namespace) -> None:
     val_loader = make_loader(val_dataset, args.batch_size, args.num_workers)
 
     best_val_loss = float("inf")
-    artifact_path = Path(args.save_path)
+    save_path = args.save_path
+    if save_path == "auto":
+        save_path = f"artifacts/card_embedding_pretrain_{domain.deck_size}.pt"
+    artifact_path = Path(save_path)
     artifact_path.parent.mkdir(parents=True, exist_ok=True)
 
     for epoch in range(1, args.epochs + 1):
@@ -625,7 +627,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--device", type=str, default="cpu")
     parser.add_argument("--seed", type=int, default=1337)
-    parser.add_argument("--save-path", type=str, default="artifacts/card_embedding_pretrain.pt")
+    parser.add_argument("--save-path", type=str, default="auto")
     parser.add_argument("--early-stop-delta", type=float, default=1e-4)
     return parser
 

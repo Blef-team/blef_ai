@@ -32,28 +32,70 @@ from nfsp_ai.nfsp_run_local import (
 # ---------------------------------------------------------------------------
 
 DEFAULT_MODEL_PATH = os.environ.get("NFSP_MODEL_PATH", "artifacts/nfsp_inference.pt")
-DEFAULT_CARD_EMBED_PATH = os.environ.get("NFSP_CARD_EMBEDDING", "artifacts/card_embedding_pretrain.pt")
-DEFAULT_HISTORY_EMBED_PATH = os.environ.get("NFSP_HISTORY_EMBEDDING", "artifacts/history_embedding_pretrain.pt")
+DEFAULT_CARD_EMBED_PATH = os.environ.get("NFSP_CARD_EMBEDDING")
+DEFAULT_HISTORY_EMBED_PATH = os.environ.get("NFSP_HISTORY_EMBEDDING")
 DEFAULT_DEVICE = os.environ.get("NFSP_DEVICE", "cpu")
 DEFAULT_GREEDY = os.environ.get("NFSP_GREEDY", "1") not in {"0", "false", "False"}
 
 
-def _maybe_load_card_embedding(path: Optional[str], device: torch.device) -> Optional[CardEmbeddingRuntime]:
-    if not path:
-        return None
-    try:
-        return _load_card_embedding(path, device=str(device))
-    except FileNotFoundError:
-        return None
+def _load_card_embedding_map(path: Optional[str], device: torch.device) -> dict[int, CardEmbeddingRuntime]:
+    candidates: list[str] = []
+    seen: set[str] = set()
+    if path:
+        candidates.append(path)
+    else:
+        if DEFAULT_CARD_EMBED_PATH:
+            candidates.append(DEFAULT_CARD_EMBED_PATH)
+        candidates.extend(
+            [
+                "artifacts/card_embedding_pretrain_32.pt",
+                "artifacts/card_embedding_pretrain_24.pt",
+                "artifacts/card_embedding_pretrain.pt",
+            ]
+        )
+    embeddings: dict[int, CardEmbeddingRuntime] = {}
+    for cand in candidates:
+        if not cand or cand in seen or not os.path.exists(cand):
+            continue
+        seen.add(cand)
+        try:
+            runtime = _load_card_embedding(cand, device=str(device))
+        except FileNotFoundError:
+            continue
+        embeddings[int(runtime.config.base_deck_size)] = runtime
+        if path:
+            break
+    return embeddings
 
 
-def _maybe_load_history_embedding(path: Optional[str], device: torch.device) -> Optional[HistoryEmbeddingRuntime]:
-    if not path:
-        return None
-    try:
-        return _load_history_embedding(path, device=str(device))
-    except FileNotFoundError:
-        return None
+def _load_history_embedding_map(path: Optional[str], device: torch.device) -> dict[int, HistoryEmbeddingRuntime]:
+    candidates: list[str] = []
+    seen: set[str] = set()
+    if path:
+        candidates.append(path)
+    else:
+        if DEFAULT_HISTORY_EMBED_PATH:
+            candidates.append(DEFAULT_HISTORY_EMBED_PATH)
+        candidates.extend(
+            [
+                "artifacts/history_embedding_pretrain_32.pt",
+                "artifacts/history_embedding_pretrain_24.pt",
+                "artifacts/history_embedding_pretrain.pt",
+            ]
+        )
+    embeddings: dict[int, HistoryEmbeddingRuntime] = {}
+    for cand in candidates:
+        if not cand or cand in seen or not os.path.exists(cand):
+            continue
+        seen.add(cand)
+        try:
+            runtime = _load_history_embedding(cand, device=str(device))
+        except FileNotFoundError:
+            continue
+        embeddings[int(runtime.config.base_deck_size)] = runtime
+        if path:
+            break
+    return embeddings
 
 
 class NFSPProductionAgent:
@@ -112,15 +154,12 @@ class NFSPProductionAgent:
         self.agent.rl_buf = None
         self.agent.sl_buf = None
 
-        self.card_embedding = _maybe_load_card_embedding(card_embedding_path, self.device)
-        self.history_embedding = _maybe_load_history_embedding(history_embedding_path, self.device)
-
-    def _build_spec(self, game_state: dict):
-        return _deck_spec_from_game(
-            game_state,
-            card_embedding=self.card_embedding,
-            history_embedding=self.history_embedding,
-        )
+        self.card_embeddings = _load_card_embedding_map(card_embedding_path, self.device)
+        self.history_embeddings = _load_history_embedding_map(history_embedding_path, self.device)
+        if not self.card_embeddings:
+            print("[embeddings] no card embedding artifacts loaded; using multi-hot card features.")
+        if not self.history_embeddings:
+            print("[embeddings] no history embedding artifacts loaded; using legacy history multi-hot features.")
 
     @torch.no_grad()
     def determine_action(self, game_state: dict) -> int:
@@ -131,13 +170,20 @@ class NFSPProductionAgent:
         if not cp:
             raise ValueError("Game state missing 'cp_nickname'")
 
-        spec = self._build_spec(game_state)
+        deck_size = int(game_state.get("rules", {}).get("deck_size", 24))
+        card_embedding = self.card_embeddings.get(deck_size)
+        history_embedding = self.history_embeddings.get(deck_size)
+        spec = _deck_spec_from_game(
+            game_state,
+            card_embedding=card_embedding,
+            history_embedding=history_embedding,
+        )
         obs_vec, pub_prior = vectorize_obs(
             game_state,
             cp,
             spec,
-            card_embedding=self.card_embedding,
-            history_embedding=self.history_embedding,
+            card_embedding=card_embedding,
+            history_embedding=history_embedding,
         )
         mask = _legal_action_mask(game_state, spec, pub_prior)
         if mask.sum() <= 0:
