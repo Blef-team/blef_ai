@@ -1,0 +1,16 @@
+FROM public.ecr.aws/lambda/python:3.11
+
+ENV CPUINFO_LOG_LEVEL=error
+
+COPY requirements.txt ${LAMBDA_TASK_ROOT}/requirements.txt
+RUN pip install --upgrade pip \
+    && pip install -r ${LAMBDA_TASK_ROOT}/requirements.txt --target "${LAMBDA_TASK_ROOT}" \
+    && rm -rf /root/.cache/pip
+
+COPY nfsp_ai ${LAMBDA_TASK_ROOT}/nfsp_ai
+COPY shared ${LAMBDA_TASK_ROOT}/shared
+COPY agent.py ${LAMBDA_TASK_ROOT}/agent.py
+COPY lambda_function.py ${LAMBDA_TASK_ROOT}/lambda_function.py
+COPY artifacts ${LAMBDA_TASK_ROOT}/artifacts
+
+CMD ["lambda_function.lambda_handler"]
