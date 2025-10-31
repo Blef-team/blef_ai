@@ -140,3 +140,9 @@ games*/
 
 # pytorch models
 *.pt
+
+# logs
+logs*/*
+
+# self-play runs
+runs*/*
