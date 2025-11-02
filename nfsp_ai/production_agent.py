@@ -116,7 +116,12 @@ def _load_history_embedding_map(path: Optional[str], device: torch.device) -> di
             runtime = _load_history_embedding(cand, device=str(device))
         except FileNotFoundError:
             continue
-        embeddings[int(runtime.config.base_deck_size)] = runtime
+        num_actions = runtime.config.num_actions
+        if abs(num_actions - GameRules(24).num_actions) < 2:
+            deck_size = 24
+        elif abs(num_actions - GameRules(32).num_actions) < 2:
+            deck_size = 32
+        embeddings[deck_size] = runtime
         if path:
             break
     return embeddings

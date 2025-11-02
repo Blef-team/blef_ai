@@ -2,8 +2,8 @@
 
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-NFSP_DIR="${ROOT_DIR}/nfsp"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+NFSP_DIR="${ROOT_DIR}/nfsp_ai"
 IMAGE_NAME="blef-nfsp-lambda:lambda-compatible"
 
 if [[ -z "${ACCT:-}" || -z "${REGION:-}" ]]; then
@@ -52,13 +52,14 @@ trap cleanup EXIT
 
 mkdir -p "${TEMP_DIR}/artifacts"
 
-rsync -a --exclude '__pycache__' "${NFSP_DIR}/nfsp_ai" "${TEMP_DIR}/"
-rsync -a --exclude '__pycache__' "${NFSP_DIR}/shared" "${TEMP_DIR}/"
-cp "${NFSP_DIR}/agent.py" "${TEMP_DIR}/agent.py"
-cp "${NFSP_DIR}/lambda_function.py" "${TEMP_DIR}/lambda_function.py"
+rsync -a --exclude '__pycache__' "${NFSP_DIR}" "${TEMP_DIR}/"
+rsync -a --exclude '__pycache__' "${ROOT_DIR}/shared" "${TEMP_DIR}/"
+cp "${NFSP_DIR}/production_agent.py" "${TEMP_DIR}/agent.py"
+cp "${ROOT_DIR}/deployment/lambda_function.py" "${TEMP_DIR}/lambda_function.py"
 rsync -a "${ROOT_DIR}/artifacts/" "${TEMP_DIR}/artifacts/"
+rsync -a --exclude '__pycache__' "${ROOT_DIR}/conservative_ai" "${TEMP_DIR}/"
 
-cp "${NFSP_DIR}/deployment/requirements-lambda.txt" "${TEMP_DIR}/requirements.txt"
+cp "${NFSP_DIR}/deployment/requirements.txt" "${TEMP_DIR}/requirements.txt"
 cp "${NFSP_DIR}/deployment/Dockerfile.lambda" "${TEMP_DIR}/Dockerfile"
 
 echo "[build] Building Docker image ${IMAGE_NAME}"
