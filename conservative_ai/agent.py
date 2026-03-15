@@ -3,7 +3,6 @@ from shared.ai import agent
 from shared.probabilities import dynamic_probabilities
 from shared.game_utils import GameRules
 
-
 def normalise(arr):
     sum_arr = sum(arr)
     if sum_arr:
@@ -36,6 +35,46 @@ class ConservativeAgent(agent.Agent):
         if game_state.get("history"):
             last_bet = game_state.get("history")[-1]["action_id"]
 
+        # Determine Adjacency Role
+        players = game_state.get("players", [])
+        cp_nickname = game_state.get("cp_nickname")
+        cp_index = next((i for i, p in enumerate(players) if p.get("nickname") == cp_nickname), -1)
+        
+        N = 1
+        if cp_index != -1 and players[cp_index].get("team") is not None:
+            cp_team = players[cp_index].get("team")
+            
+            # Count contiguous allies forward
+            forward_allies = 0
+            for i in range(1, len(players)):
+                idx = (cp_index + i) % len(players)
+                if players[idx].get("team") == cp_team:
+                    forward_allies += 1
+                else:
+                    break
+                    
+            # Count contiguous allies backward
+            backward_allies = 0
+            for i in range(1, len(players)):
+                idx = (cp_index - i) % len(players)
+                if players[idx].get("team") == cp_team:
+                    backward_allies += 1
+                else:
+                    break
+            
+            if forward_allies > 0 or backward_allies > 0:
+                N = 1 + forward_allies + backward_allies
+                if backward_allies == 0:
+                    role = "first"
+                elif forward_allies == 0:
+                    role = "last"
+                else:
+                    role = "middle"
+            else:
+                role = "alone"
+        else:
+            role = "alone"
+
         bet_probs_generic = dynamic_probabilities.get_generic_bet_probabilities(game_state, last_bet=last_bet)
         bet_floor = 0
         for i, prob in enumerate(bet_probs_generic):
@@ -44,10 +83,23 @@ class ConservativeAgent(agent.Agent):
         
         effective_last_bet = max(last_bet if last_bet is not None else -1, bet_floor - 1)
 
+        # Middle role: just raise by 1
+        if role == "middle":
+            return min(effective_last_bet + 1, check_action_id)
+
         bet_probs_betting = dynamic_probabilities.get_bet_probabilities(game_state, for_betting=True, last_bet=effective_last_bet)
         sampling_weights = compute_sampling_weights(bet_probs_betting)
 
-        if last_bet is not None and last_bet < check_action_id:
+        # First role: get weights
+        if role == "first":
+            start_zero = effective_last_bet + 1
+            end_zero = min(effective_last_bet + 1 + N - 1, len(sampling_weights))
+            for i in range(start_zero, end_zero):
+                sampling_weights[i] = 0.0
+            sampling_weights = normalise(sampling_weights)
+
+        # Check/Bet Evaluation
+        if role in {"alone", "first"} and last_bet is not None and last_bet < check_action_id:
             prob_last_bet_exists = dynamic_probabilities.get_bet_probabilities(game_state, for_betting=False, specific_action_id=last_bet)
             
             if prob_last_bet_exists == 0:
@@ -70,8 +122,11 @@ class ConservativeAgent(agent.Agent):
         if not any(sampling_weights):
             return check_action_id if last_bet is not None else 0
 
-        sampled_action = random.choices(range(len(sampling_weights)), weights=sampling_weights, k=1)[0]
-        return sampled_action
+        # By this point we've chosen not to check, so we bet
+        if role == "first":
+            return min(effective_last_bet + 1, check_action_id)
+        else: # Alone or last role
+            return random.choices(range(len(sampling_weights)), weights=sampling_weights, k=1)[0]
 
     def run(self):
         """
