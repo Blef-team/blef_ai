@@ -35,30 +35,36 @@ class ConservativeCrawlingAgent(agent.Agent):
         last_bet = None
         if game_state.get("history"):
             last_bet = game_state.get("history")[-1]["action_id"]
+        else:
+            last_bet = -1
 
-        # Determine Adjacency Role
-        players = game_state.get("players", [])
+        # Filter eliminated players and determine adjacency role
+        all_players = game_state.get("players", [])
+        active_players = [p for p in all_players if p.get("n_cards", 0) > 0]
         cp_nickname = game_state.get("cp_nickname")
-        cp_index = next((i for i, p in enumerate(players) if p.get("nickname") == cp_nickname), -1)
+        cp_index = next((i for i, p in enumerate(active_players) if p.get("nickname") == cp_nickname), -1)
         
         N = 1
-        if cp_index != -1 and players[cp_index].get("team") is not None:
-            cp_team = players[cp_index].get("team")
+        role = "alone"
+        last_ally_nickname = cp_nickname
+
+        if cp_index != -1 and active_players[cp_index].get("team") is not None:
+            cp_team = active_players[cp_index].get("team")
             
             # Count contiguous allies forward
             forward_allies = 0
-            for i in range(1, len(players)):
-                idx = (cp_index + i) % len(players)
-                if players[idx].get("team") == cp_team:
+            for i in range(1, len(active_players)):
+                idx = (cp_index + i) % len(active_players)
+                if active_players[idx].get("team") == cp_team:
                     forward_allies += 1
                 else:
                     break
                     
             # Count contiguous allies backward
             backward_allies = 0
-            for i in range(1, len(players)):
-                idx = (cp_index - i) % len(players)
-                if players[idx].get("team") == cp_team:
+            for i in range(1, len(active_players)):
+                idx = (cp_index - i) % len(active_players)
+                if active_players[idx].get("team") == cp_team:
                     backward_allies += 1
                 else:
                     break
@@ -67,42 +73,46 @@ class ConservativeCrawlingAgent(agent.Agent):
                 N = 1 + forward_allies + backward_allies
                 if backward_allies == 0:
                     role = "first"
+                    last_ally_idx = (cp_index + forward_allies) % len(active_players)
+                    last_ally_nickname = active_players[last_ally_idx].get("nickname")
                 elif forward_allies == 0:
                     role = "last"
                 else:
                     role = "middle"
-            else:
-                role = "alone"
-        else:
-            role = "alone"
 
+        # Extract Generic Probabilities and Bet Floor
         bet_probs_generic = dynamic_probabilities.get_generic_bet_probabilities(game_state, last_bet=last_bet)
         bet_floor = 0
         for i, prob in enumerate(bet_probs_generic):
             if prob == 1.0:
                 bet_floor = i
-        
-        effective_last_bet = max(last_bet if last_bet is not None else -1, bet_floor - 1)
 
-        # Middle role: just raise by 1 (or check if at max)
+        # Middle role: just raise by 1
         if role == "middle":
-            return min(effective_last_bet + 1, check_action_id)
+            return min(last_bet + 1, check_action_id)
 
-        bet_probs_betting = dynamic_probabilities.get_bet_probabilities(game_state, for_betting=True, last_bet=effective_last_bet)
-        sampling_weights = compute_sampling_weights(bet_probs_betting, bet_probs_generic)
+        # First role: get weights
+        if role == "first":
+            # First ally looks ahead to the situation the last ally will face.
+            effective_last_bet = max(last_bet + N - 1, bet_floor - 1)
+            
+            # Temporarily pretend to be the last ally to calculate using their jokers
+            original_cp_nickname = game_state["cp_nickname"]
+            game_state["cp_nickname"] = last_ally_nickname
+            bet_probs_betting = dynamic_probabilities.get_bet_probabilities(game_state, for_betting=True, last_bet=effective_last_bet)
+            game_state["cp_nickname"] = original_cp_nickname
+            sampling_weights = compute_sampling_weights(bet_probs_betting, bet_probs_generic)
+            
+        else:
+            # role is "alone" or "last" -> Their immediate bet is strictly bound by the bet floor
+            effective_last_bet = max(last_bet, bet_floor - 1)
+            bet_probs_betting = dynamic_probabilities.get_bet_probabilities(game_state, for_betting=True, last_bet=effective_last_bet)
+            sampling_weights = compute_sampling_weights(bet_probs_betting, bet_probs_generic)
 
-        # First role: zero out the weights for the upcoming sets allies will be forced to take
-        if role == "first" and N > 1:
-            start_zero = effective_last_bet + 1
-            end_zero = min(effective_last_bet + 1 + N - 1, len(sampling_weights))
-            for i in range(start_zero, end_zero):
-                sampling_weights[i] = 0.0
-            sampling_weights = normalise(sampling_weights)
-
-        # Check/Bet Evaluation
-        if role in {"alone", "first"} and last_bet is not None and last_bet < check_action_id:
+        # Check/Bet Evaluation (alone and first can check; last cannot)
+        if role in {"alone", "first"} and last_bet > -1 and last_bet < check_action_id:
             prob_last_bet_exists = dynamic_probabilities.get_bet_probabilities(game_state, for_betting=False, specific_action_id=last_bet)
-
+            
             if prob_last_bet_exists == 0:
                 return check_action_id
 
@@ -120,12 +130,13 @@ class ConservativeCrawlingAgent(agent.Agent):
             if check:
                 return check_action_id
 
+        # Fallback if there are absolutely zero valid remaining bets
         if not any(sampling_weights):
-            return check_action_id if last_bet is not None else 0
-            
+            return check_action_id if last_bet > -1 else 0
+
         # By this point we've chosen not to check, so we bet
         if role == "first":
-            return min(effective_last_bet + 1, check_action_id)
+            return min(last_bet + 1, check_action_id)
         else: # Alone or last role
             return random.choices(range(len(sampling_weights)), weights=sampling_weights, k=1)[0]
 
