@@ -108,7 +108,7 @@ class ConservativeAgent(agent.Agent):
             sampling_weights = compute_sampling_weights(bet_probs_betting)
 
         # Check/Bet Evaluation (alone and first can check; last cannot)
-        if role in {"alone", "first"} and last_bet is not None and last_bet < check_action_id:
+        if role in {"alone", "first"} and last_bet > -1 and last_bet < check_action_id:
             prob_last_bet_exists = dynamic_probabilities.get_bet_probabilities(game_state, for_betting=False, specific_action_id=last_bet)
             
             if prob_last_bet_exists == 0:
