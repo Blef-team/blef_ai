@@ -173,11 +173,13 @@ def _rebuild_rules(rules_key: Tuple[int, int, int]) -> dict:
 
 class ProbContext(NamedTuple):
     hand_cards: Tuple[Tuple[int, int], ...]
+    allied_cards: Tuple[Tuple[int, int], ...]
     common_cards: Tuple[Tuple[int, int], ...]
     known_cards: Tuple[Tuple[int, int], ...]
     value_counts: Tuple[int, ...]
     colour_counts: Tuple[int, ...]
     my_jokers: int
+    allied_jokers: int
     common_jokers: int
     deck_size: int
     total_jokers: int
@@ -185,53 +187,50 @@ class ProbContext(NamedTuple):
 
 
 @lru_cache(maxsize=50000)
-def _prepare_prob_context(hand_key: Tuple[Tuple[int, int], ...], common_key: Tuple[Tuple[int, int], ...], rules_key: Tuple[int, int, int]) -> ProbContext:
+def _prepare_prob_context(
+    hand_key: Tuple[Tuple[int, int], ...], 
+    allied_key: Tuple[Tuple[int, int], ...], 
+    common_key: Tuple[Tuple[int, int], ...], 
+    rules_key: Tuple[int, int, int]
+) -> ProbContext:
     deck_size, total_jokers, total_blanks = rules_key
     hand_cards = tuple((int(v), int(c)) for v, c in hand_key)
+    allied_cards = tuple((int(v), int(c)) for v, c in allied_key)
     common_cards = tuple((int(v), int(c)) for v, c in common_key)
-    known_cards = hand_cards + common_cards
+    known_cards = hand_cards + allied_cards + common_cards
 
     if deck_size % 4 != 0:
         raise ValueError(f"Deck size {deck_size} unsupported (must be divisible by 4).")
     num_values = deck_size // 4
     value_counts = [0] * num_values
     colour_counts = [0] * 4
-    my_jokers = 0
-    common_jokers = 0
 
-    for value, colour in hand_cards:
+    my_jokers = sum(1 for v, c in hand_cards if v == -1)
+    allied_jokers = sum(1 for v, c in allied_cards if v == -1)
+    common_jokers = sum(1 for v, c in common_cards if v == -1)
+
+    for value, colour in known_cards:
         if value >= 0:
             if value >= num_values:
                 raise ValueError(f"Card value {value} exceeds deck bounds for deck size {deck_size}.")
             value_counts[value] += 1
             if colour >= 0:
                 colour_counts[colour] += 1
-        elif value == -1:
-            my_jokers += 1
-
-    for value, colour in common_cards:
-        if value >= 0:
-            if value >= num_values:
-                raise ValueError(f"Card value {value} exceeds deck bounds for deck size {deck_size}.")
-            value_counts[value] += 1
-            if colour >= 0:
-                colour_counts[colour] += 1
-        elif value == -1:
-            common_jokers += 1
 
     return ProbContext(
         hand_cards=hand_cards,
+        allied_cards=allied_cards,
         common_cards=common_cards,
         known_cards=known_cards,
         value_counts=tuple(value_counts),
         colour_counts=tuple(colour_counts),
         my_jokers=my_jokers,
+        allied_jokers=allied_jokers,
         common_jokers=common_jokers,
         deck_size=int(deck_size),
         total_jokers=int(total_jokers),
         total_blanks=int(total_blanks),
     )
-
 
 def _calculate_prob_with_context(action_id: int, ctx: ProbContext, unknown_cards_num: int, for_betting: bool) -> float:
     rules = {"deck_size": ctx.deck_size, "jokers": ctx.total_jokers, "blanks": ctx.total_blanks}
@@ -242,8 +241,9 @@ def _calculate_prob_with_context(action_id: int, ctx: ProbContext, unknown_cards
     value_counts = list(ctx.value_counts)
     colour_counts = list(ctx.colour_counts)
     my_jokers = ctx.my_jokers
+    allied_jokers = ctx.allied_jokers
     common_jokers = ctx.common_jokers
-    known_jokers = my_jokers + common_jokers
+    known_jokers = my_jokers + allied_jokers + common_jokers
 
     jokers_in_play = my_jokers + common_jokers if for_betting else common_jokers
 
@@ -344,11 +344,13 @@ def _calculate_prob_with_context(action_id: int, ctx: ProbContext, unknown_cards
         
         return _calculate_prob_simple_set(needed, cards_of_value_in_deck, jokers_in_deck, other_cards_in_deck, unknown_cards_num)
 
-def _calculate_prob_no_cache(action_id, hand, common_hand, unknown_cards_num, rules, for_betting):
+def _calculate_prob_no_cache(action_id, hand, allied_hand, common_hand, unknown_cards_num, rules, for_betting):
     hand_key = _normalize_cards(hand)
+    allied_key = _normalize_cards(allied_hand)
     common_key = _normalize_cards(common_hand)
     rules_key = _normalize_rules(rules)
-    ctx = _prepare_prob_context(hand_key, common_key, rules_key)
+    ctx = _prepare_prob_context(hand_key, allied_key, common_key, rules_key)
+    
     return _calculate_prob_with_context(
         int(action_id),
         ctx,
@@ -357,26 +359,27 @@ def _calculate_prob_no_cache(action_id, hand, common_hand, unknown_cards_num, ru
     )
 
 
-def calculate_prob(action_id, hand, common_hand, unknown_cards_num, rules, for_betting):
+def calculate_prob(action_id, hand, allied_hand, common_hand, unknown_cards_num, rules, for_betting):
     return _calculate_prob_no_cache(
         action_id,
         hand,
+        allied_hand,
         common_hand,
         unknown_cards_num,
         rules,
         for_betting,
     )
 
-
 @lru_cache(maxsize=20000)
 def _probability_vector_cached(
     hand_key: Tuple[Tuple[int, int], ...],
+    allied_key: Tuple[Tuple[int, int], ...],
     common_key: Tuple[Tuple[int, int], ...],
     rules_key: Tuple[int, int, int],
     unknown_cards_num: int,
     for_betting_flag: bool,
 ) -> Tuple[float, ...]:
-    ctx = _prepare_prob_context(hand_key, common_key, rules_key)
+    ctx = _prepare_prob_context(hand_key, allied_key, common_key, rules_key)
     game_rules = GameRules(rules_key[0])
     vector = [
         _calculate_prob_with_context(action_id, ctx, unknown_cards_num, for_betting_flag)
@@ -392,21 +395,30 @@ def get_bet_probabilities(game_state, for_betting=False, last_bet=None, specific
     players = game_state.get("players", [])
     agent_nickname = game_state["cp_nickname"]
 
-    matching_hands = [h for h in game_state.get("hands", []) if h.get("nickname") == agent_nickname]
-    if not matching_hands:
-        return 0.0 if specific_action_id is not None else [0.0] * (game_rules.num_actions - 1)
-    hand = [(card["value"], card["colour"]) for card in matching_hands[0]["hand"]]
+    agent_team = next((p.get("team") for p in players if p.get("nickname") == agent_nickname), None)
+    allies = {p.get("nickname") for p in players if p.get("team") == agent_team and p.get("nickname") != agent_nickname} if agent_team is not None else set()
 
-    others_card_num = sum(p.get("n_cards", 0) for p in players if p.get("nickname") != agent_nickname)
+    hands = game_state.get("hands", [])
+    hand, allied_hand = [], []
+    for h in hands:
+        if h.get("nickname") == agent_nickname:
+            hand = [(card["value"], card["colour"]) for card in h.get("hand", [])]
+        elif h.get("nickname") in allies:
+            allied_hand.extend([(card["value"], card["colour"]) for card in h.get("hand", [])])
+
+    # Unseen cards belong only to opponents
+    others_card_num = sum(p.get("n_cards", 0) for p in players if p.get("nickname") not in allies and p.get("nickname") != agent_nickname)
     common_hand = [(card["value"], card["colour"]) for card in game_state.get("common_hand", [])]
 
     hand_key = _normalize_cards(hand)
+    allied_key = _normalize_cards(allied_hand)
     common_key = _normalize_cards(common_hand)
     rules_key = _normalize_rules(rules)
 
     vector = list(
         _probability_vector_cached(
             hand_key,
+            allied_key,
             common_key,
             rules_key,
             int(others_card_num),
@@ -433,15 +445,17 @@ def get_generic_bet_probabilities(game_state, last_bet=None):
     others_card_num = sum(p.get("n_cards", 0) for p in players if p.get("nickname") != agent_nickname)
     
     common_hand = [(card["value"], card["colour"]) for card in game_state.get("common_hand", [])]
-    unknown_cards_num = my_card_num + others_card_num
+    unknown_cards_num = sum(p.get("n_cards", 0) for p in players)
 
     hand_key: Tuple[Tuple[int, int], ...] = ()
+    allied_key: Tuple[Tuple[int, int], ...] = ()
     common_key = _normalize_cards(common_hand)
     rules_key = _normalize_rules(rules)
 
     vector = list(
         _probability_vector_cached(
             hand_key,
+            allied_key,
             common_key,
             rules_key,
             int(unknown_cards_num),
