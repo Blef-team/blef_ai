@@ -93,7 +93,10 @@ class ConservativeAgent(agent.Agent):
         if role == "first":
             # First ally looks ahead to the situation the last ally will face 
             effective_last_bet = max(last_bet + N - 1, bet_floor - 1)
-            
+
+            if effective_last_bet >= check_action_id - 1:
+                return check_action_id if last_bet > -1 else 0
+
             # Temporarily pretend to be the last ally to calculate using their jokers
             original_cp_nickname = game_state["cp_nickname"]
             game_state["cp_nickname"] = last_ally_nickname
