@@ -271,8 +271,8 @@ def _calculate_prob_with_context(action_id: int, ctx: ProbContext, unknown_cards
         val1, val2 = set_details["detail_1"], set_details["detail_2"]
         if val1 >= len(value_counts) or val2 >= len(value_counts):
             return 0.0
-        needed1 = 2 - value_counts[val1]
-        needed2 = 2 - value_counts[val2]
+        needed1 = max(0, 2 - value_counts[val1])
+        needed2 = max(0, 2 - value_counts[val2])
         
         if needed1 + needed2 <= jokers_in_play: return 1.0
         
@@ -314,8 +314,8 @@ def _calculate_prob_with_context(action_id: int, ctx: ProbContext, unknown_cards
         val3, val2 = set_details["detail_1"], set_details["detail_2"]
         if val3 >= len(value_counts) or val2 >= len(value_counts):
             return 0.0
-        needed3 = 3 - value_counts[val3]
-        needed2 = 2 - value_counts[val2]
+        needed3 = max(0, 3 - value_counts[val3])
+        needed2 = max(0, 2 - value_counts[val2])
         
         if needed3 + needed2 <= jokers_in_play: return 1.0
         
