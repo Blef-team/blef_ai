@@ -773,6 +773,7 @@ class MyEnv:
         pick_jokers_in_range: bool = False,
         pick_blanks_in_range: bool = False,
         pick_common_cards_in_range: bool = False,
+        scenario_init_max_cards: int = 0,
     ):
         if n_agents < 2 or n_agents > 8:
             raise ValueError("n_agents must be in [2, 8]")
@@ -809,6 +810,7 @@ class MyEnv:
         self.pick_jokers_in_range = pick_jokers_in_range
         self.pick_blanks_in_range = pick_blanks_in_range
         self.pick_common_cards_in_range = pick_common_cards_in_range
+        self.scenario_init_max_cards = max(0, int(scenario_init_max_cards))
 
         self.game: Dict = {}
         self._last_obs = None
@@ -869,6 +871,16 @@ class MyEnv:
         common_cards = self.common_card_cap
         if self.pick_common_cards_in_range:
             common_cards = random.randint(0, self.common_card_cap)
+        # Random-initial-cards (RIC) scenario sampling: when set, each player's
+        # opening hand size is sampled uniformly from [1, scenario_init_max_cards],
+        # exposing the network to high-cardinality states from step 0 instead of
+        # waiting for them to arise organically (which they rarely do — see
+        # buffer-distribution diagnostic in tools/diagnose_buffer.py and plan
+        # docs/phase_plan.md §111).
+        init_card_dist = None
+        cap = getattr(self, "scenario_init_max_cards", 0) or 0
+        if cap >= 2:
+            init_card_dist = [random.randint(1, cap) for _ in range(n_agents)]
         # Normal path: start a completely new game (either there was no pending round boundary or the game finished)
         self.game = gm.create_game(
             n_agents,
@@ -878,6 +890,7 @@ class MyEnv:
             blanks=blanks,
             common_cards=common_cards,
             verbose=self.verbose,
+            init_card_dist=init_card_dist,
         )
         # Sync rules from the created game (single assignment; remove duplicate)
         self.rules = dict(self.game.get("rules", self.rules))
@@ -1170,6 +1183,19 @@ def main():
         help="Sample the number of community cards uniformly from [0, --common-cards] for each new game.",
     )
     parser.add_argument(
+        "--scenario-init-max-cards",
+        dest="scenario_init_max_cards",
+        type=int,
+        default=0,
+        help=(
+            "Random-initial-cards (RIC) scenario sampling: when N>=2, every new "
+            "game starts with each player's hand size sampled uniformly from "
+            "[1, N]. Forces the replay buffer to populate diverse card counts "
+            "from step 0, addressing buffer-distribution starvation (see "
+            "docs/phase_plan.md §111 and tools/diagnose_buffer.py)."
+        ),
+    )
+    parser.add_argument(
         "--eval-only",
         dest="eval_only",
         action="store_true",
@@ -1412,6 +1438,7 @@ def main():
         pick_jokers_in_range=args.pick_jokers_in_range,
         pick_blanks_in_range=args.pick_blanks_in_range,
         pick_common_cards_in_range=args.pick_common_cards_in_range,
+        scenario_init_max_cards=args.scenario_init_max_cards,
     )
     obs0, mask0, _ = env.reset()
 
@@ -1465,6 +1492,9 @@ def main():
         pick_jokers_in_range=args.pick_jokers_in_range,
         pick_blanks_in_range=args.pick_blanks_in_range,
         pick_common_cards_in_range=args.pick_common_cards_in_range,
+        # Eval env intentionally does NOT use scenario_init_max_cards: the RIC
+        # curriculum is a training-time intervention; eval scores the agent on
+        # natural-distribution starts (all players begin with 1 card).
     )
 
     if args.export_inference:
