@@ -331,12 +331,23 @@ def _detect_dims_from_checkpoint(ckpt_path: str) -> Tuple[int, int]:
     return obs_dim, act_dim
 
 
+def _detect_hidden_from_checkpoint(state: dict) -> int:
+    """Infer the hidden width from the Q net's first-layer output dim. Falls
+    back to 128 if not present (older checkpoints)."""
+    q = state.get("q") or {}
+    for k, v in (q.items() if isinstance(q, dict) else []):
+        if k.endswith("net.0.weight"):
+            return int(v.shape[0])
+    return 128
+
+
 def load_learner(checkpoint_path: str, device: Optional[torch.device] = None) -> NFSPAgent:
     device = device or torch.device("cpu")
     obs_dim, act_dim = _detect_dims_from_checkpoint(checkpoint_path)
-    cfg = NFSPConfig(rl_capacity=1, sl_capacity=1)  # don't allocate large buffers for inference
-    agent = NFSPAgent(obs_dim, act_dim, device=device, cfg=cfg)
     state = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    hidden = _detect_hidden_from_checkpoint(state)
+    cfg = NFSPConfig(rl_capacity=1, sl_capacity=1, hidden=hidden)  # don't allocate large buffers for inference
+    agent = NFSPAgent(obs_dim, act_dim, device=device, cfg=cfg)
     if "q" in state:
         agent.q.load_state_dict(state["q"])
     if "pi" in state:
