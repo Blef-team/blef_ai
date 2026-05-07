@@ -55,6 +55,26 @@ class MetricsRead(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             self.assertIsNone(run_manager._read_latest_metrics(tmp))
 
+    def test_read_latest_metrics_merges_same_step_rows(self):
+        # The trainer writes two rows per step: a training row with q_loss/sl_loss
+        # populated and an eval row with avg_reward/win_rate populated but losses
+        # 'nan'. Status should merge them so the user sees one combined snapshot.
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = os.path.join(tmp, "20260101-120000__r")
+            os.makedirs(run_dir)
+            csv_path = os.path.join(run_dir, "metrics.csv")
+            with open(csv_path, "w", encoding="utf-8") as fh:
+                fh.write("step,avg_reward,win_rate,q_loss,sl_loss\n")
+                fh.write("100,0.5,0.6,0.20,1.8\n")
+                fh.write("100,0.3,0.55,nan,nan\n")
+            latest = run_manager._read_latest_metrics(run_dir)
+            self.assertIsNotNone(latest)
+            self.assertEqual(latest["step"], "100")
+            self.assertEqual(latest["q_loss"], "0.20")
+            self.assertEqual(latest["sl_loss"], "1.8")
+            self.assertEqual(latest["avg_reward"], "0.3")
+            self.assertEqual(latest["win_rate"], "0.55")
+
 
 class OverrideSubcommand(unittest.TestCase):
     def test_override_writes_to_control_plane_json(self):
