@@ -165,7 +165,6 @@ class MatchResult:
     n_games: int
     wins: int
     losses: int
-    draws: int
     winrate: float
     winrate_ci_95: float
     mean_reward: float
@@ -199,9 +198,11 @@ def head_to_head(
     """Run `n_games` between learner and opponent. Learner plays the env's
     randomly-chosen reference seat each game; opponent plays all other seats.
 
-    Reward is +1 if the learner wins the round, -1 if it loses (env's natural
-    actor-perspective reward). Aggregated across rounds within a game; per-game
-    "win" defined as cumulative reward > 0.
+    Counts per-round outcomes from the *learner's* perspective by inspecting
+    ``info["round_result"]["loser"]`` at each terminal — same convention as
+    the trainer's in-loop ``_evaluate_policy``. The env's raw step reward is
+    actor-relative (positive when the actor wins), which is misleading when
+    the opponent is the actor at a round terminal.
     """
     if seed is not None:
         random.seed(seed)
@@ -240,14 +241,13 @@ def head_to_head(
         common_cards=common_cards,
     )
 
-    wins = losses = draws = 0
+    rounds_won = rounds_lost = 0
     total_actions = 0
     t0 = time.time()
 
     for _ in range(n_games):
         opponent.reset()
         obs, mask, _pid = env.reset()
-        cumulative_reward = 0.0
         actions_this_game = 0
         done = False
 
@@ -266,31 +266,34 @@ def head_to_head(
                 action = opponent.act(game_state, obs, mask)
                 action = _legal_or_random(action, mask)
 
-            obs, mask, reward, done, _info = env.step(int(action))
+            obs, mask, _reward, done, info = env.step(int(action))
             actions_this_game += 1
-            cumulative_reward += float(reward)
+
+            # Per-round bookkeeping from the learner's perspective.
+            # Mirrors `_evaluate_policy` in nfsp_ai/agent.py.
+            if info and isinstance(info, dict):
+                rr = info.get("round_result") or {}
+                loser = rr.get("loser")
+                if loser:
+                    if loser == ref:
+                        rounds_lost += 1
+                    else:
+                        rounds_won += 1
 
         total_actions += actions_this_game
-        if cumulative_reward > 0:
-            wins += 1
-        elif cumulative_reward < 0:
-            losses += 1
-        else:
-            draws += 1
 
     elapsed = time.time() - t0
-    settled = wins + losses
-    winrate = wins / settled if settled else 0.0
+    settled = rounds_won + rounds_lost
+    winrate = rounds_won / settled if settled else 0.0
     return MatchResult(
         opponent=opponent.name,
         config=f"deck{deck_size}_p{n_players}_mc{max_cards}_j{jokers}_b{blanks}_cc{common_cards}",
         n_games=n_games,
-        wins=wins,
-        losses=losses,
-        draws=draws,
+        wins=rounds_won,
+        losses=rounds_lost,
         winrate=winrate,
-        winrate_ci_95=_winrate_ci_95(wins, settled),
-        mean_reward=(wins - losses) / max(1, n_games),
+        winrate_ci_95=_winrate_ci_95(rounds_won, settled),
+        mean_reward=(rounds_won - rounds_lost) / max(1, n_games),
         mean_game_length_actions=total_actions / max(1, n_games),
         elapsed_seconds=elapsed,
         metadata={"seed": seed, "greedy": greedy_learner},
@@ -404,7 +407,7 @@ def run_ladder(
 
 def write_results_csv(path: str, results: List[MatchResult]) -> None:
     fieldnames = [
-        "opponent", "config", "n_games", "wins", "losses", "draws",
+        "opponent", "config", "n_games", "wins", "losses",
         "winrate", "winrate_ci_95", "mean_reward",
         "mean_game_length_actions", "elapsed_seconds",
     ]
@@ -470,7 +473,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         w = csv.DictWriter(
             sys.stdout,
             fieldnames=[
-                "opponent", "config", "n_games", "wins", "losses", "draws",
+                "opponent", "config", "n_games", "wins", "losses",
                 "winrate", "winrate_ci_95", "mean_reward",
                 "mean_game_length_actions", "elapsed_seconds",
             ],

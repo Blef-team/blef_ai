@@ -41,7 +41,9 @@ class EvalLadderSmokeTest(unittest.TestCase):
         self.assertIsInstance(r, MatchResult)
         self.assertEqual(r.opponent, "random")
         self.assertEqual(r.n_games, 4)
-        self.assertEqual(r.wins + r.losses + r.draws, 4)
+        # Per-round counting: every Blef round has exactly one loser, so
+        # wins + losses == total rounds across the n_games sampled (≥ n_games).
+        self.assertGreaterEqual(r.wins + r.losses, 4)
         self.assertGreaterEqual(r.mean_game_length_actions, 1.0)
         self.assertGreater(r.elapsed_seconds, 0.0)
 
@@ -53,7 +55,7 @@ class EvalLadderSmokeTest(unittest.TestCase):
             n_games=2, deck_size=24, n_players=2, max_cards=1, seed=7,
         )
         self.assertEqual(r.opponent, "conservative")
-        self.assertEqual(r.wins + r.losses + r.draws, 2)
+        self.assertGreaterEqual(r.wins + r.losses, 2)
 
     def test_cfr_unavailable_when_outputs_missing(self):
         # cfr_ai/outputs/ should not exist locally for this PR's test env.
@@ -65,6 +67,28 @@ class EvalLadderSmokeTest(unittest.TestCase):
             self.assertEqual(built, [])
         else:
             self.skipTest("CFR strategies present locally; availability test skipped")
+
+    def test_winrate_perspective_is_learner(self):
+        """Regression: the original head_to_head summed env-step rewards (which
+        are actor-relative). When the *opponent* called CHECK at a round terminal
+        the env returned ``+1`` from the opponent's perspective, which the
+        learner-side ledger would mis-credit. The fix counts per-round outcomes
+        from ``info.round_result.loser`` vs ``env._ref_nick`` directly.
+
+        Sanity check: a fresh (random-policy) agent vs RandomOpponent over a
+        decent sample should be near 0.5 winrate. The pre-fix code biased
+        toward 0 in this configuration because half the round terminals are
+        opponent-actor and got sign-flipped.
+        """
+        agent = _fresh_agent()
+        opp = RandomOpponent()
+        r = head_to_head(
+            agent, opp,
+            n_games=80, deck_size=24, n_players=2, max_cards=1, seed=11,
+        )
+        # 80 games × ~2.5 rounds each → ~200 rounds; CI ≈ ±0.07 at p=0.5
+        self.assertGreaterEqual(r.winrate, 0.30)
+        self.assertLessEqual(r.winrate, 0.70)
 
     def test_winrate_ci_bounds(self):
         agent = _fresh_agent()
