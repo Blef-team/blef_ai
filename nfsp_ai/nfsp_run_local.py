@@ -1186,6 +1186,18 @@ def main():
         help="Sample the number of community cards uniformly from [0, --common-cards] for each new game.",
     )
     parser.add_argument(
+        "--hidden-width",
+        dest="hidden_width",
+        type=int,
+        default=128,
+        help=(
+            "Hidden layer width for both Q and policy networks (default: 128). "
+            "Larger values may extract more signal at the cost of more compute "
+            "and overfitting risk on starved data — only useful after the "
+            "buffer-distribution issue is fixed (see plan_v2 §6.2)."
+        ),
+    )
+    parser.add_argument(
         "--randomize-initial-hands",
         dest="randomize_initial_hands",
         action="store_true",
@@ -1465,7 +1477,7 @@ def main():
             n_step=6,
             burst_rl_updates_on_reward=4,
             burst_reward_threshold=0.5,
-            hidden=128
+            hidden=int(args.hidden_width),
         ),
     )
 
