@@ -432,11 +432,15 @@ def write_results_csv(path: str, results: List[MatchResult]) -> None:
         "winrate", "winrate_ci_95", "mean_reward",
         "mean_game_length_actions", "elapsed_seconds",
     ]
-    new_file = not os.path.exists(path)
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with open(path, "a" if not new_file else "w", newline="") as f:
+    # Treat a zero-byte file the same as a missing one. Tools like mktemp(1)
+    # create an empty placeholder; without this, the writer would open in
+    # append mode and skip the header, silently producing a header-less CSV
+    # whose first data row is then dropped by downstream `tail -n +2` filters.
+    has_existing_data = os.path.exists(path) and os.path.getsize(path) > 0
+    with open(path, "a" if has_existing_data else "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fieldnames)
-        if new_file:
+        if not has_existing_data:
             w.writeheader()
         for r in results:
             row = {k: getattr(r, k) for k in fieldnames}
