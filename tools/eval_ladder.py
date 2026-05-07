@@ -194,6 +194,8 @@ def head_to_head(
     seed: Optional[int] = None,
     greedy_learner: bool = True,
     use_average_policy: bool = True,
+    card_embedding=None,
+    history_embedding=None,
 ) -> MatchResult:
     """Run `n_games` between learner and opponent. Learner plays the env's
     randomly-chosen reference seat each game; opponent plays all other seats.
@@ -215,6 +217,8 @@ def head_to_head(
         jokers=jokers,
         blanks=blanks,
         common_cards=common_cards,
+        card_embedding=card_embedding,
+        history_embedding=history_embedding,
     )
 
     # Sanity: env obs_dim must match the learner's expected input.
@@ -239,6 +243,8 @@ def head_to_head(
         jokers=jokers,
         blanks=blanks,
         common_cards=common_cards,
+        card_embedding=card_embedding,
+        history_embedding=history_embedding,
     )
 
     rounds_won = rounds_lost = 0
@@ -387,6 +393,8 @@ def run_ladder(
     blanks: int = 0,
     common_cards: int = 0,
     seed: Optional[int] = None,
+    card_embedding=None,
+    history_embedding=None,
 ) -> List[MatchResult]:
     results: List[MatchResult] = []
     for opp in opponents:
@@ -400,6 +408,8 @@ def run_ladder(
             blanks=blanks,
             common_cards=common_cards,
             seed=seed,
+            card_embedding=card_embedding,
+            history_embedding=history_embedding,
         )
         results.append(r)
     return results
@@ -444,6 +454,22 @@ def _build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--common-cards", type=int, default=0)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--output", default="", help="CSV output path. Empty = stdout.")
+    p.add_argument(
+        "--use-card-embeddings",
+        nargs="?",
+        const="auto",
+        default=None,
+        help="Path to a pretrained card-embedding artifact (.pt). Required when "
+             "the learner checkpoint was trained with embeddings; otherwise the "
+             "env obs_dim won't match the learner's input dim.",
+    )
+    p.add_argument(
+        "--use-history-embeddings",
+        nargs="?",
+        const="auto",
+        default=None,
+        help="Path to a pretrained history-embedding artifact (.pt).",
+    )
     return p
 
 
@@ -451,6 +477,34 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = _build_argparser().parse_args(argv)
     learner = load_learner(args.checkpoint)
     snap_paths = [p for p in args.snapshot_paths.split(",") if p.strip()]
+    # Load embeddings if requested. Required for checkpoints trained with
+    # --use-card-embeddings / --use-history-embeddings, since the env obs_dim
+    # depends on whether embedding features are appended.
+    card_embedding = None
+    history_embedding = None
+    if args.use_card_embeddings:
+        from nfsp_ai.nfsp_run_local import (
+            _resolve_card_embedding_path,
+            _load_card_embedding,
+        )
+        flag_value = None if args.use_card_embeddings == "auto" else args.use_card_embeddings
+        path = _resolve_card_embedding_path(flag_value, args.deck_size)
+        if path is None:
+            print(f"warning: --use-card-embeddings {args.use_card_embeddings!r} did not resolve to a file", file=sys.stderr)
+        else:
+            card_embedding = _load_card_embedding(path, device="cpu")
+    if args.use_history_embeddings:
+        from nfsp_ai.nfsp_run_local import (
+            _resolve_history_embedding_path,
+            _load_history_embedding,
+        )
+        flag_value = None if args.use_history_embeddings == "auto" else args.use_history_embeddings
+        path = _resolve_history_embedding_path(flag_value, args.deck_size)
+        if path is None:
+            print(f"warning: --use-history-embeddings {args.use_history_embeddings!r} did not resolve to a file", file=sys.stderr)
+        else:
+            history_embedding = _load_history_embedding(path, device="cpu")
+
     opponents = build_opponents(args.opponents, learner.obs_dim, learner.act_dim, snapshot_paths=snap_paths)
     if not opponents:
         print("No opponents constructed — exiting.", file=sys.stderr)
@@ -465,6 +519,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         blanks=args.blanks,
         common_cards=args.common_cards,
         seed=args.seed,
+        card_embedding=card_embedding,
+        history_embedding=history_embedding,
     )
     if args.output:
         write_results_csv(args.output, results)
