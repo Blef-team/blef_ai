@@ -1063,6 +1063,21 @@ class MyEnv:
 def main():
     parser = argparse.ArgumentParser(description="Run NFSP Blef self-play locally.")
     parser.add_argument(
+        "--experiment-name",
+        dest="experiment_name",
+        type=str,
+        default="auto",
+        help="Short name for this run; used to label the run directory and dashboard. "
+        "If 'auto' (default), a timestamp-only name is used.",
+    )
+    parser.add_argument(
+        "--runs-root",
+        dest="runs_root",
+        type=str,
+        default="runs",
+        help="Root directory under which run dirs are created (default: runs/).",
+    )
+    parser.add_argument(
         "--resume",
         dest="resume_path",
         type=str,
@@ -1272,15 +1287,42 @@ def main():
     )
     args = parser.parse_args()
 
-    postfix = datetime.now().strftime("%Y%m%d%H%M%S")
-    model_save_path = f"nfsp_blef_{postfix}.pt"
-    game_save_dir = f"games_{postfix}"
+    # Build a standardized run dir: <runs_root>/<YYYYMMDD-HHMMSS>__<experiment-name>/
+    # All artifacts (checkpoints, metrics, control plane, saved games, action
+    # samples, pid files, launch command) go inside it. The dashboard
+    # (`tools/run_dashboard.py`) auto-discovers run dirs by this convention.
+    run_timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    raw_name = (args.experiment_name or "auto").strip() or "auto"
+    safe_name = "".join(c if (c.isalnum() or c in "-_.") else "_" for c in raw_name)
+    run_label = run_timestamp if safe_name == "auto" else f"{run_timestamp}__{safe_name}"
+    run_dir = os.path.abspath(os.path.join(args.runs_root, run_label))
+    os.makedirs(run_dir, exist_ok=True)
+
+    checkpoint_dir = os.path.join(run_dir, "checkpoints")
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    model_save_path = os.path.join(checkpoint_dir, "nfsp_blef.pt")
+
+    game_save_dir = os.path.join(run_dir, "games")
     os.makedirs(game_save_dir, exist_ok=True)
-    eval_game_save_dir = f"{game_save_dir}_eval"
+    eval_game_save_dir = os.path.join(run_dir, "games_eval")
     os.makedirs(eval_game_save_dir, exist_ok=True)
+
+    metrics_csv_path = os.path.join(run_dir, "metrics.csv")
+    default_control_plane_path = os.path.join(run_dir, "control_plane.json")
+
+    # Persist the launch command for reproducibility / restart.
+    try:
+        import sys as _sys
+        with open(os.path.join(run_dir, "cmd.txt"), "w", encoding="utf-8") as _cmd_f:
+            _cmd_f.write(" ".join(_sys.argv) + "\n")
+    except OSError:
+        pass
+
+    print(f"[run] {run_dir}")
+
     history_sample_limit = None if args.history_sample_limit <= 0 else args.history_sample_limit
     history_sample_path = args.history_sample_path or os.path.join(
-        "logs", f"action_samples_{postfix}.jsonl"
+        run_dir, "action_samples.jsonl"
     )
     if history_sample_path:
         print(
@@ -1457,24 +1499,33 @@ def main():
         )
         return
 
-    control_plane = None
-    if args.control_plane:
-        cp_path = os.path.abspath(args.control_plane)
-        if not os.path.exists(cp_path):
-            snapshot = build_control_snapshot(agent, env, cooldown_steps=args.control_plane_cooldown)
-            write_control_file(cp_path, snapshot)
-            print(f"[control] bootstrap control-plane file written to {cp_path}")
-        control_plane = JsonControlPlane(
-            cp_path,
-            cooldown_steps=args.control_plane_cooldown,
-            verbose=True,
-        )
+    # If --control-plane is omitted, default to a per-run JSON inside run_dir
+    # so `tools/run_manager.py override` knows where to write.
+    cp_path = os.path.abspath(args.control_plane) if args.control_plane else default_control_plane_path
+    if not os.path.exists(cp_path):
+        snapshot = build_control_snapshot(agent, env, cooldown_steps=args.control_plane_cooldown)
+        write_control_file(cp_path, snapshot)
+        print(f"[control] bootstrap control-plane file written to {cp_path}")
+    control_plane = JsonControlPlane(
+        cp_path,
+        cooldown_steps=args.control_plane_cooldown,
+        verbose=True,
+    )
+    # Write a small PID file so run_manager can detect crash vs running state.
+    try:
+        with open(os.path.join(run_dir, "pid"), "w", encoding="utf-8") as _pf:
+            _pf.write(str(os.getpid()) + "\n")
+    except OSError:
+        pass
+
     agent.train_from_selfplay(
         env,
         total_steps=args.total_steps,
         log_every=50_000,
         save_path=model_save_path,
         game_save_dir=game_save_dir,
+        csv_path=metrics_csv_path,
+        tb_logdir=None,
         eval_env_factory=lambda: eval_env,
         eval_save_dir=eval_game_save_dir,
         eval_save_games=EVAL_SAVED_GAMES,
