@@ -498,8 +498,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             _resolve_card_embedding_path,
             _load_card_embedding,
         )
-        flag_value = None if args.use_card_embeddings == "auto" else args.use_card_embeddings
-        path = _resolve_card_embedding_path(flag_value, args.deck_size)
+        path = _resolve_card_embedding_path(args.use_card_embeddings, args.deck_size)
         if path is None:
             print(f"warning: --use-card-embeddings {args.use_card_embeddings!r} did not resolve to a file", file=sys.stderr)
         else:
@@ -509,8 +508,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             _resolve_history_embedding_path,
             _load_history_embedding,
         )
-        flag_value = None if args.use_history_embeddings == "auto" else args.use_history_embeddings
-        path = _resolve_history_embedding_path(flag_value, args.deck_size)
+        path = _resolve_history_embedding_path(args.use_history_embeddings, args.deck_size)
         if path is None:
             print(f"warning: --use-history-embeddings {args.use_history_embeddings!r} did not resolve to a file", file=sys.stderr)
         else:
