@@ -240,13 +240,24 @@ def create_game(
     blanks=0,
     common_cards=0,
     verbose=False,
+    init_card_dist=None,
 ):
     if n_agents < 2:
         raise ValueError("n_agents < 2")
     if n_agents > 8:
         raise ValueError("n_agents > 8")
     game_uuid = str(uuid.uuid4())
-    players = [{"nickname": str(i), "n_cards": 1} for i in range(n_agents)]
+    if init_card_dist is None:
+        players = [{"nickname": str(i), "n_cards": 1} for i in range(n_agents)]
+    else:
+        if len(init_card_dist) != n_agents:
+            raise ValueError(
+                f"init_card_dist length {len(init_card_dist)} must equal n_agents {n_agents}"
+            )
+        players = [
+            {"nickname": str(i), "n_cards": int(max(1, init_card_dist[i]))}
+            for i in range(n_agents)
+        ]
     if len(players) > 2:
         default_max_cards = floor(deck_size / len(players))
     else:
