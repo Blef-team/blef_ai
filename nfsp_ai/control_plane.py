@@ -19,8 +19,6 @@ CONTROL_SCHEMA: Dict[str, Dict[str, Any]] = {
     "batch_rl": {"type": "int", "bounds": (16, 4096), "setter": "set_batch_rl", "current": lambda agent, env: int(agent.cfg.batch_rl)},
     "train_sl_every": {"type": "int", "bounds": (1, 512), "setter": "set_train_sl_every", "current": lambda agent, env: int(agent.cfg.train_sl_every)},
     "batch_sl": {"type": "int", "bounds": (32, 8192), "setter": "set_batch_sl", "current": lambda agent, env: int(agent.cfg.batch_sl)},
-    "tau": {"type": "float", "bounds": (0.0, 0.5), "setter": "set_target_tau", "current": lambda agent, env: float(agent.cfg.target_tau)},
-    "hard_target_interval": {"type": "int", "bounds": (0, 100_000), "setter": "set_hard_target_interval", "current": lambda agent, env: int(agent.cfg.hard_target_interval)},
     "n_step": {"type": "int", "bounds": (1, 32), "setter": "set_n_step", "current": lambda agent, env: int(getattr(agent, "_active_n_step", agent.cfg.n_step))},
     "max_cards": {"type": "int", "bounds": (1, 11), "setter": "set_max_cards", "current": lambda agent, env: int(getattr(env, "max_cards", 1))},
     "burst_rl_updates_on_reward": {"type": "int", "bounds": (0, 16), "setter": "set_burst_rl_updates", "current": lambda agent, env: int(agent.cfg.burst_rl_updates_on_reward)},
@@ -187,9 +185,16 @@ class JsonControlPlane:
                 print(f"[control] cooldown updated: {self.cooldown_steps} -> {value}")
             self.cooldown_steps = value
 
+    # Keys that older control-plane JSONs may still contain. They no longer
+    # have any effect (target network removed when Q-loss became MC), but we
+    # silently ignore them so resumed runs don't crash on stale config.
+    _DEPRECATED_KEYS = {"tau", "hard_target_interval"}
+
     def _validate_overrides(self, overrides: Dict[str, Any]) -> Dict[str, Optional[Any]]:
         normalized: Dict[str, Optional[Any]] = {}
         for key, raw_value in overrides.items():
+            if key in self._DEPRECATED_KEYS:
+                continue
             if key not in self.schema:
                 raise ValueError(f"unknown override key '{key}'")
             if raw_value is None:
