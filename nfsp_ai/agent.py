@@ -1464,16 +1464,27 @@ class NFSPAgent:
             if done and self._active_n_step > 1:
                 self._flush_nstep(force=True)
 
-            # SL reservoir: empirical one-hot from behavior (prefer BR-only), but skip exploration/forced/illegal
+            # SL reservoir: empirical one-hot from BR behavior only.
+            # NFSP (Heinrich & Silver 2016, Algorithm 1) requires M_SL to hold
+            # only (s, a) pairs from the best-response policy, so π converges
+            # to the time-average of past best responses. Logging π's own
+            # actions here would train π to imitate itself — a fixed point
+            # that degrades convergence to the average BR.
             one_hot = torch.zeros(self.act_dim, dtype=torch.float32)
             one_hot[action] = 1.0
 
-            took_forced_check   = self._took_forced_check
-            took_epsilon_action = self._took_epsilon_action
+            took_forced_check = self._took_forced_check
 
-            # You can keep skipping illegal/forced. Consider NOT skipping epsilon;
-            # NFSP typically logs the behavior policy including exploration.
-            skip_sl_log = took_forced_check or (illegal == 1) or self.cfg.sl_learning_off or env.game["round_number"] < self.cfg.min_round # <- removed epsilon skip here
+            # Skip illegal/forced/round-too-early/SL-off, AND skip when the
+            # action came from π (not BR). The is_br gate is the load-bearing
+            # change vs the previous implementation.
+            skip_sl_log = (
+                (not use_br)
+                or took_forced_check
+                or (illegal == 1)
+                or self.cfg.sl_learning_off
+                or env.game["round_number"] < self.cfg.min_round
+            )
 
             # init stats once
             if not hasattr(self, "stats"):
@@ -1481,19 +1492,13 @@ class NFSPAgent:
             for k in ["sl_added", "sl_skipped"]:
                 self.stats.setdefault(k, 0)
 
-            # --- NFSP: log full behavior (BR + SL) into the SL reservoir ---
             if skip_sl_log:
                 self.stats["sl_skipped"] += 1
             else:
                 self.sl_buf.add(obs.detach().cpu(), mask.detach().cpu(), one_hot)
                 self.stats["sl_added"] += 1
-                # Optional bookkeeping to inspect composition
-                if use_br:
-                    self.stats.setdefault("sl_added_from_br", 0)
-                    self.stats["sl_added_from_br"] += 1
-                else:
-                    self.stats.setdefault("sl_added_from_sl", 0)
-                    self.stats["sl_added_from_sl"] += 1
+                self.stats.setdefault("sl_added_from_br", 0)
+                self.stats["sl_added_from_br"] += 1
 
             if history_sample_path and history_sample_next is not None and info_dict:
                 history_payload = info_dict.get("history")
