@@ -59,8 +59,6 @@ def _build_agent_env(seed: int, max_cards: int) -> Tuple[NFSPAgent, MyEnv]:
         train_sl_every=8,
         lr_q=1e-4,
         lr_pi=3e-4,
-        target_tau=0.01,
-        hard_target_interval=0,
         warmup_steps=5_000,
         rl_capacity=200_000,
         sl_capacity=200_000,

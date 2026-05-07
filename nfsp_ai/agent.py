@@ -1,7 +1,8 @@
 # nfsp_blef.py
 # NFSP for imperfect-information, turn-based games (e.g., Blef abstraction)
 # - Anticipatory dynamics: act with BR (Q) w.p. eta, else average policy (pi)
-# - RL buffer: BR transitions only (Double DQN, masked)
+# - RL buffer: BR transitions only; Q-loss is MC regression of round outcomes
+#   (round-end-done; γ^d shaping back-propagated by _flush_nstep, no bootstrap)
 # - SL reservoir: empirical one-hot action from behavior policy (both BR and pi)
 # - Action masking everywhere; random tie-break on argmax
 # - Online updates during self-play (no separate offline batch phase)
@@ -228,7 +229,13 @@ class PolicyNet(nn.Module):
 # Buffers
 # =========================
 class ReplayBuffer:
-    """For BR transitions only (DQN)."""
+    """Round-terminal MC return buffer.
+
+    Each transition stores the observation/mask, the chosen action, and the
+    MC-shaped return propagated back from the round terminal (see
+    ``_flush_nstep``). next_obs/mask/done are kept for future bootstrapping
+    but are not consumed by the current MC loss.
+    """
     def __init__(self, capacity: int, obs_dim: int, act_dim: int, device):
         self.device, self.capacity = device, capacity
         self.ptr, self.size = 0, 0
@@ -241,10 +248,8 @@ class ReplayBuffer:
         self.nobs = torch.zeros((capacity, obs_dim), dtype=torch.float32, device=device)
         self.nmsk = torch.zeros((capacity, act_dim), dtype=torch.float32, device=device)
         self.done = torch.zeros((capacity,), dtype=torch.float32, device=device)
-        # NEW: store per-sample gamma_power (γ^k for n-step)
-        self.gpow  = torch.ones((capacity,), dtype=torch.float32, device=device)
 
-    def add(self, obs, mask, act, rew, nobs, nmask, done, gamma_power):
+    def add(self, obs, mask, act, rew, nobs, nmask, done):
         self.obs[self.ptr]  = obs
         self.mask[self.ptr] = mask
         self.act[self.ptr]  = act
@@ -254,12 +259,11 @@ class ReplayBuffer:
         self.done[self.ptr] = float(done)
         self.ptr = (self.ptr + 1) % self.capacity
         self.size = min(self.size + 1, self.capacity)
-        self.gpow = gamma_power
 
     def sample(self, batch_size: int):
         idx = torch.randint(0, self.size, (batch_size,), device=self.device)
         return (self.obs[idx], self.mask[idx], self.act[idx], self.rew[idx],
-                self.nobs[idx], self.nmsk[idx], self.done[idx], self.gpow)
+                self.nobs[idx], self.nmsk[idx], self.done[idx])
 
     def state_dict(self) -> dict:
         filled = int(self.size)
@@ -403,13 +407,11 @@ class TurnEnvAdapter:
 # =========================
 @dataclass
 class NFSPConfig:
-    gamma: float = 0.666
+    gamma: float = 0.666               # discount used by the MC return shaping in _flush_nstep
     lr_q: float = 5e-5                 # q net learning rate
     lr_pi: float = 3e-4                # pi net learning rate
     batch_rl: int = 1024
     batch_sl: int = 2048
-    target_tau: float = 0.005          # Polyak; set to 0 for hard updates
-    hard_target_interval: int = 0      # if >0, do hard copy every N steps (overrides Polyak on that step)
     eps_start: float = 0.10
     eps_end: float = 0.05
     eps_decay_steps: int = 2_000_000
@@ -421,8 +423,7 @@ class NFSPConfig:
     warmup_steps: int = 10_000
     max_grad_norm: float = 10.0        # For nn.utils.clip_grad_norm_
     hidden: int = 128
-    use_double_dqn: bool = True
-    n_step: int = 6
+    n_step: int = 6                    # window over which MC return shaping back-propagates
     burst_rl_updates_on_reward: int = 2
     burst_reward_threshold: float = 0.5
     sl_learning_off: bool = False
@@ -433,10 +434,10 @@ class NFSPAgent:
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.obs_dim, self.act_dim, self.cfg = obs_dim, act_dim, cfg
 
-        # Separate networks
+        # Separate networks. The Q-net is regressed against MC returns (round
+        # terminal reward, propagated back via _flush_nstep). There is no
+        # bootstrap target, so no target network.
         self.q = QNet(obs_dim, act_dim, cfg.hidden).to(self.device)
-        self.q_tgt = QNet(obs_dim, act_dim, cfg.hidden).to(self.device)
-        self.q_tgt.load_state_dict(self.q.state_dict())
         self.opt_q = torch.optim.Adam(self.q.parameters(), lr=cfg.lr_q)
 
         self.pi = PolicyNet(obs_dim, act_dim, cfg.hidden).to(self.device)
@@ -496,11 +497,12 @@ class NFSPAgent:
     # -------- RL --------
     def _train_rl_step(self):
         """
-        Optimized RL update for round-based (fully terminal) environments.
+        MC regression update for the Q-network.
 
         - Each transition in rl_buf corresponds to a complete round outcome.
-        - Rewards already include all temporal shaping (from _flush_nstep).
-        - There are no non-terminal steps to bootstrap from (done=True for all).
+        - The stored reward is the γ^d-shaped MC return back-propagated from the
+          round terminal by _flush_nstep.
+        - There is no Bellman bootstrap: target = reward.
         """
 
         # --- 1. Skip if buffer too small ---
@@ -508,7 +510,7 @@ class NFSPAgent:
             return
 
         # --- 2. Sample batch ---
-        obs, mask, act, rew, _, _, _, _ = self.rl_buf.sample(self.cfg.batch_rl)
+        obs, mask, act, rew, _, _, _ = self.rl_buf.sample(self.cfg.batch_rl)
 
         act = act.view(-1, 1).long()
         rew = rew.float().view(-1)
@@ -517,7 +519,7 @@ class NFSPAgent:
         q = self.q(obs)
         q_sa = q.gather(1, act).squeeze(1)
 
-        # --- 4. Terminal-only target = reward (no bootstrap) ---
+        # --- 4. MC target = stored shaped return (no bootstrap) ---
         target = rew
 
         # --- 5. Compute Huber loss and apply update ---
@@ -528,18 +530,9 @@ class NFSPAgent:
         torch.nn.utils.clip_grad_norm_(self.q.parameters(), self.cfg.max_grad_norm)
         self.opt_q.step()
 
-        # --- 6. Update target network ---
         self.rl_updates = getattr(self, "rl_updates", 0) + 1
-        if self.cfg.hard_target_interval and (self.rl_updates % self.cfg.hard_target_interval == 0):
-            self.q_tgt.load_state_dict(self.q.state_dict())
-        else:
-            tau = self.cfg.target_tau
-            if tau and tau > 0:
-                with torch.no_grad():
-                    for p, pt in zip(self.q.parameters(), self.q_tgt.parameters()):
-                        pt.data.mul_(1 - tau).add_(tau * p.data)
 
-        # --- 7. Return loss metric ---
+        # --- 6. Return loss metric ---
         return {"q_loss": float(loss.detach().item())}
 
 
@@ -783,24 +776,13 @@ class NFSPAgent:
         return val
 
     def set_target_tau(self, value: Optional[float], *, pin: bool = True) -> Optional[float]:
-        key = "tau"
-        if value is None:
-            self._pinned_overrides.pop(key, None)
-            return None
-        val = float(max(0.0, min(0.5, value)))
-        self.cfg.target_tau = val
-        self._apply_pin(key, val, pin)
-        return val
+        # Deprecated no-op: Q-loss is MC, no target network exists.
+        # Kept so older control-plane JSONs with a "tau" key don't crash.
+        return None
 
     def set_hard_target_interval(self, value: Optional[int], *, pin: bool = True) -> Optional[int]:
-        key = "hard_target_interval"
-        if value is None:
-            self._pinned_overrides.pop(key, None)
-            return None
-        val = int(max(0, min(100_000, value)))
-        self.cfg.hard_target_interval = val
-        self._apply_pin(key, val, pin)
-        return val
+        # Deprecated no-op: see set_target_tau.
+        return None
 
     def set_n_step(self, value: Optional[int], *, pin: bool = True) -> Optional[int]:
         key = "n_step"
@@ -998,13 +980,9 @@ class NFSPAgent:
                     eps = self._interp(step, 3_500_000, 5_000_000, 0.07, 0.05)
                 self._eps_current = max(0.03, min(1.0, eps))  # floor 0.03
 
-            # Q optimizer / targets
+            # Q optimizer (no target network; MC regression has no Polyak/hard-copy)
             if not self._is_pinned("lr_q"):
                 self._set_lr(self.opt_q, 1e-4); self.cfg.lr_q = 1e-4
-            if not self._is_pinned("tau"):
-                self.cfg.target_tau = 0.01           # keep Polyak updates
-            if not self._is_pinned("hard_target_interval"):
-                self.cfg.hard_target_interval = 0     # disable hard updates
 
             # RL cadence
             if not self._is_pinned("train_rl_every"):
@@ -1136,12 +1114,9 @@ class NFSPAgent:
         action_tensor = torch.tensor(action_idx, dtype=torch.long, device=self.device)
         reward_val = float(reward)
 
-        # --- 1-step fast path (TD(0)) ---
+        # --- 1-step fast path (no shaping; just write what the env emitted) ---
         if self._active_n_step <= 1:
             if is_br:
-                # For TD(0), write exactly what the env emitted.
-                # gamma_power: keep your current convention; often 1.0 if done else gamma.
-                gamma_power = 1.0 if done else float(self.cfg.gamma)
                 self.rl_buf.add(
                     obs.clone(),
                     mask.clone(),
@@ -1150,7 +1125,6 @@ class NFSPAgent:
                     nobs.clone(),
                     nmask.clone(),
                     bool(done),
-                    torch.tensor(gamma_power, dtype=torch.float32, device=self.device),
                 )
             return
 
@@ -1175,14 +1149,21 @@ class NFSPAgent:
 
     def _flush_nstep(self, force: bool = False):
         """
-        Custom n-step flush for round-based multi-player games (2–8 players).
+        MC return shaping for round-based multi-player games (2–8 players).
 
-        - Each round ends with exactly one terminal ('check') step that determines the loser.
-        - Non-terminal actions get shaped rewards propagated back from the terminal result:
-              if actor == loser:  R = -gamma**distance
-              else:               R = +gamma**distance
-          where distance = 0 for penultimate (γ⁰ = 1), 1 for one before (γ¹), etc.
-        - The terminal step itself already has its true environment reward and is written as-is.
+        Each round ends with exactly one terminal ('check') step that determines
+        the loser. Non-terminal BR transitions get shaped rewards propagated back
+        from the terminal:
+
+            if actor == loser:  R = -gamma**distance
+            else:               R = +gamma**distance
+
+        where distance = 0 for the penultimate step (γ^0 = 1), 1 for the one
+        before, etc. The terminal step is written with its true env reward.
+
+        This is *Monte Carlo return shaping*, not n-step Q-learning — there is
+        no Bellman bootstrap on the next state. The buffer feeds _train_rl_step
+        which regresses Q(s,a) onto these shaped returns.
         """
 
         # --- Safety and trivial cases ---
@@ -1195,7 +1176,11 @@ class NFSPAgent:
             return
 
         # Only flush when the round actually ended (last transition done=True)
-        if not force and not self._nstep_queue[-1]["done"]:
+        if not self._nstep_queue[-1]["done"]:
+            if force:
+                # Forced flush on a non-terminal queue (e.g. shutdown mid-round):
+                # discard the partial trajectory — no terminal reward to shape with.
+                self._nstep_queue.clear()
             return
 
         seq = list(self._nstep_queue)
@@ -1203,16 +1188,9 @@ class NFSPAgent:
 
         # Identify terminal and loser
         term = seq[-1]
-        assert term["done"], "Expected last transition in round to be terminal."
         loser_id = term.get("loser", None)
         total_steps = len(seq)
         gamma = float(self.cfg.gamma)
-
-        if self.debug:
-            #DEBUG
-            print(f"term['action']: {term['action']}")
-            print(f"term['reward']: {term['reward']}")
-            #DEUBG
 
         # --- 1) Store the terminal step exactly as emitted by env ---
         if term.get("is_br", False):
@@ -1224,7 +1202,6 @@ class NFSPAgent:
                 term["nobs"],
                 term["nmask"],
                 True,
-                torch.tensor(1.0, dtype=torch.float32, device=self.device),
             )
 
         # --- 2) Back-propagate credit/blame to earlier steps ---
@@ -1235,36 +1212,22 @@ class NFSPAgent:
 
             actor_id = step.get("actor", None)
             if actor_id is None or loser_id is None:
-                raise ValueError(f"actor and or loser info missing! actor: {str(actor)}, loser: {str(loser)}")
-                R = 0.0
-            else:
-                sign = -1.0 if actor_id == loser_id else +1.0
-                R = sign * g
-
-            if self.debug:
-                #DEBUG
-                print(f"step['action']: {step['action']}")
-                print(f"R: {R}")
-                print(f"step.get('is_br'): {step.get('is_br')}")
-                #DEUBG
+                raise ValueError(
+                    f"actor and/or loser info missing! actor: {actor_id!r}, loser: {loser_id!r}"
+                )
+            sign = -1.0 if actor_id == loser_id else +1.0
+            R = sign * g
 
             if not step.get("is_br", False):
                 continue
 
-            done_flag = True  # every round ends at terminal
-            gamma_power = gamma ** max(1, distance + 1)  # not really used, but kept for consistency
+            done_flag = True  # every round ends at terminal under round-end-done
 
-            # Keep your weighting / oversampling logic
+            # Optional oversampling weight kept for parity with prior runs.
             weight = 1.0 + max(0.0, getattr(self, "_nstep_weight_scale", 0.0)) * max(0, n - (distance + 1))
             weight += max(0.0, getattr(self, "_nstep_terminal_boost", 0.0)) * max(0, n - (distance + 1))
             repeats = max(1, int(weight))
             residual = max(0.0, weight - repeats)
-
-            if self.debug:
-                #DEBUG
-                print(f"step['action']: {step['action']}")
-                print(f"R: {R}")
-                #DEUBG
 
             for _ in range(repeats):
                 self.rl_buf.add(
@@ -1275,7 +1238,6 @@ class NFSPAgent:
                     term["nobs"],
                     term["nmask"],
                     done_flag,
-                    torch.tensor(gamma_power, dtype=torch.float32, device=self.device),
                 )
             if residual > 0.0 and random.random() < residual:
                 self.rl_buf.add(
@@ -1286,7 +1248,6 @@ class NFSPAgent:
                     term["nobs"],
                     term["nmask"],
                     done_flag,
-                    torch.tensor(gamma_power, dtype=torch.float32, device=self.device),
                 )
 
         # --- 3) Cleanup ---
@@ -1410,8 +1371,6 @@ class NFSPAgent:
                     "batch_rl": int(self.cfg.batch_rl),
                     "train_sl_every": int(self.cfg.train_sl_every),
                     "batch_sl": int(self.cfg.batch_sl),
-                    "tau": float(self.cfg.target_tau),
-                    "hard_target_interval": int(self.cfg.hard_target_interval),
                     "n_step": int(self._active_n_step),
                     "max_cards": int(getattr(env, "max_cards", _effective_max_cards(self.total_env_steps))),
                     "burst_rl_updates_on_reward": int(self.cfg.burst_rl_updates_on_reward),
@@ -1762,7 +1721,6 @@ class NFSPAgent:
     def save(self, path: str):
         torch.save({
             "q": self.q.state_dict(),
-            "q_tgt": self.q_tgt.state_dict(),
             "pi": self.pi.state_dict(),
             "cfg": self.cfg.__dict__,
             "steps": self.total_env_steps,
@@ -1797,7 +1755,7 @@ class NFSPAgent:
     def load(self, path: str, map_location=None, *, reset_schedules: bool = False):
         ckpt = torch.load(path, map_location=map_location or self.device)
         self.q.load_state_dict(ckpt["q"])
-        self.q_tgt.load_state_dict(ckpt["q_tgt"])
+        # Tolerate older checkpoints that still ship q_tgt/target_tau/etc; ignore them.
         self.pi.load_state_dict(ckpt["pi"])
         self.total_env_steps = 0 if reset_schedules else ckpt.get("steps", 0)
         if reset_schedules:
