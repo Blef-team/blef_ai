@@ -396,39 +396,38 @@ def _load_history_embedding(
 
 
 def _legal_action_mask(game: dict, spec: DeckSpec, pub_prior: list) -> torch.Tensor:
-    """Compute legality exactly as enforced by manager.play(),
-    then *augment* with public priors by hard-zeroing actions whose public probability is 0.
-    - Bets are action ids [0, check_id)
-    - CHECK is action id == check_id
+    """Compute the action legality mask exactly as enforced by manager.play().
+
+    Bets are action ids ``[0, check_id)``; CHECK is at ``check_id``. The full
+    public-prior probability vector is *not* used to narrow the mask anymore —
+    it remains an observation feature, not a legality constraint. Hard-zeroing
+    actions whose generic public probability was below 1e-9 turned probability-
+    calculator bugs (cf. PR #40) into retroactive changes to the action set
+    every checkpoint had ever been trained on.
+
+    ``pub_prior`` is accepted for signature compatibility with existing callers
+    but is not consumed.
     """
+    del pub_prior  # intentionally unused; kept for backward-compatible call sites
     mask = np.zeros((spec.num_actions,), dtype=np.float32)
     check = int(spec.check_action_id)
     hist = game.get("history", []) or []
-    # Base legality from history:
     if not hist:
-        # Start of round: only bets are legal (CHECK not allowed)
+        # Start of round: only bets are legal (CHECK not allowed).
         mask[:check] = 1.0
     else:
         try:
             last = int((hist[-1] or {}).get("action_id", -1))
         except Exception:
             last = -1
-        # If last action was CHECK, the round is resolved; no actions legal
+        # If last action was CHECK, the round is resolved; no actions legal.
         if last == check:
             return torch.from_numpy(mask)
         next_min = min(check, last + 1) if last >= 0 else 0
         if next_min < check:
             mask[next_min:check] = 1.0
-        # CHECK legal once at least one bet has happened
+        # CHECK legal once at least one bet has happened.
         mask[check] = 1.0
-    # ---- overlay public priors (hard mask zeros with tolerance) ----
-    # pub_prior covers only bet actions; append a slot for CHECK
-    pri = np.asarray(list(pub_prior) + [1.0], dtype=np.float32)
-    if pri.shape[0] != spec.num_actions:
-        raise ValueError(f"pub_prior length {pri.shape[0]} != num_actions {spec.num_actions}")
-    # Anything <= eps is treated as 0-prob (publicly impossible)
-    PUBLIC_PRIOR_EPS = 1e-9
-    mask *= (pri > PUBLIC_PRIOR_EPS).astype(np.float32)
     return torch.from_numpy(mask)
 
 
