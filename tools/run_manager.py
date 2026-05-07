@@ -124,18 +124,33 @@ def _run_status(run_dir: str) -> str:
 
 
 def _read_latest_metrics(run_dir: str) -> Optional[Dict]:
+    """Return the latest metrics row, merging training + eval rows that share
+    the same `step` value (the trainer writes one of each per log cycle, with
+    different fields populated).
+    """
     csv_path = os.path.join(run_dir, "metrics.csv")
     if not os.path.exists(csv_path):
         return None
-    last: Optional[Dict] = None
+    rows: List[Dict] = []
     try:
         with open(csv_path, "r", encoding="utf-8") as fh:
             reader = csv.DictReader(fh)
             for row in reader:
-                last = row
+                rows.append(row)
     except OSError:
         return None
-    return last
+    if not rows:
+        return None
+    last_step = rows[-1].get("step")
+    same_step = [r for r in rows if r.get("step") == last_step]
+    if not same_step:
+        return rows[-1]
+    merged: Dict[str, str] = dict(same_step[0])
+    for r in same_step[1:]:
+        for k, v in r.items():
+            if v not in (None, "", "nan"):
+                merged[k] = v
+    return merged
 
 
 # --------------------------------------------------------------------------
@@ -159,11 +174,16 @@ def cmd_start(args) -> int:
         )
         return 3
 
+    # Strip leading '--' separator if caller used `start --experiment-name X -- ...`
+    extras = list(args.extra)
+    while extras and extras[0] == "--":
+        extras.pop(0)
+
     cmd: List[str] = [
         sys.executable, "-m", NFSP_MODULE,
         "--experiment-name", args.experiment_name,
         "--runs-root", args.runs_root,
-    ] + list(args.extra)
+    ] + extras
 
     log_dir = os.path.join(args.runs_root, ".launcher_logs")
     os.makedirs(log_dir, exist_ok=True)
