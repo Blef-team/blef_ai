@@ -1,0 +1,5 @@
+# Optional tooling dependencies. Install only if you want to use
+# `tools/run_dashboard.py`. The eval ladder and backfill scripts use only
+# stdlib + project deps and don't require these.
+streamlit>=1.30
+pandas>=2.0
