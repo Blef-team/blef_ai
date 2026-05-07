@@ -773,7 +773,7 @@ class MyEnv:
         pick_jokers_in_range: bool = False,
         pick_blanks_in_range: bool = False,
         pick_common_cards_in_range: bool = False,
-        scenario_init_max_cards: int = 0,
+        randomize_initial_hands: bool = False,
     ):
         if n_agents < 2 or n_agents > 8:
             raise ValueError("n_agents must be in [2, 8]")
@@ -810,7 +810,7 @@ class MyEnv:
         self.pick_jokers_in_range = pick_jokers_in_range
         self.pick_blanks_in_range = pick_blanks_in_range
         self.pick_common_cards_in_range = pick_common_cards_in_range
-        self.scenario_init_max_cards = max(0, int(scenario_init_max_cards))
+        self.randomize_initial_hands = bool(randomize_initial_hands)
 
         self.game: Dict = {}
         self._last_obs = None
@@ -871,16 +871,19 @@ class MyEnv:
         common_cards = self.common_card_cap
         if self.pick_common_cards_in_range:
             common_cards = random.randint(0, self.common_card_cap)
-        # Random-initial-cards (RIC) scenario sampling: when set, each player's
-        # opening hand size is sampled uniformly from [1, scenario_init_max_cards],
-        # exposing the network to high-cardinality states from step 0 instead of
-        # waiting for them to arise organically (which they rarely do — see
-        # buffer-distribution diagnostic in tools/diagnose_buffer.py and plan
-        # docs/phase_plan.md §111).
+        # Random-initial-hand-size scenario sampling. By default Blef games
+        # start with every player holding exactly 1 card and accumulate as
+        # players lose rounds. When `--randomize-initial-hands` is set, every
+        # new game starts with each player's *starting* hand size drawn
+        # uniformly from [1, max_cards]. This is independent of the
+        # elimination dynamics — `max_cards` remains the threshold above
+        # which a player is eliminated. The intent is to populate the replay
+        # buffer with diverse card counts from step 0 rather than waiting
+        # for them to arise organically (they rarely do — see
+        # `tools/diagnose_buffer.py` and `docs/phase_plan.md` §111).
         init_card_dist = None
-        cap = getattr(self, "scenario_init_max_cards", 0) or 0
-        if cap >= 2:
-            init_card_dist = [random.randint(1, cap) for _ in range(n_agents)]
+        if getattr(self, "randomize_initial_hands", False) and int(self.max_cards) >= 2:
+            init_card_dist = [random.randint(1, int(self.max_cards)) for _ in range(n_agents)]
         # Normal path: start a completely new game (either there was no pending round boundary or the game finished)
         self.game = gm.create_game(
             n_agents,
@@ -1183,16 +1186,17 @@ def main():
         help="Sample the number of community cards uniformly from [0, --common-cards] for each new game.",
     )
     parser.add_argument(
-        "--scenario-init-max-cards",
-        dest="scenario_init_max_cards",
-        type=int,
-        default=0,
+        "--randomize-initial-hands",
+        dest="randomize_initial_hands",
+        action="store_true",
         help=(
-            "Random-initial-cards (RIC) scenario sampling: when N>=2, every new "
-            "game starts with each player's hand size sampled uniformly from "
-            "[1, N]. Forces the replay buffer to populate diverse card counts "
-            "from step 0, addressing buffer-distribution starvation (see "
-            "docs/phase_plan.md §111 and tools/diagnose_buffer.py)."
+            "When set, every new game starts with each player's *starting* "
+            "hand size drawn uniformly from [1, --max-cards] at game creation, "
+            "instead of the engine default of 1 card per player. --max-cards "
+            "remains the elimination threshold; this flag only changes the "
+            "initial distribution. Forces the replay buffer to populate "
+            "diverse card counts from step 0 instead of waiting for natural "
+            "play (see tools/diagnose_buffer.py and docs/phase_plan.md §111)."
         ),
     )
     parser.add_argument(
@@ -1438,7 +1442,7 @@ def main():
         pick_jokers_in_range=args.pick_jokers_in_range,
         pick_blanks_in_range=args.pick_blanks_in_range,
         pick_common_cards_in_range=args.pick_common_cards_in_range,
-        scenario_init_max_cards=args.scenario_init_max_cards,
+        randomize_initial_hands=args.randomize_initial_hands,
     )
     obs0, mask0, _ = env.reset()
 
@@ -1492,7 +1496,7 @@ def main():
         pick_jokers_in_range=args.pick_jokers_in_range,
         pick_blanks_in_range=args.pick_blanks_in_range,
         pick_common_cards_in_range=args.pick_common_cards_in_range,
-        # Eval env intentionally does NOT use scenario_init_max_cards: the RIC
+        # Eval env intentionally does NOT use randomize_initial_hands: the RIC
         # curriculum is a training-time intervention; eval scores the agent on
         # natural-distribution starts (all players begin with 1 card).
     )
