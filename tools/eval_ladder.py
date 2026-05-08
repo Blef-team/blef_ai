@@ -154,6 +154,40 @@ class SnapshotOpponent(Opponent):
         return self.agent.select_action(obs, mask, use_average_policy=True, greedy=True)
 
 
+class BRSelfOpponent(Opponent):
+    """Best-response opponent using the *same* checkpoint's Q-net — i.e. the
+    learner's own Q. Used for exploitability estimation: if BR-vs-avg wins
+    significantly above 0.5, the avg policy is exploitable (sub-Nash).
+
+    NashConv lower bound = 2 * (BR_winrate - 0.5), reaching 0 at Nash.
+    """
+
+    def __init__(self, checkpoint_path: str, obs_dim: int, act_dim: int,
+                 device: Optional[torch.device] = None, label: Optional[str] = None):
+        self.checkpoint_path = checkpoint_path
+        self.name = label or "br-self"
+        self.device = device or torch.device("cpu")
+        # Detect hidden width to match the learner's architecture.
+        state = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
+        try:
+            hidden = _detect_hidden_from_checkpoint(state)
+        except Exception:
+            hidden = 128
+        cfg = NFSPConfig(rl_capacity=1, sl_capacity=1, hidden=hidden)
+        # Sniff factorize_action_head from the saved cfg if present.
+        saved_cfg = state.get("cfg") or {}
+        cfg.factorize_action_head = bool(saved_cfg.get("factorize_action_head", False))
+        self.agent = NFSPAgent(obs_dim, act_dim, device=self.device, cfg=cfg)
+        if "q" in state:
+            self.agent.q.load_state_dict(state["q"])
+        if "pi" in state:
+            self.agent.pi.load_state_dict(state["pi"])
+
+    def act(self, game_state, obs, mask):
+        # Best-response: argmax over Q-values on legal actions.
+        return self.agent.select_action(obs, mask, use_average_policy=False, greedy=True)
+
+
 # --------------------------------------------------------------------------
 # Match runner
 # --------------------------------------------------------------------------
@@ -407,6 +441,7 @@ def build_opponents(
     obs_dim: int,
     act_dim: int,
     snapshot_paths: Optional[List[str]] = None,
+    self_checkpoint_path: Optional[str] = None,
 ) -> List[Opponent]:
     out: List[Opponent] = []
     for name in (spec.split(",") if spec else []):
@@ -416,6 +451,11 @@ def build_opponents(
         if name == "snapshot":
             for p in (snapshot_paths or []):
                 out.append(SnapshotOpponent(p, obs_dim, act_dim))
+            continue
+        if name == "br-self":
+            if self_checkpoint_path is None:
+                raise ValueError("br-self opponent requires --checkpoint to be provided")
+            out.append(BRSelfOpponent(self_checkpoint_path, obs_dim, act_dim))
             continue
         builder = OPPONENT_REGISTRY.get(name)
         if not builder:
@@ -522,7 +562,13 @@ def _build_argparser() -> argparse.ArgumentParser:
     p.add_argument(
         "--opponents",
         default="random,conservative",
-        help="Comma-separated subset of {random, conservative, cfr, snapshot}.",
+        help=(
+            "Comma-separated subset of "
+            "{random, conservative, cfr, snapshot, br-self}. "
+            "`br-self` uses the same checkpoint's Q-net as a best-response "
+            "opponent — winrate above 0.5 = avg policy is exploitable, "
+            "i.e. NashConv lower bound = 2*(BR-vs-avg-winrate - 0.5)."
+        ),
     )
     p.add_argument("--snapshot-paths", default="", help="Comma-separated checkpoint paths (used when opponents includes 'snapshot').")
     p.add_argument("--n-games", type=int, default=200)
@@ -584,7 +630,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         else:
             history_embedding = _load_history_embedding(path, device="cpu")
 
-    opponents = build_opponents(args.opponents, learner.obs_dim, learner.act_dim, snapshot_paths=snap_paths)
+    opponents = build_opponents(args.opponents, learner.obs_dim, learner.act_dim,
+                                  snapshot_paths=snap_paths,
+                                  self_checkpoint_path=args.checkpoint)
     if not opponents:
         print("No opponents constructed — exiting.", file=sys.stderr)
         return 2
