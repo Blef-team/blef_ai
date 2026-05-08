@@ -1198,6 +1198,60 @@ def main():
         ),
     )
     parser.add_argument(
+        "--cpu-threads",
+        dest="cpu_threads",
+        type=int,
+        default=1,
+        help=(
+            "Threads per training process for PyTorch / BLAS / Apple Accelerate. "
+            "Default 1 because for our small nets (hidden ~256, batch 64-256) the "
+            "OMP/dispatch overhead dominates the actual matmul; running 8 BLAS "
+            "threads per process while N processes share a 12-core machine causes "
+            "thread contention. Benchmark on M4 Pro: threads=1 → 4555 sps; "
+            "threads=2 → 3614 sps; threads=8 → 2654 sps. Bigger nets / single "
+            "training in isolation can use higher values."
+        ),
+    )
+    parser.add_argument(
+        "--train-rl-every",
+        dest="train_rl_every",
+        type=int,
+        default=None,
+        help=(
+            "Override the default train_rl_every cadence. Lower = denser RL "
+            "gradient updates per env step. Default (NFSPConfig.train_rl_every=1, "
+            "but the run_local cfg passes 32) gives ~2 updates/transition. "
+            "Lower this for denser learning if compute headroom allows."
+        ),
+    )
+    parser.add_argument(
+        "--train-sl-every",
+        dest="train_sl_every",
+        type=int,
+        default=None,
+        help=(
+            "Override the default train_sl_every cadence. Lower = denser SL "
+            "gradient updates per env step (avg policy distillation). The "
+            "SL reservoir only collects BR samples (η≈30%% of transitions), "
+            "so the effective SL/sample ratio is roughly batch_sl / "
+            "(train_sl_every × η)."
+        ),
+    )
+    parser.add_argument(
+        "--batch-rl",
+        dest="batch_rl",
+        type=int,
+        default=None,
+        help="Override RL minibatch size. Default cfg passes 64.",
+    )
+    parser.add_argument(
+        "--batch-sl",
+        dest="batch_sl",
+        type=int,
+        default=None,
+        help="Override SL minibatch size. Default cfg passes 256.",
+    )
+    parser.add_argument(
         "--factorize-action-head",
         dest="factorize_action_head",
         action="store_true",
@@ -1376,6 +1430,31 @@ def main():
     )
     args = parser.parse_args()
 
+    # Pin BLAS / OMP threads. For small NFSP-Blef nets the per-step matmul
+    # is too cheap to amortise OMP dispatch overhead at high thread counts;
+    # benchmarked on M4 Pro at hidden=256, batch=64-256 — threads=1 yields
+    # ~4555 sps vs threads=8 ~2655 sps (-42%). Keep this BEFORE any heavy
+    # work so any late BLAS init respects the cap.
+    try:
+        n_threads = max(1, int(args.cpu_threads))
+        os.environ.setdefault("OMP_NUM_THREADS", str(n_threads))
+        os.environ.setdefault("MKL_NUM_THREADS", str(n_threads))
+        os.environ.setdefault("VECLIB_MAXIMUM_THREADS", str(n_threads))
+        os.environ.setdefault("OPENBLAS_NUM_THREADS", str(n_threads))
+        os.environ.setdefault("NUMEXPR_NUM_THREADS", str(n_threads))
+        torch.set_num_threads(n_threads)
+        # interop threads: keep default unless we're really single-thread mode
+        if n_threads == 1:
+            try:
+                torch.set_num_interop_threads(1)
+            except RuntimeError:
+                # set_num_interop_threads cannot be called after first parallel work;
+                # ignore — set_num_threads above still helps.
+                pass
+        print(f"[perf] BLAS threads pinned to {n_threads}")
+    except Exception as exc:
+        print(f"[perf] thread pin failed: {exc}")
+
     # Build a standardized run dir: <runs_root>/<YYYYMMDD-HHMMSS>__<experiment-name>/
     # All artifacts (checkpoints, metrics, control plane, saved games, action
     # samples, pid files, launch command) go inside it. The dashboard
@@ -1506,15 +1585,23 @@ def main():
     )
     obs0, mask0, _ = env.reset()
 
+    # Apply CLI overrides for the densification dials.
+    cfg_train_rl_every = int(args.train_rl_every) if args.train_rl_every is not None else 32
+    cfg_train_sl_every = int(args.train_sl_every) if args.train_sl_every is not None else 8
+    cfg_batch_rl = int(args.batch_rl) if args.batch_rl is not None else 64
+    cfg_batch_sl = int(args.batch_sl) if args.batch_sl is not None else 256
+    print(f"[perf] cadence: train_rl_every={cfg_train_rl_every} batch_rl={cfg_batch_rl} "
+          f"train_sl_every={cfg_train_sl_every} batch_sl={cfg_batch_sl}")
+
     agent = NFSPAgent(
         obs_dim=obs0.numel(),
         act_dim=mask0.numel(),
         cfg=NFSPConfig(
             anticipatory_eta=0.25,
-            batch_rl=64,
-            train_rl_every=32,
-            batch_sl=256,
-            train_sl_every=8,
+            batch_rl=cfg_batch_rl,
+            train_rl_every=cfg_train_rl_every,
+            batch_sl=cfg_batch_sl,
+            train_sl_every=cfg_train_sl_every,
             lr_q=1e-4,
             lr_pi=3e-4,
             warmup_steps=5_000,
