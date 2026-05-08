@@ -1198,6 +1198,54 @@ def main():
         ),
     )
     parser.add_argument(
+        "--factorize-action-head",
+        dest="factorize_action_head",
+        action="store_true",
+        default=False,
+        help=(
+            "Phase 2.1: split the Q and policy nets' action heads into a "
+            "separate (bet, check) pair sharing a trunk, and disable the "
+            "forced-CHECK exploration curriculum bandaid. The CHECK column "
+            "gets an auxiliary BCE supervision signal independent of the bet "
+            "softmax. Output shape is unchanged (CHECK is concatenated last). "
+            "WARNING: pre-factorize checkpoints are not loadable into the "
+            "new architecture and vice-versa."
+        ),
+    )
+    parser.add_argument(
+        "--snapshot-league-pool-size",
+        dest="snapshot_league_pool_size",
+        type=int,
+        default=0,
+        help=(
+            "Phase 2.4: max number of past-policy snapshots kept in the "
+            "league pool (FIFO). Zero (default) = league disabled. The pool "
+            "stores the *average* policy (π) state_dict only — the BR is "
+            "regenerated from the learner's current Q via ε-greedy."
+        ),
+    )
+    parser.add_argument(
+        "--snapshot-league-freq",
+        dest="snapshot_league_freq",
+        type=int,
+        default=0,
+        help=(
+            "How many env steps between snapshot additions to the league "
+            "pool. Zero = no snapshots (effectively disables league)."
+        ),
+    )
+    parser.add_argument(
+        "--snapshot-league-prob",
+        dest="snapshot_league_prob",
+        type=float,
+        default=0.0,
+        help=(
+            "Per-game probability that an opposing seat is replaced with a "
+            "frozen pool snapshot. 0.0 = always self-play; 1.0 = always "
+            "league-vs-frozen. Standard NFSP-league setting is 0.5."
+        ),
+    )
+    parser.add_argument(
         "--randomize-initial-hands",
         dest="randomize_initial_hands",
         action="store_true",
@@ -1478,6 +1526,7 @@ def main():
             burst_rl_updates_on_reward=4,
             burst_reward_threshold=0.5,
             hidden=int(args.hidden_width),
+            factorize_action_head=bool(getattr(args, "factorize_action_head", False)),
         ),
     )
 
@@ -1575,6 +1624,9 @@ def main():
         history_sample_path=history_sample_path,
         history_sample_every=args.history_sample_every,
         history_sample_limit=history_sample_limit,
+        snapshot_league_pool_size=int(getattr(args, "snapshot_league_pool_size", 0) or 0),
+        snapshot_league_freq=int(getattr(args, "snapshot_league_freq", 0) or 0),
+        snapshot_league_prob=float(getattr(args, "snapshot_league_prob", 0.0) or 0.0),
     )
 
 

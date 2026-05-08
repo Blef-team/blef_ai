@@ -203,25 +203,58 @@ def epsilon_valid_sample(mask: torch.Tensor) -> int:
 # Models (separate nets)
 # =========================
 class QNet(nn.Module):
-    def __init__(self, obs_dim: int, act_dim: int, hidden: int = 128):
+    """Q-network. Optionally factorizes the action head into a separate
+    bet head (act_dim - 1) and CHECK head (1) sharing a common trunk.
+    Output shape unchanged; CHECK is concatenated as the last column so
+    callers see the same flat [B, act_dim] tensor."""
+    def __init__(self, obs_dim: int, act_dim: int, hidden: int = 128, factorize: bool = False):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(obs_dim, hidden), nn.ReLU(),
-            nn.Linear(hidden, hidden), nn.ReLU(),
-            nn.Linear(hidden, act_dim),
-        )
+        self.factorize = bool(factorize)
+        self.act_dim = act_dim
+        if self.factorize:
+            self.trunk = nn.Sequential(
+                nn.Linear(obs_dim, hidden), nn.ReLU(),
+                nn.Linear(hidden, hidden), nn.ReLU(),
+            )
+            self.bet_head = nn.Linear(hidden, act_dim - 1)
+            self.check_head = nn.Linear(hidden, 1)
+        else:
+            self.net = nn.Sequential(
+                nn.Linear(obs_dim, hidden), nn.ReLU(),
+                nn.Linear(hidden, hidden), nn.ReLU(),
+                nn.Linear(hidden, act_dim),
+            )
     def forward(self, x):  # returns unmasked Q-values [B, A]
+        if self.factorize:
+            h = self.trunk(x)
+            return torch.cat([self.bet_head(h), self.check_head(h)], dim=-1)
         return self.net(x)
 
+
 class PolicyNet(nn.Module):
-    def __init__(self, obs_dim: int, act_dim: int, hidden: int = 128):
+    """Policy network. Optionally factorizes into separate bet logits and
+    CHECK logit sharing a trunk. Output shape unchanged."""
+    def __init__(self, obs_dim: int, act_dim: int, hidden: int = 128, factorize: bool = False):
         super().__init__()
-        self.enc = nn.Sequential(
-            nn.Linear(obs_dim, hidden), nn.ReLU(),
-            nn.Linear(hidden, hidden), nn.ReLU(),
-        )
-        self.pi = nn.Linear(hidden, act_dim)
+        self.factorize = bool(factorize)
+        self.act_dim = act_dim
+        if self.factorize:
+            self.enc = nn.Sequential(
+                nn.Linear(obs_dim, hidden), nn.ReLU(),
+                nn.Linear(hidden, hidden), nn.ReLU(),
+            )
+            self.bet_head = nn.Linear(hidden, act_dim - 1)
+            self.check_head = nn.Linear(hidden, 1)
+        else:
+            self.enc = nn.Sequential(
+                nn.Linear(obs_dim, hidden), nn.ReLU(),
+                nn.Linear(hidden, hidden), nn.ReLU(),
+            )
+            self.pi = nn.Linear(hidden, act_dim)
     def forward(self, obs):  # returns logits [B, A] (unmasked)
+        if self.factorize:
+            h = self.enc(obs)
+            return torch.cat([self.bet_head(h), self.check_head(h)], dim=-1)
         return self.pi(self.enc(obs))
 
 
@@ -428,6 +461,15 @@ class NFSPConfig:
     burst_reward_threshold: float = 0.5
     sl_learning_off: bool = False
     min_round: int = 1
+    # Phase 2.1: factorize action head into separate (bet, check) heads. When
+    # True, the QNet/PolicyNet split the last action dim (CHECK) into its own
+    # linear head sharing a trunk; the CHECK exploration curriculum is also
+    # disabled (the model gets a clean gradient path for CHECK without the
+    # forced-CHECK bandaid biasing the RL buffer).
+    factorize_action_head: bool = False
+    # Auxiliary BCE loss on the CHECK head: target = 1 if action==CHECK else 0
+    # for each SL sample. Only used when factorize_action_head is True.
+    aux_check_bce_weight: float = 0.1
 
 class NFSPAgent:
     def __init__(self, obs_dim: int, act_dim: int, device: Optional[torch.device] = None, cfg: NFSPConfig = NFSPConfig(), debug: bool = False):
@@ -437,10 +479,11 @@ class NFSPAgent:
         # Separate networks. The Q-net is regressed against MC returns (round
         # terminal reward, propagated back via _flush_nstep). There is no
         # bootstrap target, so no target network.
-        self.q = QNet(obs_dim, act_dim, cfg.hidden).to(self.device)
+        factorize = bool(getattr(cfg, "factorize_action_head", False))
+        self.q = QNet(obs_dim, act_dim, cfg.hidden, factorize=factorize).to(self.device)
         self.opt_q = torch.optim.Adam(self.q.parameters(), lr=cfg.lr_q)
 
-        self.pi = PolicyNet(obs_dim, act_dim, cfg.hidden).to(self.device)
+        self.pi = PolicyNet(obs_dim, act_dim, cfg.hidden, factorize=factorize).to(self.device)
         self.opt_pi = torch.optim.Adam(self.pi.parameters(), lr=cfg.lr_pi)
 
         self.rl_buf = ReplayBuffer(cfg.rl_capacity, obs_dim, act_dim, self.device)
@@ -453,6 +496,14 @@ class NFSPAgent:
         # near __init__
         self.stats = getattr(self, "stats", {})
         self.stats.setdefault("sl_skipped_exploration", 0)
+
+        # Phase 2.4: snapshot-league self-play state
+        self._snapshot_pool: list[dict] = []  # each: {"step": int, "pi_state": dict}
+        self._snap_pool_size: int = 0
+        self._snap_freq: int = 0
+        self._snap_prob: float = 0.0
+        self._frozen_seat_for_game: Optional[int] = None
+        self._frozen_pi: Optional["PolicyNet"] = None
 
         self._took_epsilon_action = False
         self._took_forced_check = False
@@ -471,13 +522,17 @@ class NFSPAgent:
         self._took_forced_check = False
         self._took_epsilon_action = False
 
-        # Manual override: here we force it to pick CHECK (for early exposure)
-        check_prob = getattr(self, "_check_explore_prob", 0.0)
-        if check_prob > 0.0:
-            check_idx = mask.shape[-1] - 1
-            if mask[0, check_idx] > 0 and random.random() < check_prob:
-                self._took_forced_check = True
-                return int(check_idx)
+        # CHECK exploration curriculum (legacy bandaid). With factorized
+        # action head the model gets a separate gradient path for CHECK and
+        # an auxiliary BCE loss, so we skip the forcing entirely — it would
+        # only bias the RL buffer with off-policy CHECK samples.
+        if not getattr(self.cfg, "factorize_action_head", False):
+            check_prob = getattr(self, "_check_explore_prob", 0.0)
+            if check_prob > 0.0:
+                check_idx = mask.shape[-1] - 1
+                if mask[0, check_idx] > 0 and random.random() < check_prob:
+                    self._took_forced_check = True
+                    return int(check_idx)
 
         if use_br:
             q = self.q(obs)                      # [1, A]
@@ -639,6 +694,27 @@ class NFSPAgent:
             loss = ce - beta_sl_entropy * ent
         else:
             loss = ce
+
+        # ---- Phase 2.1 auxiliary CHECK head BCE loss ----
+        # When the action head is factorized, supervise the CHECK column
+        # directly with a binary "is CHECK" label. The bet softmax CE already
+        # gradients all 89 columns, but as a single softmax — the auxiliary
+        # BCE adds an independent gradient signal to the dedicated CHECK head
+        # so it doesn't have to "win" against bet logits to learn to fire.
+        aux_w = float(getattr(self.cfg, "aux_check_bce_weight", 0.0))
+        if getattr(self.cfg, "factorize_action_head", False) and aux_w > 0.0:
+            check_idx = self.act_dim - 1
+            # `tgt` was renormalised over legal actions, so its CHECK column
+            # is 1.0 iff the original sample's only non-zero column was CHECK
+            # (modulo label-smoothing — fine for auxiliary supervision).
+            check_target = (tgt[:, check_idx] > 0.5).float()  # [B]
+            # `logits` here is already the sliced/valid-row version of
+            # self.pi(obs), so we reuse it (no second forward pass).
+            check_logit_col = logits[:, check_idx]
+            bce = nn.functional.binary_cross_entropy_with_logits(
+                check_logit_col, check_target, reduction="mean"
+            )
+            loss = loss + aux_w * bce
 
         # Final finite check
         if not torch.isfinite(loss):
@@ -1277,7 +1353,15 @@ class NFSPAgent:
         history_sample_path: Optional[str] = "./logs/action_history_samples.jsonl",
         history_sample_every: int = 100_000,
         history_sample_limit: Optional[int] = 1_000,
+        # Phase 2.4: snapshot-league self-play
+        snapshot_league_pool_size: int = 0,
+        snapshot_league_freq: int = 0,
+        snapshot_league_prob: float = 0.0,
     ):
+        # Snapshot-league config — persisted on self for use deeper in the loop
+        self._snap_pool_size = int(max(0, snapshot_league_pool_size))
+        self._snap_freq = int(max(0, snapshot_league_freq))
+        self._snap_prob = float(max(0.0, min(1.0, snapshot_league_prob)))
         # --- setup ---
         obs, mask, pid = env.reset()
         obs, mask = obs.to(self.device), mask.to(self.device)
@@ -1392,9 +1476,33 @@ class NFSPAgent:
             desired_max_cards = _effective_max_cards(self.total_env_steps)
             if getattr(env, "max_cards", None) != desired_max_cards:
                 self._sync_env_max_cards(env, desired_max_cards)
-            use_br = (random.random() < self.cfg.anticipatory_eta)
 
-            action = self.act(obs, mask, use_br=use_br, epsilon=eps)
+            # --- Snapshot-league routing ---
+            # If a frozen seat is active for this game and the env's current
+            # player matches it, the FROZEN policy chooses; we then *skip*
+            # storing this transition (so the learner only updates from its
+            # own seat's actions). The net effect is the learner trains
+            # against a non-stationary mixture of past selves, which is the
+            # standard remedy for the self-play feedback loop in 2-player
+            # zero-sum imperfect-info games (NFSP plateaus, AlphaStar-style
+            # league).
+            current_seat = env._pid()
+            is_frozen_acting = (
+                self._frozen_seat_for_game is not None
+                and current_seat == self._frozen_seat_for_game
+                and self._frozen_pi is not None
+            )
+            if is_frozen_acting:
+                with torch.no_grad():
+                    f_obs = obs.unsqueeze(0).to(self.device)
+                    f_mask = mask.unsqueeze(0).to(self.device)
+                    flogits = self._frozen_pi(f_obs)
+                    fmlog = masked_softmax_logits(flogits, f_mask)
+                    action = int(torch.distributions.Categorical(logits=fmlog).sample().item())
+                use_br = False  # frozen plays its avg policy only
+            else:
+                use_br = (random.random() < self.cfg.anticipatory_eta)
+                action = self.act(obs, mask, use_br=use_br, epsilon=eps)
             nobs, nmask, reward, done, info = env.step(action)
             nobs, nmask = nobs.to(self.device), nmask.to(self.device)
 
@@ -1412,8 +1520,12 @@ class NFSPAgent:
             if rr is not None:
                 loser = rr.get("loser", None)
 
-            # Pass actor/loser so _flush_nstep can distribute rewards
-            if env.game["round_number"] >= self.cfg.min_round:
+            # Pass actor/loser so _flush_nstep can distribute rewards.
+            # Skip storage when the frozen-snapshot opponent acted: those
+            # transitions would teach the learner to mimic its past self
+            # (a fixed point) and pollute the n-step shaping with off-policy
+            # actions. The learner only stores its own seat's transitions.
+            if env.game["round_number"] >= self.cfg.min_round and not is_frozen_acting:
                 self._store_transition(
                     obs, mask, action, reward, nobs, nmask, done, is_br=use_br,
                     actor=actor, loser=loser
@@ -1434,12 +1546,14 @@ class NFSPAgent:
 
             took_forced_check = self._took_forced_check
 
-            # Skip illegal/forced/round-too-early/SL-off, AND skip when the
-            # action came from π (not BR). The is_br gate is the load-bearing
-            # change vs the previous implementation.
+            # Skip illegal/forced/round-too-early/SL-off, the snapshot-league
+            # opponent's actions, AND when the action came from π (not BR).
+            # The is_br gate is the load-bearing change vs the previous
+            # implementation.
             skip_sl_log = (
                 (not use_br)
                 or took_forced_check
+                or is_frozen_acting
                 or (illegal == 1)
                 or self.cfg.sl_learning_off
                 or env.game["round_number"] < self.cfg.min_round
@@ -1554,8 +1668,50 @@ class NFSPAgent:
                 ep_reward, ep_len = 0.0, 0
                 obs, mask, pid = env.reset()
                 obs, mask = obs.to(self.device), mask.to(self.device)
+
+                # Phase 2.4: re-roll the frozen seat at every round/game
+                # boundary. With prob `snap_prob`, pick a random snapshot from
+                # the pool and a random opposing seat to play it. The learner
+                # then trains against a non-stationary mixture of past
+                # selves — the standard remedy for self-play feedback loops.
+                if (self._snap_pool_size > 0
+                        and len(self._snapshot_pool) > 0
+                        and self._snap_prob > 0.0
+                        and random.random() < self._snap_prob):
+                    n_seats = len(env.game.get("players", []) or [])
+                    if n_seats >= 2:
+                        snap = random.choice(self._snapshot_pool)
+                        # Lazily rebuild the frozen-PolicyNet only when the
+                        # selected snapshot differs from the cached one.
+                        if (self._frozen_pi is None
+                                or getattr(self, "_frozen_snap_step", None) != snap["step"]):
+                            self._frozen_pi = PolicyNet(
+                                self.obs_dim, self.act_dim, self.cfg.hidden,
+                                factorize=getattr(self.cfg, "factorize_action_head", False),
+                            ).to(self.device)
+                            self._frozen_pi.load_state_dict(snap["pi_state"])
+                            self._frozen_pi.eval()
+                            self._frozen_snap_step = snap["step"]
+                        self._frozen_seat_for_game = random.randrange(n_seats)
+                    else:
+                        self._frozen_seat_for_game = None
+                else:
+                    self._frozen_seat_for_game = None
             else:
                 obs, mask = nobs, nmask
+
+            # Phase 2.4: periodically snapshot the policy into the league pool.
+            if (self._snap_pool_size > 0 and self._snap_freq > 0
+                    and self.total_env_steps > 0
+                    and self.total_env_steps % self._snap_freq == 0):
+                self._snapshot_pool.append({
+                    "step": int(self.total_env_steps),
+                    "pi_state": {k: v.detach().clone().cpu()
+                                 for k, v in self.pi.state_dict().items()},
+                })
+                # FIFO eviction
+                while len(self._snapshot_pool) > self._snap_pool_size:
+                    self._snapshot_pool.pop(0)
 
             # --- Logging / checkpoints ---
             if self.total_env_steps % log_every == 0:

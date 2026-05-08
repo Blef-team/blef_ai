@@ -250,6 +250,23 @@ def head_to_head(
     rounds_won = rounds_lost = 0
     total_actions = 0
     t0 = time.time()
+    # Per-round-bin counters keyed by (learner_n_cards, opp_n_cards) at the
+    # START of the round (read from round_result.before_counts when the round
+    # ends). Lets callers separate "good late-game" from "compounded small
+    # per-round edge across many rounds" — the latter masquerades as the
+    # former in raw winrate when games start at 1 card and accumulate up to
+    # max_cards. The 2-D form (our_cards × opp_cards) lets us report a true
+    # late-game-conditional table; the 1-D collapse over the off-axis is
+    # written to MatchResult.metadata for backwards compat.
+    wins_2d: Dict[Tuple[int, int], int] = {}
+    losses_2d: Dict[Tuple[int, int], int] = {}
+
+    def _ref_seat() -> Optional[str]:
+        players = env.game.get("players", []) or []
+        for i, p in enumerate(players):
+            if p.get("nickname") == env._ref_nick:
+                return str(i)
+        return None
 
     for _ in range(n_games):
         opponent.reset()
@@ -281,10 +298,24 @@ def head_to_head(
                 rr = info.get("round_result") or {}
                 loser = rr.get("loser")
                 if loser:
+                    seat = _ref_seat()
+                    before = (rr.get("before_counts") or {})
+                    our_c = int(before.get(seat, 0)) if seat is not None else 0
+                    # Opponent count = sum of every other seat's before_count.
+                    opp_c = 0
+                    for k, v in before.items():
+                        if k != seat:
+                            try:
+                                opp_c += int(v)
+                            except Exception:
+                                pass
+                    key = (our_c, opp_c)
                     if loser == ref:
                         rounds_lost += 1
+                        losses_2d[key] = losses_2d.get(key, 0) + 1
                     else:
                         rounds_won += 1
+                        wins_2d[key] = wins_2d.get(key, 0) + 1
 
         total_actions += actions_this_game
 
@@ -302,7 +333,12 @@ def head_to_head(
         mean_reward=(rounds_won - rounds_lost) / max(1, n_games),
         mean_game_length_actions=total_actions / max(1, n_games),
         elapsed_seconds=elapsed,
-        metadata={"seed": seed, "greedy": greedy_learner},
+        metadata={
+            "seed": seed,
+            "greedy": greedy_learner,
+            "wins_2d": dict(wins_2d),    # keyed by (our_n_cards, opp_n_cards)
+            "losses_2d": dict(losses_2d),
+        },
     )
 
 
@@ -426,21 +462,50 @@ def run_ladder(
     return results
 
 
+def write_per_bin_csv(path: str, results: List[MatchResult]) -> None:
+    """Per-(our_n_cards, opp_n_cards) winrate breakdown across all results."""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    fieldnames = ["opponent", "config", "our_n_cards", "opp_n_cards",
+                  "wins", "losses", "winrate", "winrate_ci_95"]
+    has_existing_data = os.path.exists(path) and os.path.getsize(path) > 0
+    with open(path, "a" if has_existing_data else "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames)
+        if not has_existing_data:
+            w.writeheader()
+        for r in results:
+            wins_2d = r.metadata.get("wins_2d", {}) or {}
+            losses_2d = r.metadata.get("losses_2d", {}) or {}
+            keys = set(wins_2d) | set(losses_2d)
+            for k in sorted(keys):
+                wn = int(wins_2d.get(k, 0))
+                ls = int(losses_2d.get(k, 0))
+                tot = wn + ls
+                if tot == 0:
+                    continue
+                wr = wn / tot
+                w.writerow({
+                    "opponent": r.opponent,
+                    "config": r.config,
+                    "our_n_cards": k[0],
+                    "opp_n_cards": k[1],
+                    "wins": wn,
+                    "losses": ls,
+                    "winrate": f"{wr:.4f}",
+                    "winrate_ci_95": f"{_winrate_ci_95(wn, tot):.4f}",
+                })
+
+
 def write_results_csv(path: str, results: List[MatchResult]) -> None:
     fieldnames = [
         "opponent", "config", "n_games", "wins", "losses",
         "winrate", "winrate_ci_95", "mean_reward",
         "mean_game_length_actions", "elapsed_seconds",
     ]
+    new_file = not os.path.exists(path)
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    # Treat a zero-byte file the same as a missing one. Tools like mktemp(1)
-    # create an empty placeholder; without this, the writer would open in
-    # append mode and skip the header, silently producing a header-less CSV
-    # whose first data row is then dropped by downstream `tail -n +2` filters.
-    has_existing_data = os.path.exists(path) and os.path.getsize(path) > 0
-    with open(path, "a" if has_existing_data else "w", newline="") as f:
+    with open(path, "a" if not new_file else "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=fieldnames)
-        if not has_existing_data:
+        if new_file:
             w.writeheader()
         for r in results:
             row = {k: getattr(r, k) for k in fieldnames}
@@ -469,6 +534,7 @@ def _build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--common-cards", type=int, default=0)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--output", default="", help="CSV output path. Empty = stdout.")
+    p.add_argument("--bin-output", default="", help="Per-(our_n_cards, opp_n_cards) breakdown CSV path. Empty = skip.")
     p.add_argument(
         "--use-card-embeddings",
         nargs="?",
@@ -538,6 +604,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.output:
         write_results_csv(args.output, results)
         print(f"Wrote {len(results)} rows to {args.output}")
+    if args.bin_output:
+        write_per_bin_csv(args.bin_output, results)
+        print(f"Wrote per-bin breakdown to {args.bin_output}")
     else:
         w = csv.DictWriter(
             sys.stdout,
