@@ -174,9 +174,15 @@ class BRSelfOpponent(Opponent):
         except Exception:
             hidden = 128
         cfg = NFSPConfig(rl_capacity=1, sl_capacity=1, hidden=hidden)
-        # Sniff factorize_action_head from the saved cfg if present.
+        # Sniff factorize_action_head from the saved cfg, with fallback to
+        # state_dict key inspection (handles older runs missing the field).
         saved_cfg = state.get("cfg") or {}
-        cfg.factorize_action_head = bool(saved_cfg.get("factorize_action_head", False))
+        factorize = bool(saved_cfg.get("factorize_action_head", False))
+        if not factorize:
+            q_state = state.get("q") or {}
+            if any(str(k).endswith("bet_head.weight") for k in (q_state.keys() if isinstance(q_state, dict) else [])):
+                factorize = True
+        cfg.factorize_action_head = factorize
         self.agent = NFSPAgent(obs_dim, act_dim, device=self.device, cfg=cfg)
         if "q" in state:
             self.agent.q.load_state_dict(state["q"])
@@ -381,19 +387,30 @@ def head_to_head(
 # --------------------------------------------------------------------------
 
 def _detect_dims_from_checkpoint(ckpt_path: str) -> Tuple[int, int]:
-    """Inspect a saved NFSP checkpoint and return (obs_dim, act_dim)."""
+    """Inspect a saved NFSP checkpoint and return (obs_dim, act_dim).
+    Handles both monolithic (`net.0.weight`/`pi.weight`) and factorized
+    (`trunk.0.weight`/`enc.0.weight` + `bet_head.weight`/`check_head.weight`)
+    architectures."""
     state = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     pi = state.get("pi") or state.get("q") or {}
-    # PolicyNet first linear weight has shape [hidden, obs_dim]; output head [act_dim, hidden].
-    weights = list(pi.values()) if isinstance(pi, dict) else []
     obs_dim = act_dim = None
+    bet_dim = None
+    has_check_head = False
     for k, v in (pi.items() if isinstance(pi, dict) else []):
-        if k.endswith("enc.0.weight") or k.endswith("net.0.weight"):
+        # First-layer weight has shape [hidden, obs_dim]
+        if k.endswith("enc.0.weight") or k.endswith("net.0.weight") or k.endswith("trunk.0.weight"):
             obs_dim = int(v.shape[1])
+        # Output head — monolithic
         if k.endswith("pi.weight") or (k.endswith("net.4.weight") and act_dim is None):
             act_dim = int(v.shape[0])
+        # Output head — factorized (bet_head shape [act_dim-1, hidden], check_head shape [1, hidden])
+        if k.endswith("bet_head.weight"):
+            bet_dim = int(v.shape[0])
+        if k.endswith("check_head.weight"):
+            has_check_head = True
+    if act_dim is None and bet_dim is not None and has_check_head:
+        act_dim = bet_dim + 1
     if obs_dim is None or act_dim is None:
-        # Fallback: use the explicit "obs_dim"/"act_dim" if exported-inference shape
         obs_dim = obs_dim or int(state.get("obs_dim") or 0)
         act_dim = act_dim or int(state.get("act_dim") or 0)
     if not (obs_dim and act_dim):
@@ -403,10 +420,11 @@ def _detect_dims_from_checkpoint(ckpt_path: str) -> Tuple[int, int]:
 
 def _detect_hidden_from_checkpoint(state: dict) -> int:
     """Infer the hidden width from the Q net's first-layer output dim. Falls
-    back to 128 if not present (older checkpoints)."""
+    back to 128 if not present (older checkpoints). Also handles factorised
+    Q (trunk.0.weight)."""
     q = state.get("q") or {}
     for k, v in (q.items() if isinstance(q, dict) else []):
-        if k.endswith("net.0.weight"):
+        if k.endswith("net.0.weight") or k.endswith("trunk.0.weight"):
             return int(v.shape[0])
     return 128
 
@@ -416,7 +434,17 @@ def load_learner(checkpoint_path: str, device: Optional[torch.device] = None) ->
     obs_dim, act_dim = _detect_dims_from_checkpoint(checkpoint_path)
     state = torch.load(checkpoint_path, map_location=device, weights_only=False)
     hidden = _detect_hidden_from_checkpoint(state)
-    cfg = NFSPConfig(rl_capacity=1, sl_capacity=1, hidden=hidden)  # don't allocate large buffers for inference
+    # Detect factorize from saved cfg OR by sniffing the q state_dict for
+    # the factorized layer names. The latter handles older runs where the
+    # cfg dict may not contain the field.
+    saved_cfg = state.get("cfg") or {}
+    factorize = bool(saved_cfg.get("factorize_action_head", False))
+    if not factorize:
+        q_state = state.get("q") or {}
+        if any(str(k).endswith("bet_head.weight") for k in (q_state.keys() if isinstance(q_state, dict) else [])):
+            factorize = True
+    cfg = NFSPConfig(rl_capacity=1, sl_capacity=1, hidden=hidden,
+                     factorize_action_head=factorize)
     agent = NFSPAgent(obs_dim, act_dim, device=device, cfg=cfg)
     if "q" in state:
         agent.q.load_state_dict(state["q"])
