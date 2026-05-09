@@ -57,6 +57,7 @@ def _compute_obs_dim(
         + 1  # common jokers
         + card_dim
         + MAX_PLAYERS
+        + MAX_PLAYERS  # per-slot team flag: +1 teammate / -1 opponent / 0 none
         + 1  # round scaling
         + history_dim
         + 1  # last bet prob
@@ -428,6 +429,71 @@ def _legal_action_mask(game: dict, spec: DeckSpec, pub_prior: list) -> torch.Ten
             mask[next_min:check] = 1.0
         # CHECK legal once at least one bet has happened.
         mask[check] = 1.0
+
+    # ===== Team-aware constraints =====
+    # Rule 1: never check a teammate. CHECK is illegal if the most-recent
+    # bettor is on the actor's team. (CHECK calls the *last bet*, so the
+    # check-target is the last non-check actor in history.)
+    # Rule 2: never force a teammate to check. If the next-in-turn is on
+    # the actor's team, the actor's bet must leave at least one legal
+    # raise above. (One-step lookahead; deeper consecutive-teammate
+    # cascades are rare and not enforced here.)
+    players = game.get("players") or []
+    if players:
+        actor_nick = game.get("cp_nickname")
+        actor_team = None
+        for p in players:
+            if p.get("nickname") == actor_nick:
+                actor_team = p.get("team")
+                break
+        if actor_team is not None:
+            check_legal_pre = bool(mask[check])
+            # Rule 1: forbid CHECK if last bettor is on actor's team.
+            if hist:
+                last_bettor_nick = None
+                for ev in reversed(hist):
+                    try:
+                        aid = int((ev or {}).get("action_id", -1))
+                    except Exception:
+                        continue
+                    if 0 <= aid < check:
+                        last_bettor_nick = (ev or {}).get("player")
+                        break
+                if last_bettor_nick is not None:
+                    last_team = None
+                    for p in players:
+                        if p.get("nickname") == last_bettor_nick:
+                            last_team = p.get("team")
+                            break
+                    if last_team is not None and last_team == actor_team:
+                        mask[check] = 0.0
+            # Rule 2: if next-in-turn is a teammate, forbid the
+            # top-of-ladder bet (so the teammate has at least one legal
+            # raise under rule 1). Skip when that bet is the *only* legal
+            # raise — relaxing rule 2 is preferable to zeroing the mask.
+            actor_idx = None
+            for i, p in enumerate(players):
+                if p.get("nickname") == actor_nick:
+                    actor_idx = i
+                    break
+            if actor_idx is not None and check >= 1:
+                n = len(players)
+                next_team = None
+                for offset in range(1, n + 1):
+                    cand = players[(actor_idx + offset) % n]
+                    if int(cand.get("n_cards", 0)) > 0:
+                        next_team = cand.get("team")
+                        break
+                if next_team is not None and next_team == actor_team:
+                    legal_raises_above = int(mask[:check].sum().item()) if hasattr(mask, "sum") else int(mask[:check].sum())
+                    if legal_raises_above >= 2:
+                        mask[check - 1] = 0.0
+            # Fallback: if team rules zeroed the mask, restore CHECK
+            # (rule 1 yields). The actor takes the immediate -1 rather
+            # than crashing the env. Self-play exploration occasionally
+            # walks into this corner.
+            if not mask.any() and check_legal_pre:
+                mask[check] = 1.0
     return torch.from_numpy(mask)
 
 
@@ -652,12 +718,29 @@ def vectorize_obs(
         slot_order += [None] * (MAX_PLAYERS - len(slot_order))
     ordered_counts = np.zeros((MAX_PLAYERS,), dtype=np.float32)
     for slot_idx in range(min(MAX_PLAYERS, len(slot_order))):
-        nick = slot_order[slot_idx] if slot_idx < len(slot_order) else None
-        if nick is None:
+        slot_nick = slot_order[slot_idx] if slot_idx < len(slot_order) else None
+        if slot_nick is None:
             ordered_counts[slot_idx] = 0.0
         else:
-            ordered_counts[slot_idx] = float(counts_map.get(nick, 0))
+            ordered_counts[slot_idx] = float(counts_map.get(slot_nick, 0))
     obs[idx:idx + MAX_PLAYERS] = ordered_counts
+    idx += MAX_PLAYERS
+
+    # Per-slot team flag (rotated to actor at slot 0): +1 teammate, -1
+    # opponent, 0 if no player in slot or game is solo (no team mode).
+    team_map = {p.get("nickname"): p.get("team") for p in players}
+    actor_team = team_map.get(game.get("cp_nickname"))
+    team_flags = np.zeros((MAX_PLAYERS,), dtype=np.float32)
+    if actor_team is not None:
+        for slot_idx in range(min(MAX_PLAYERS, len(slot_order))):
+            slot_nick = slot_order[slot_idx] if slot_idx < len(slot_order) else None
+            if slot_nick is None:
+                continue
+            other_team = team_map.get(slot_nick)
+            if other_team is None:
+                continue
+            team_flags[slot_idx] = 1.0 if other_team == actor_team else -1.0
+    obs[idx:idx + MAX_PLAYERS] = team_flags
     idx += MAX_PLAYERS
 
     # Round scaling
@@ -1066,6 +1149,8 @@ class MyEnv:
                 "ref": ref,
                 "before_counts": before_counts,
                 "after_counts": after_counts,
+                "actor_team": actor_team,
+                "loser_team": loser_team,
             }
             history_for_log = history_before
 
@@ -1097,11 +1182,22 @@ class MyEnv:
         assert done or self.rounds_since_reset < MAX_ROUNDS
 
         self._last_obs, self._last_mask = obs, mask
+        # Compute actor's team for THIS step (not the round terminal).
+        # Needed by the n-step credit shaping so per-step credit can be
+        # team-aware: sign = -1 if actor's team == loser's team, else +1.
+        # In solo mode both fields are None and the agent falls back to
+        # individual identity comparison.
+        step_actor_team = None
+        for p in (self.game.get("players") or []):
+            if p.get("nickname") == actor_nick:
+                step_actor_team = p.get("team")
+                break
         info = {
             "next_pid": pid,
             "illegal": 0,
             "action": action_int,
             "actor": actor_nick,
+            "actor_team": step_actor_team,
             "history": history_for_log,
             "round_result": round_result,
             "reward": float(reward),

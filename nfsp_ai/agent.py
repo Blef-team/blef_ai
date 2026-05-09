@@ -1169,7 +1169,9 @@ class NFSPAgent:
         is_br: bool,
         *,
         actor=None,          # <-- seat index or nickname of the actor for this step
-        loser=None           # <-- loser id ONLY on terminal step (None otherwise)
+        loser=None,          # <-- loser id ONLY on terminal step (None otherwise)
+        actor_team=None,     # <-- actor's team id (None in solo mode); per-step
+        loser_team=None,     # <-- loser's team id (None in solo mode); terminal-only
     ):
         if not hasattr(self, "_nstep_queue"):
             raise ValueError("_nstep_queue not in self!")
@@ -1215,7 +1217,9 @@ class NFSPAgent:
             "done":  bool(done),
             "is_br": bool(is_br),
             "actor": actor,                  # REQUIRED for all steps (2–8 players)
-            "loser": loser if done else None # ONLY present on terminal step
+            "loser": loser if done else None, # ONLY present on terminal step
+            "actor_team": actor_team,        # team id for THIS step's actor (None in solo)
+            "loser_team": loser_team if done else None,  # team id of the round's loser
         }
         self._nstep_queue.append(entry)
 
@@ -1265,6 +1269,7 @@ class NFSPAgent:
         # Identify terminal and loser
         term = seq[-1]
         loser_id = term.get("loser", None)
+        loser_team = term.get("loser_team", None)
         total_steps = len(seq)
         gamma = float(self.cfg.gamma)
 
@@ -1291,7 +1296,15 @@ class NFSPAgent:
                 raise ValueError(
                     f"actor and/or loser info missing! actor: {actor_id!r}, loser: {loser_id!r}"
                 )
-            sign = -1.0 if actor_id == loser_id else +1.0
+            # Team-aware credit: in team mode, sign is -1 if this step's
+            # actor is on the same team as the round's loser (team got
+            # dinged) and +1 otherwise. Falls back to individual identity
+            # when team info is absent (solo mode or older trajectories).
+            actor_team = step.get("actor_team", None)
+            if actor_team is not None and loser_team is not None:
+                sign = -1.0 if actor_team == loser_team else +1.0
+            else:
+                sign = -1.0 if actor_id == loser_id else +1.0
             R = sign * g
 
             if not step.get("is_br", False):
@@ -1515,12 +1528,16 @@ class NFSPAgent:
 
             # Extract actor every step; loser only on terminal
             actor = info_dict.get("actor", None) if info_dict else None
+            actor_team = info_dict.get("actor_team", None) if info_dict else None
             loser = None
+            loser_team = None
             rr = info_dict.get("round_result")
             if rr is not None:
                 loser = rr.get("loser", None)
+                loser_team = rr.get("loser_team", None)
 
-            # Pass actor/loser so _flush_nstep can distribute rewards.
+            # Pass actor/loser (and their teams) so _flush_nstep can
+            # distribute rewards correctly in both solo and team modes.
             # Skip storage when the frozen-snapshot opponent acted: those
             # transitions would teach the learner to mimic its past self
             # (a fixed point) and pollute the n-step shaping with off-policy
@@ -1528,7 +1545,8 @@ class NFSPAgent:
             if env.game["round_number"] >= self.cfg.min_round and not is_frozen_acting:
                 self._store_transition(
                     obs, mask, action, reward, nobs, nmask, done, is_br=use_br,
-                    actor=actor, loser=loser
+                    actor=actor, loser=loser,
+                    actor_team=actor_team, loser_team=loser_team,
                 )
 
             # Ensure n-step buffer flushes at terminals (round end)
@@ -1660,10 +1678,22 @@ class NFSPAgent:
             # Episode handling
             if done:
                 self._flush_nstep(force=True)
+                # Team-aware metric: when teams are set, score from the
+                # ref's TEAM perspective (loser-on-our-team = loss).
+                # Falls back to individual when team info is absent.
                 if loser:
-                    recent_winloss_results.append(loser!=env._ref_nick)
-                if loser:
-                    recent_rewards.append(1 if loser!=env._ref_nick else -1)
+                    ref_nick = env._ref_nick
+                    ref_team = None
+                    for _p in (env.game.get("players") or []):
+                        if _p.get("nickname") == ref_nick:
+                            ref_team = _p.get("team")
+                            break
+                    if ref_team is not None and loser_team is not None:
+                        is_win = (loser_team != ref_team)
+                    else:
+                        is_win = (loser != ref_nick)
+                    recent_winloss_results.append(is_win)
+                    recent_rewards.append(1 if is_win else -1)
                 recent_lens.append(ep_len)
                 ep_reward, ep_len = 0.0, 0
                 obs, mask, pid = env.reset()
