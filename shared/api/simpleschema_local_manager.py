@@ -232,6 +232,27 @@ def arrange_players(players):
 
     return players
 
+def _assign_teams(n_agents, n_teams):
+    """Partition n_agents into n_teams as evenly as possible, then shuffle.
+
+    Returns a list of length n_agents with team ids (1..n_teams). Returns
+    None for every player if n_teams < 2 (no team mode).
+    """
+    if n_teams is None or n_teams < 2:
+        return [None] * n_agents
+    if n_teams > n_agents:
+        raise ValueError(f"n_teams ({n_teams}) > n_agents ({n_agents})")
+    base, rem = divmod(n_agents, n_teams)
+    assignments = []
+    for t in range(1, n_teams + 1):
+        size = base + (1 if (t - 1) < rem else 0)
+        assignments.extend([t] * size)
+    # Shuffle so seat order doesn't trivially encode team.
+    from random import shuffle as _shuffle
+    _shuffle(assignments)
+    return assignments
+
+
 def create_game(
     n_agents,
     deck_size=DEFAULT_DECK_SIZE,
@@ -239,6 +260,7 @@ def create_game(
     jokers=0,
     blanks=0,
     common_cards=0,
+    n_teams=None,
     verbose=False,
     init_card_dist=None,
 ):
@@ -246,16 +268,22 @@ def create_game(
         raise ValueError("n_agents < 2")
     if n_agents > 8:
         raise ValueError("n_agents > 8")
+    if n_teams is not None and n_teams >= 2 and n_agents < n_teams:
+        raise ValueError(f"need at least n_teams ({n_teams}) players")
+    teams = _assign_teams(n_agents, n_teams)
     game_uuid = str(uuid.uuid4())
     if init_card_dist is None:
-        players = [{"nickname": str(i), "n_cards": 1} for i in range(n_agents)]
+        players = [
+            {"nickname": str(i), "n_cards": 1, "team": teams[i]}
+            for i in range(n_agents)
+        ]
     else:
         if len(init_card_dist) != n_agents:
             raise ValueError(
                 f"init_card_dist length {len(init_card_dist)} must equal n_agents {n_agents}"
             )
         players = [
-            {"nickname": str(i), "n_cards": int(max(1, init_card_dist[i]))}
+            {"nickname": str(i), "n_cards": int(max(1, init_card_dist[i])), "team": teams[i]}
             for i in range(n_agents)
         ]
     if len(players) > 2:
@@ -331,8 +359,17 @@ def handle_check(game, save_dir="games"):
     # Elimination if exceeding max_cards
     if losing_player["n_cards"] > game["max_cards"]:
         losing_player["n_cards"] = 0
-        # Check if game is finished
-        if sum(p["n_cards"] > 0 for p in game["players"]) == 1:
+        # Check if game is finished — solo (last player standing) OR team
+        # mode (all surviving players share a non-None team id).
+        active = [p for p in game["players"] if p["n_cards"] > 0]
+        finished = False
+        if len(active) <= 1:
+            finished = True
+        elif len(active) > 1:
+            first_team = active[0].get("team")
+            if first_team is not None and all(p.get("team") == first_team for p in active):
+                finished = True
+        if finished:
             game["status"] = "Finished"
         else:
             # If the checking player was eliminated, figure out the next player; otherwise keep CP

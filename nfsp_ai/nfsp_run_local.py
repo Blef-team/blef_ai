@@ -773,16 +773,21 @@ class MyEnv:
         pick_jokers_in_range: bool = False,
         pick_blanks_in_range: bool = False,
         pick_common_cards_in_range: bool = False,
+        pick_n_teams_in_range: bool = False,
+        n_teams: int = 0,
         randomize_initial_hands: bool = False,
     ):
         if n_agents < 2 or n_agents > 8:
             raise ValueError("n_agents must be in [2, 8]")
+        if n_teams < 0:
+            raise ValueError("n_teams must be >= 0")
 
         self.n_agents = n_agents
         self.max_cards = max_cards
         self.joker_cap = max(0, int(jokers))
         self.blank_cap = max(0, int(blanks))
         self.common_card_cap = max(0, int(common_cards))
+        self.n_teams_cap = max(0, int(n_teams))
         self.rules = {
             "deck_size": int(deck_size),
             "jokers": self.joker_cap,
@@ -810,6 +815,7 @@ class MyEnv:
         self.pick_jokers_in_range = pick_jokers_in_range
         self.pick_blanks_in_range = pick_blanks_in_range
         self.pick_common_cards_in_range = pick_common_cards_in_range
+        self.pick_n_teams_in_range = pick_n_teams_in_range
         self.randomize_initial_hands = bool(randomize_initial_hands)
 
         self.game: Dict = {}
@@ -871,6 +877,20 @@ class MyEnv:
         common_cards = self.common_card_cap
         if self.pick_common_cards_in_range:
             common_cards = random.randint(0, self.common_card_cap)
+        # n_teams: 0 = solo (no team mode); >=2 = team game with that
+        # many teams. With pick_n_teams_in_range, sample uniformly from
+        # {0, 2, ..., n_teams_cap} per game. Skip values that exceed
+        # n_agents (need at least one player per team).
+        if self.n_teams_cap >= 2:
+            if self.pick_n_teams_in_range:
+                # Choose 0 (solo) or any valid team count up to the cap
+                # that is also ≤ n_agents.
+                choices = [0] + [t for t in range(2, self.n_teams_cap + 1) if t <= n_agents]
+                n_teams = random.choice(choices)
+            else:
+                n_teams = self.n_teams_cap if self.n_teams_cap <= n_agents else 0
+        else:
+            n_teams = 0
         # Random-initial-hand-size scenario sampling. By default Blef games
         # start with every player holding exactly 1 card and accumulate as
         # players lose rounds. When `--randomize-initial-hands` is set, every
@@ -892,6 +912,7 @@ class MyEnv:
             jokers=jokers,
             blanks=blanks,
             common_cards=common_cards,
+            n_teams=(n_teams if n_teams >= 2 else None),
             verbose=self.verbose,
             init_card_dist=init_card_dist,
         )
@@ -1017,10 +1038,24 @@ class MyEnv:
 
             loser = loser_candidates[0] if loser_candidates else None
             ref = self._ref_nick
+            # Team-aware reward: a round-loss by anyone on the actor's
+            # team counts as -1 (the team got dinged); a round-loss by
+            # an opponent counts as +1. Falls back to the individual
+            # actor-vs-loser comparison when teams aren't set (solo
+            # mode) or in mixed games where the actor has no team.
+            actor_team = None
+            loser_team = None
+            for p in (self.game.get("players") or []):
+                if p.get("nickname") == actor_nick:
+                    actor_team = p.get("team")
+                if loser is not None and p.get("nickname") == loser:
+                    loser_team = p.get("team")
             if ref is None:
                 reward = 0.0
             elif loser is None:
                 reward = 0.0
+            elif actor_team is not None and loser_team is not None:
+                reward = -1.0 if loser_team == actor_team else 1.0
             elif loser == actor_nick:
                 reward = -1.0
             else:
@@ -1055,8 +1090,10 @@ class MyEnv:
                 done_reason = "ref_eliminated"
                 self._round_boundary_pending = False  # start a new game on reset
 
-        # safety cap to avoid non-terminating matches
-        MAX_ROUNDS = 50
+        # safety cap to avoid non-terminating matches. Solo games rarely
+        # exceed ~30 rounds. Team games can: with 8p in 4v4 and max_cards=11,
+        # the worst case is 8*11=88 rounds. Cap conservatively.
+        MAX_ROUNDS = 200
         assert done or self.rounds_since_reset < MAX_ROUNDS
 
         self._last_obs, self._last_mask = obs, mask
@@ -1178,6 +1215,23 @@ def main():
         dest="pick_blanks_in_range",
         action="store_true",
         help="Sample the number of blanks uniformly from [0, --blanks] for each new game.",
+    )
+    parser.add_argument(
+        "--n-teams",
+        dest="n_teams",
+        type=int,
+        default=0,
+        help=(
+            "Number of teams for team-mode games (0 = solo / no teams). "
+            "If --pick-n-teams-in-range is set, sample uniformly from "
+            "{0, 2, ..., n_teams} per game (skipping values > n_agents)."
+        ),
+    )
+    parser.add_argument(
+        "--pick-n-teams-in-range",
+        dest="pick_n_teams_in_range",
+        action="store_true",
+        help="Sample the number of teams uniformly from {0, 2, ..., --n-teams} for each new game.",
     )
     parser.add_argument(
         "--pick-common-cards-in-range",
@@ -1581,6 +1635,8 @@ def main():
         pick_jokers_in_range=args.pick_jokers_in_range,
         pick_blanks_in_range=args.pick_blanks_in_range,
         pick_common_cards_in_range=args.pick_common_cards_in_range,
+        n_teams=getattr(args, "n_teams", 0),
+        pick_n_teams_in_range=getattr(args, "pick_n_teams_in_range", False),
         randomize_initial_hands=args.randomize_initial_hands,
     )
     obs0, mask0, _ = env.reset()
@@ -1644,6 +1700,8 @@ def main():
         pick_jokers_in_range=args.pick_jokers_in_range,
         pick_blanks_in_range=args.pick_blanks_in_range,
         pick_common_cards_in_range=args.pick_common_cards_in_range,
+        n_teams=getattr(args, "n_teams", 0),
+        pick_n_teams_in_range=getattr(args, "pick_n_teams_in_range", False),
         # Eval env intentionally does NOT use randomize_initial_hands: the RIC
         # curriculum is a training-time intervention; eval scores the agent on
         # natural-distribution starts (all players begin with 1 card).
@@ -1669,6 +1727,8 @@ def main():
             pick_jokers_in_range=args.pick_jokers_in_range,
             pick_blanks_in_range=args.pick_blanks_in_range,
             pick_common_cards_in_range=args.pick_common_cards_in_range,
+        n_teams=getattr(args, "n_teams", 0),
+        pick_n_teams_in_range=getattr(args, "pick_n_teams_in_range", False),
         )
         print(
             "EVALUATION (eval-only mode):\n"
