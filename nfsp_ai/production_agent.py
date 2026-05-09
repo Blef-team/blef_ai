@@ -322,18 +322,25 @@ class NFSPProductionAgent:
         # detecting it from the Q-net state dict (older exports omitted
         # `hidden` from cfg, so checkpoints with hidden != default would
         # mismatch on load_state_dict).
+        q_sd = checkpoint.get("q", {})
         hidden = ckpt_cfg.get("hidden")
         if hidden is None:
-            q_sd = checkpoint.get("q", {})
             for key in ("net.0.weight", "trunk.0.weight"):
                 if key in q_sd:
                     hidden = int(q_sd[key].shape[0])
                     break
             if hidden is None:
                 hidden = base_cfg.hidden
+        # Factorized-head Q-net (and matching policy net) use `trunk.*` /
+        # `bet_head.*` / `check_head.*` keys; the plain net uses `net.*`.
+        # Prefer the cfg flag, then fall back to state-dict shape.
+        factorize = ckpt_cfg.get("factorize_action_head")
+        if factorize is None:
+            factorize = "trunk.0.weight" in q_sd
         cfg = replace(
             base_cfg,
             hidden=int(hidden),
+            factorize_action_head=bool(factorize),
             anticipatory_eta=ckpt_cfg.get("anticipatory_eta", base_cfg.anticipatory_eta),
         )
         cfg.rl_capacity = 1
