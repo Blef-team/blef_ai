@@ -79,6 +79,25 @@ class RoutingKeysTest(unittest.TestCase):
         self.assertEqual(keys2[0], "24_team")
         self.assertNotIn("24_1v1", keys2)
 
+    def test_team_detected_from_players_list(self):
+        # Engine schema: team field on each player, no rules.teams flag.
+        rules = {"deck_size": 24, "jokers": 0, "blanks": 0, "common_cards": 0}
+        players = [
+            {"nickname": "0", "team": 1},
+            {"nickname": "1", "team": 2},
+            {"nickname": "2", "team": 1},
+            {"nickname": "3", "team": 2},
+        ]
+        keys = _routing_keys(rules, n_players=4, players=players)
+        self.assertEqual(keys[0], "24_team")
+
+    def test_no_team_when_all_player_teams_none(self):
+        rules = {"deck_size": 24, "jokers": 0, "blanks": 0, "common_cards": 0}
+        players = [{"nickname": str(i), "team": None} for i in range(2)]
+        keys = _routing_keys(rules, n_players=2, players=players)
+        self.assertNotIn("24_team", keys)
+        self.assertEqual(keys[0], "24_1v1")
+
     def test_team_then_multi_then_legacy(self):
         rules = {"deck_size": 32, "jokers": 1, "teams": True}
         keys = _routing_keys(rules, n_players=4)

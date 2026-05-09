@@ -84,15 +84,22 @@ def _model_key_from_filename(path: str) -> Optional[str]:
     return f"{deck}_{variant}"
 
 
-def _routing_keys(rules: dict, n_players: int) -> list[str]:
+def _routing_keys(rules: dict, n_players: int, players: Optional[list] = None) -> list[str]:
     """Return preferred routing keys, most-specific first.
 
     The caller walks this list and picks the first key with a loaded
     agent. Always ends with the bare `<deck>` legacy key so a
     single-model deployment continues to work.
+
+    Team mode is detected by inspecting `players[*].team` (the engine
+    schema). A players list with any non-None team value means team
+    mode. The legacy `rules.teams` flag is also honoured for callers
+    that pre-compute it.
     """
     deck = int(rules.get("deck_size", 24))
     is_team = bool(rules.get("teams", False))
+    if not is_team and players:
+        is_team = any(p.get("team") is not None for p in players)
     j = int(rules.get("jokers", 0))
     b = int(rules.get("blanks", 0))
     cc = int(rules.get("common_cards", 0))
@@ -335,8 +342,9 @@ class NFSPProductionAgent:
 
         rules = game_state.get("rules", {}) or {}
         deck_size = int(rules.get("deck_size", 24))
-        n_players = len(game_state.get("players", []) or [])
-        keys = _routing_keys(rules, n_players)
+        players = game_state.get("players", []) or []
+        n_players = len(players)
+        keys = _routing_keys(rules, n_players, players=players)
         agent = None
         chosen_key = None
         for key in keys:
