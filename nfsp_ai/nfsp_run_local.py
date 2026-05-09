@@ -40,6 +40,12 @@ class DeckSpec:
     history_feature_dim: int
     use_card_embeddings: bool
     use_history_embeddings: bool
+    # When True, vectorize_obs appends MAX_PLAYERS extra floats encoding
+    # per-slot team membership (+1 teammate / -1 opp / 0 none). Default
+    # True for new trainings; production_agent flips it to False when
+    # loading legacy checkpoints whose obs_dim predates the team-flag
+    # block (so old artifacts keep working post-deploy).
+    team_aware: bool = True
 
 
 def _compute_obs_dim(
@@ -47,6 +53,7 @@ def _compute_obs_dim(
     hist_dim: int,
     card_feature_dim: Optional[int] = None,
     history_feature_dim: Optional[int] = None,
+    team_aware: bool = True,
 ) -> int:
     card_dim = card_feature_dim if card_feature_dim is not None else hand_vec_dim
     history_dim = history_feature_dim if history_feature_dim is not None else hist_dim
@@ -57,7 +64,7 @@ def _compute_obs_dim(
         + 1  # common jokers
         + card_dim
         + MAX_PLAYERS
-        + MAX_PLAYERS  # per-slot team flag: +1 teammate / -1 opponent / 0 none
+        + (MAX_PLAYERS if team_aware else 0)  # per-slot team flag (gated)
         + 1  # round scaling
         + history_dim
         + 1  # last bet prob
@@ -71,6 +78,7 @@ def _build_deck_spec(
     rules: Dict,
     card_embedding: Optional["CardEmbeddingRuntime"] = None,
     history_embedding: Optional["HistoryEmbeddingRuntime"] = None,
+    team_aware: bool = True,
 ) -> DeckSpec:
     deck_size = int(rules.get("deck_size", 24))
     if deck_size % 4 != 0:
@@ -106,6 +114,7 @@ def _build_deck_spec(
         hist_dim,
         card_feature_dim=card_feature_dim,
         history_feature_dim=history_feature_dim,
+        team_aware=team_aware,
     )
     return DeckSpec(
         deck_size=deck_size,
@@ -119,6 +128,7 @@ def _build_deck_spec(
         history_feature_dim=history_feature_dim,
         use_card_embeddings=use_card_embeddings,
         use_history_embeddings=use_history_embeddings,
+        team_aware=team_aware,
     )
 
 MAX_PLAYERS = 8
@@ -198,9 +208,15 @@ def _deck_spec_from_game(
     game: dict,
     card_embedding: Optional["CardEmbeddingRuntime"] = None,
     history_embedding: Optional["HistoryEmbeddingRuntime"] = None,
+    team_aware: bool = True,
 ) -> DeckSpec:
     rules = game.get("rules", {}) or {}
-    return _build_deck_spec(rules, card_embedding=card_embedding, history_embedding=history_embedding)
+    return _build_deck_spec(
+        rules,
+        card_embedding=card_embedding,
+        history_embedding=history_embedding,
+        team_aware=team_aware,
+    )
 
 
 def _current_hand(game: dict, nick: str) -> List[dict]:
@@ -728,20 +744,23 @@ def vectorize_obs(
 
     # Per-slot team flag (rotated to actor at slot 0): +1 teammate, -1
     # opponent, 0 if no player in slot or game is solo (no team mode).
-    team_map = {p.get("nickname"): p.get("team") for p in players}
-    actor_team = team_map.get(game.get("cp_nickname"))
-    team_flags = np.zeros((MAX_PLAYERS,), dtype=np.float32)
-    if actor_team is not None:
-        for slot_idx in range(min(MAX_PLAYERS, len(slot_order))):
-            slot_nick = slot_order[slot_idx] if slot_idx < len(slot_order) else None
-            if slot_nick is None:
-                continue
-            other_team = team_map.get(slot_nick)
-            if other_team is None:
-                continue
-            team_flags[slot_idx] = 1.0 if other_team == actor_team else -1.0
-    obs[idx:idx + MAX_PLAYERS] = team_flags
-    idx += MAX_PLAYERS
+    # Gated on spec.team_aware so legacy checkpoints (obs_dim predates
+    # the team-flag block) keep producing the original obs shape.
+    if getattr(spec, "team_aware", True):
+        team_map = {p.get("nickname"): p.get("team") for p in players}
+        actor_team = team_map.get(game.get("cp_nickname"))
+        team_flags = np.zeros((MAX_PLAYERS,), dtype=np.float32)
+        if actor_team is not None:
+            for slot_idx in range(min(MAX_PLAYERS, len(slot_order))):
+                slot_nick = slot_order[slot_idx] if slot_idx < len(slot_order) else None
+                if slot_nick is None:
+                    continue
+                other_team = team_map.get(slot_nick)
+                if other_team is None:
+                    continue
+                team_flags[slot_idx] = 1.0 if other_team == actor_team else -1.0
+        obs[idx:idx + MAX_PLAYERS] = team_flags
+        idx += MAX_PLAYERS
 
     # Round scaling
     cur_round = int(game.get("round_number", 1))
