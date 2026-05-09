@@ -57,6 +57,7 @@ def _compute_obs_dim(
         + 1  # common jokers
         + card_dim
         + MAX_PLAYERS
+        + MAX_PLAYERS  # per-slot team flag: +1 teammate / -1 opponent / 0 none
         + 1  # round scaling
         + history_dim
         + 1  # last bet prob
@@ -428,6 +429,71 @@ def _legal_action_mask(game: dict, spec: DeckSpec, pub_prior: list) -> torch.Ten
             mask[next_min:check] = 1.0
         # CHECK legal once at least one bet has happened.
         mask[check] = 1.0
+
+    # ===== Team-aware constraints =====
+    # Rule 1: never check a teammate. CHECK is illegal if the most-recent
+    # bettor is on the actor's team. (CHECK calls the *last bet*, so the
+    # check-target is the last non-check actor in history.)
+    # Rule 2: never force a teammate to check. If the next-in-turn is on
+    # the actor's team, the actor's bet must leave at least one legal
+    # raise above. (One-step lookahead; deeper consecutive-teammate
+    # cascades are rare and not enforced here.)
+    players = game.get("players") or []
+    if players:
+        actor_nick = game.get("cp_nickname")
+        actor_team = None
+        for p in players:
+            if p.get("nickname") == actor_nick:
+                actor_team = p.get("team")
+                break
+        if actor_team is not None:
+            check_legal_pre = bool(mask[check])
+            # Rule 1: forbid CHECK if last bettor is on actor's team.
+            if hist:
+                last_bettor_nick = None
+                for ev in reversed(hist):
+                    try:
+                        aid = int((ev or {}).get("action_id", -1))
+                    except Exception:
+                        continue
+                    if 0 <= aid < check:
+                        last_bettor_nick = (ev or {}).get("player")
+                        break
+                if last_bettor_nick is not None:
+                    last_team = None
+                    for p in players:
+                        if p.get("nickname") == last_bettor_nick:
+                            last_team = p.get("team")
+                            break
+                    if last_team is not None and last_team == actor_team:
+                        mask[check] = 0.0
+            # Rule 2: if next-in-turn is a teammate, forbid the
+            # top-of-ladder bet (so the teammate has at least one legal
+            # raise under rule 1). Skip when that bet is the *only* legal
+            # raise — relaxing rule 2 is preferable to zeroing the mask.
+            actor_idx = None
+            for i, p in enumerate(players):
+                if p.get("nickname") == actor_nick:
+                    actor_idx = i
+                    break
+            if actor_idx is not None and check >= 1:
+                n = len(players)
+                next_team = None
+                for offset in range(1, n + 1):
+                    cand = players[(actor_idx + offset) % n]
+                    if int(cand.get("n_cards", 0)) > 0:
+                        next_team = cand.get("team")
+                        break
+                if next_team is not None and next_team == actor_team:
+                    legal_raises_above = int(mask[:check].sum().item()) if hasattr(mask, "sum") else int(mask[:check].sum())
+                    if legal_raises_above >= 2:
+                        mask[check - 1] = 0.0
+            # Fallback: if team rules zeroed the mask, restore CHECK
+            # (rule 1 yields). The actor takes the immediate -1 rather
+            # than crashing the env. Self-play exploration occasionally
+            # walks into this corner.
+            if not mask.any() and check_legal_pre:
+                mask[check] = 1.0
     return torch.from_numpy(mask)
 
 
@@ -652,12 +718,29 @@ def vectorize_obs(
         slot_order += [None] * (MAX_PLAYERS - len(slot_order))
     ordered_counts = np.zeros((MAX_PLAYERS,), dtype=np.float32)
     for slot_idx in range(min(MAX_PLAYERS, len(slot_order))):
-        nick = slot_order[slot_idx] if slot_idx < len(slot_order) else None
-        if nick is None:
+        slot_nick = slot_order[slot_idx] if slot_idx < len(slot_order) else None
+        if slot_nick is None:
             ordered_counts[slot_idx] = 0.0
         else:
-            ordered_counts[slot_idx] = float(counts_map.get(nick, 0))
+            ordered_counts[slot_idx] = float(counts_map.get(slot_nick, 0))
     obs[idx:idx + MAX_PLAYERS] = ordered_counts
+    idx += MAX_PLAYERS
+
+    # Per-slot team flag (rotated to actor at slot 0): +1 teammate, -1
+    # opponent, 0 if no player in slot or game is solo (no team mode).
+    team_map = {p.get("nickname"): p.get("team") for p in players}
+    actor_team = team_map.get(game.get("cp_nickname"))
+    team_flags = np.zeros((MAX_PLAYERS,), dtype=np.float32)
+    if actor_team is not None:
+        for slot_idx in range(min(MAX_PLAYERS, len(slot_order))):
+            slot_nick = slot_order[slot_idx] if slot_idx < len(slot_order) else None
+            if slot_nick is None:
+                continue
+            other_team = team_map.get(slot_nick)
+            if other_team is None:
+                continue
+            team_flags[slot_idx] = 1.0 if other_team == actor_team else -1.0
+    obs[idx:idx + MAX_PLAYERS] = team_flags
     idx += MAX_PLAYERS
 
     # Round scaling
@@ -773,16 +856,21 @@ class MyEnv:
         pick_jokers_in_range: bool = False,
         pick_blanks_in_range: bool = False,
         pick_common_cards_in_range: bool = False,
+        pick_n_teams_in_range: bool = False,
+        n_teams: int = 0,
         randomize_initial_hands: bool = False,
     ):
         if n_agents < 2 or n_agents > 8:
             raise ValueError("n_agents must be in [2, 8]")
+        if n_teams < 0:
+            raise ValueError("n_teams must be >= 0")
 
         self.n_agents = n_agents
         self.max_cards = max_cards
         self.joker_cap = max(0, int(jokers))
         self.blank_cap = max(0, int(blanks))
         self.common_card_cap = max(0, int(common_cards))
+        self.n_teams_cap = max(0, int(n_teams))
         self.rules = {
             "deck_size": int(deck_size),
             "jokers": self.joker_cap,
@@ -810,6 +898,7 @@ class MyEnv:
         self.pick_jokers_in_range = pick_jokers_in_range
         self.pick_blanks_in_range = pick_blanks_in_range
         self.pick_common_cards_in_range = pick_common_cards_in_range
+        self.pick_n_teams_in_range = pick_n_teams_in_range
         self.randomize_initial_hands = bool(randomize_initial_hands)
 
         self.game: Dict = {}
@@ -871,6 +960,20 @@ class MyEnv:
         common_cards = self.common_card_cap
         if self.pick_common_cards_in_range:
             common_cards = random.randint(0, self.common_card_cap)
+        # n_teams: 0 = solo (no team mode); >=2 = team game with that
+        # many teams. With pick_n_teams_in_range, sample uniformly from
+        # {0, 2, ..., n_teams_cap} per game. Skip values that exceed
+        # n_agents (need at least one player per team).
+        if self.n_teams_cap >= 2:
+            if self.pick_n_teams_in_range:
+                # Choose 0 (solo) or any valid team count up to the cap
+                # that is also ≤ n_agents.
+                choices = [0] + [t for t in range(2, self.n_teams_cap + 1) if t <= n_agents]
+                n_teams = random.choice(choices)
+            else:
+                n_teams = self.n_teams_cap if self.n_teams_cap <= n_agents else 0
+        else:
+            n_teams = 0
         # Random-initial-hand-size scenario sampling. By default Blef games
         # start with every player holding exactly 1 card and accumulate as
         # players lose rounds. When `--randomize-initial-hands` is set, every
@@ -892,6 +995,7 @@ class MyEnv:
             jokers=jokers,
             blanks=blanks,
             common_cards=common_cards,
+            n_teams=(n_teams if n_teams >= 2 else None),
             verbose=self.verbose,
             init_card_dist=init_card_dist,
         )
@@ -1017,10 +1121,24 @@ class MyEnv:
 
             loser = loser_candidates[0] if loser_candidates else None
             ref = self._ref_nick
+            # Team-aware reward: a round-loss by anyone on the actor's
+            # team counts as -1 (the team got dinged); a round-loss by
+            # an opponent counts as +1. Falls back to the individual
+            # actor-vs-loser comparison when teams aren't set (solo
+            # mode) or in mixed games where the actor has no team.
+            actor_team = None
+            loser_team = None
+            for p in (self.game.get("players") or []):
+                if p.get("nickname") == actor_nick:
+                    actor_team = p.get("team")
+                if loser is not None and p.get("nickname") == loser:
+                    loser_team = p.get("team")
             if ref is None:
                 reward = 0.0
             elif loser is None:
                 reward = 0.0
+            elif actor_team is not None and loser_team is not None:
+                reward = -1.0 if loser_team == actor_team else 1.0
             elif loser == actor_nick:
                 reward = -1.0
             else:
@@ -1031,6 +1149,8 @@ class MyEnv:
                 "ref": ref,
                 "before_counts": before_counts,
                 "after_counts": after_counts,
+                "actor_team": actor_team,
+                "loser_team": loser_team,
             }
             history_for_log = history_before
 
@@ -1055,16 +1175,29 @@ class MyEnv:
                 done_reason = "ref_eliminated"
                 self._round_boundary_pending = False  # start a new game on reset
 
-        # safety cap to avoid non-terminating matches
-        MAX_ROUNDS = 50
+        # safety cap to avoid non-terminating matches. Solo games rarely
+        # exceed ~30 rounds. Team games can: with 8p in 4v4 and max_cards=11,
+        # the worst case is 8*11=88 rounds. Cap conservatively.
+        MAX_ROUNDS = 200
         assert done or self.rounds_since_reset < MAX_ROUNDS
 
         self._last_obs, self._last_mask = obs, mask
+        # Compute actor's team for THIS step (not the round terminal).
+        # Needed by the n-step credit shaping so per-step credit can be
+        # team-aware: sign = -1 if actor's team == loser's team, else +1.
+        # In solo mode both fields are None and the agent falls back to
+        # individual identity comparison.
+        step_actor_team = None
+        for p in (self.game.get("players") or []):
+            if p.get("nickname") == actor_nick:
+                step_actor_team = p.get("team")
+                break
         info = {
             "next_pid": pid,
             "illegal": 0,
             "action": action_int,
             "actor": actor_nick,
+            "actor_team": step_actor_team,
             "history": history_for_log,
             "round_result": round_result,
             "reward": float(reward),
@@ -1178,6 +1311,23 @@ def main():
         dest="pick_blanks_in_range",
         action="store_true",
         help="Sample the number of blanks uniformly from [0, --blanks] for each new game.",
+    )
+    parser.add_argument(
+        "--n-teams",
+        dest="n_teams",
+        type=int,
+        default=0,
+        help=(
+            "Number of teams for team-mode games (0 = solo / no teams). "
+            "If --pick-n-teams-in-range is set, sample uniformly from "
+            "{0, 2, ..., n_teams} per game (skipping values > n_agents)."
+        ),
+    )
+    parser.add_argument(
+        "--pick-n-teams-in-range",
+        dest="pick_n_teams_in_range",
+        action="store_true",
+        help="Sample the number of teams uniformly from {0, 2, ..., --n-teams} for each new game.",
     )
     parser.add_argument(
         "--pick-common-cards-in-range",
@@ -1581,6 +1731,8 @@ def main():
         pick_jokers_in_range=args.pick_jokers_in_range,
         pick_blanks_in_range=args.pick_blanks_in_range,
         pick_common_cards_in_range=args.pick_common_cards_in_range,
+        n_teams=getattr(args, "n_teams", 0),
+        pick_n_teams_in_range=getattr(args, "pick_n_teams_in_range", False),
         randomize_initial_hands=args.randomize_initial_hands,
     )
     obs0, mask0, _ = env.reset()
@@ -1644,6 +1796,8 @@ def main():
         pick_jokers_in_range=args.pick_jokers_in_range,
         pick_blanks_in_range=args.pick_blanks_in_range,
         pick_common_cards_in_range=args.pick_common_cards_in_range,
+        n_teams=getattr(args, "n_teams", 0),
+        pick_n_teams_in_range=getattr(args, "pick_n_teams_in_range", False),
         # Eval env intentionally does NOT use randomize_initial_hands: the RIC
         # curriculum is a training-time intervention; eval scores the agent on
         # natural-distribution starts (all players begin with 1 card).
@@ -1669,6 +1823,8 @@ def main():
             pick_jokers_in_range=args.pick_jokers_in_range,
             pick_blanks_in_range=args.pick_blanks_in_range,
             pick_common_cards_in_range=args.pick_common_cards_in_range,
+        n_teams=getattr(args, "n_teams", 0),
+        pick_n_teams_in_range=getattr(args, "pick_n_teams_in_range", False),
         )
         print(
             "EVALUATION (eval-only mode):\n"
