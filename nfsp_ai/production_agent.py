@@ -271,10 +271,20 @@ class NFSPProductionAgent:
         self.device = torch.device(device)
         self.greedy = bool(greedy)
 
+        # Embeddings must be loaded BEFORE model probing so we can
+        # compute the expected obs_dim with embeddings active and
+        # determine whether each checkpoint's obs vector includes the
+        # team-flag block (post-2026-05-09 trainings) or predates it.
+        self.card_embeddings = _load_card_embedding_map(card_embedding_path, self.device)
+        self.history_embeddings = _load_history_embedding_map(history_embedding_path, self.device)
+
         # agents: routing-key -> NFSPAgent
         # routing-key examples: "24" (legacy), "24_1v1", "24_multi", "32_team"
         self.agents: dict[str, NFSPAgent] = {}
         self.model_sources: dict[str, str] = {}
+        # team_aware per loaded model: chosen at determine_action time
+        # to build the right-shape obs for the served checkpoint.
+        self.agent_team_aware: dict[str, bool] = {}
         for key, cand in _resolve_model_paths(model_path).items():
             ckpt = torch.load(cand, map_location=self.device)
             act_dim = int(ckpt.get("act_dim", 0))
@@ -295,8 +305,12 @@ class NFSPProductionAgent:
             if key in self.agents:
                 continue
             agent = self._build_agent_from_checkpoint(ckpt)
+            # Determine team_aware by matching ckpt obs_dim against the
+            # spec built with embeddings active. New trainings have +8
+            # for team flags; legacy artifacts predate that block.
             self.agents[key] = agent
             self.model_sources[key] = cand
+            self.agent_team_aware[key] = self._infer_team_aware(deck_size, int(ckpt["obs_dim"]))
 
         if not self.agents:
             raise FileNotFoundError(
@@ -304,12 +318,34 @@ class NFSPProductionAgent:
                 "artifacts/nfsp_inference_<deck>[_<variant>].pt alongside the Lambda package."
             )
 
-        self.card_embeddings = _load_card_embedding_map(card_embedding_path, self.device)
-        self.history_embeddings = _load_history_embedding_map(history_embedding_path, self.device)
         if not self.card_embeddings:
             print("[embeddings] no card embedding artifacts loaded; using multi-hot card features.")
         if not self.history_embeddings:
             print("[embeddings] no history embedding artifacts loaded; using legacy history multi-hot features.")
+
+    def _infer_team_aware(self, deck_size: int, ckpt_obs_dim: int) -> bool:
+        """Probe whether a checkpoint's obs_dim includes the team-flag block.
+
+        Builds the expected obs_dim with team_aware=True and =False
+        (with the loaded embeddings active) and matches ckpt obs_dim
+        against them. Returns True when the +MAX_PLAYERS team-flag block
+        is present, False otherwise. Raises if neither matches.
+        """
+        from nfsp_ai.nfsp_run_local import _build_deck_spec
+        rules = {"deck_size": int(deck_size)}
+        card_emb = self.card_embeddings.get(int(deck_size))
+        hist_emb = self.history_embeddings.get(int(deck_size))
+        spec_team = _build_deck_spec(rules, card_emb, hist_emb, team_aware=True)
+        spec_no = _build_deck_spec(rules, card_emb, hist_emb, team_aware=False)
+        if ckpt_obs_dim == spec_team.obs_dim:
+            return True
+        if ckpt_obs_dim == spec_no.obs_dim:
+            return False
+        raise ValueError(
+            f"Checkpoint obs_dim={ckpt_obs_dim} matches neither team-aware spec "
+            f"({spec_team.obs_dim}) nor legacy spec ({spec_no.obs_dim}) for deck "
+            f"{deck_size}. Embedding paths may be wrong or the checkpoint format unsupported."
+        )
 
     def _build_agent_from_checkpoint(self, checkpoint: dict) -> NFSPAgent:
         if "obs_dim" not in checkpoint or "act_dim" not in checkpoint:
@@ -405,10 +441,16 @@ class NFSPProductionAgent:
         # the card / history vocabulary.
         card_embedding = self.card_embeddings.get(deck_size)
         history_embedding = self.history_embeddings.get(deck_size)
+        # Build spec to match the SELECTED model's expected obs_dim.
+        # New team specialists have team_aware=True (obs has team-flag
+        # block); legacy artifacts have team_aware=False so old shapes
+        # keep working.
+        spec_team_aware = self.agent_team_aware.get(chosen_key, True)
         spec = _deck_spec_from_game(
             game_state,
             card_embedding=card_embedding,
             history_embedding=history_embedding,
+            team_aware=spec_team_aware,
         )
         obs_vec, pub_prior = vectorize_obs(
             game_state,

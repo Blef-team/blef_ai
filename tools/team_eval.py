@@ -205,7 +205,23 @@ def run_team_eval(
     team_wins = team_losses = 0
     indiv_wins = indiv_losses = 0
     total_rounds = 0
+    # Cell breakdowns: (key) -> [team_wins, team_losses]
+    by_cards: dict = {}        # key = (our_cards, opp_total_cards) at round start
+    by_round_bin: dict = {}    # key = "early" | "mid" | "late"
+    by_partition: dict = {}    # key = "ours_vs_opp1[_opp2...]" e.g., "2v2", "1v2", "1v1v1"
     t0 = time.time()
+
+    def _bump(d: dict, key, win: bool):
+        if key not in d:
+            d[key] = [0, 0]
+        d[key][0 if win else 1] += 1
+
+    def _round_bin(rn: int) -> str:
+        if rn <= 2:
+            return "early"
+        if rn <= 5:
+            return "mid"
+        return "late"
 
     for _g in range(games):
         obs, mask, _pid = env.reset()
@@ -230,17 +246,50 @@ def run_team_eval(
                     indiv_losses += 1
                 else:
                     indiv_wins += 1
-                # Team perspective
+                # Team perspective + cell bookkeeping
                 loser_team = _team_of(env.game.get("players") or [], loser)
                 if ref_team is not None and loser_team is not None:
-                    if loser_team == ref_team:
-                        team_losses += 1
-                    else:
+                    is_win = (loser_team != ref_team)
+                    if is_win:
                         team_wins += 1
+                    else:
+                        team_losses += 1
+                    # Cell keys
+                    before = rr.get("before_counts") or {}
+                    our_c = int(before.get(ref, 0))
+                    opp_c = sum(int(v) for k, v in before.items() if k != ref)
+                    rn = int(env.game.get("round_number", 1))
+                    # Team-partition at ROUND START (not after elimination —
+                    # otherwise auto-game-ending rounds get binned as 1v0/2v0
+                    # which can't actually be played). Read from before_counts.
+                    team_map = {p.get("nickname"): p.get("team")
+                                for p in (env.game.get("players") or [])}
+                    by_team_active: dict = {}
+                    for nick, n_before in before.items():
+                        if int(n_before) <= 0:
+                            continue
+                        t = team_map.get(nick)
+                        if t is None:
+                            continue
+                        by_team_active[t] = by_team_active.get(t, 0) + 1
+                    our_size = by_team_active.pop(ref_team, 0)
+                    opp_sizes = sorted(by_team_active.values(), reverse=True)
+                    partition_key = f"{our_size}v" + "v".join(str(x) for x in opp_sizes) if opp_sizes else f"{our_size}v0"
+                    _bump(by_cards, (our_c, opp_c), is_win)
+                    _bump(by_round_bin, _round_bin(rn), is_win)
+                    _bump(by_partition, partition_key, is_win)
 
     dur = time.time() - t0
     settled = team_wins + team_losses
     indiv_settled = indiv_wins + indiv_losses
+
+    def _winrates(d: dict) -> dict:
+        out = {}
+        for key, (w, l) in sorted(d.items(), key=lambda kv: str(kv[0])):
+            n = w + l
+            out[str(key)] = {"team_wr": (w / n) if n else None, "n": n}
+        return out
+
     return {
         "checkpoint": checkpoint,
         "deck_size": deck_size,
@@ -258,6 +307,9 @@ def run_team_eval(
         "indiv_winrate": (indiv_wins / indiv_settled) if indiv_settled else float("nan"),
         "team_settled_rounds": settled,
         "indiv_settled_rounds": indiv_settled,
+        "by_cards": _winrates(by_cards),
+        "by_round_bin": _winrates(by_round_bin),
+        "by_partition": _winrates(by_partition),
         "duration_sec": round(dur, 2),
     }
 
@@ -318,6 +370,57 @@ def main(argv=None) -> int:
                 f"team_rew={sum(trew)/len(trew):+.4f} "
                 f"indiv_wr={sum(iwrs)/len(iwrs):.4f}  ({len(twrs)} seeds)"
             )
+
+        # Cell breakdown: aggregate counts across seeds before computing rates
+        # so per-cell stats reflect the full sample, not seed-mean-of-rates.
+        def _agg(field: str) -> dict:
+            agg: dict = {}
+            for r in rows:
+                for key, v in (r.get(field) or {}).items():
+                    if v.get("team_wr") is None:
+                        continue
+                    n = int(v["n"])
+                    w = int(round(float(v["team_wr"]) * n))
+                    a = agg.setdefault(key, [0, 0])
+                    a[0] += w
+                    a[1] += n - w
+            return agg
+
+        def _print_cells(label: str, agg: dict, sort_key=None):
+            if not agg:
+                return
+            print(f"[breakdown:{label}]")
+            items = list(agg.items())
+            if sort_key:
+                items.sort(key=sort_key)
+            for k, (w, l) in items:
+                n = w + l
+                if n == 0:
+                    continue
+                wr = w / n
+                # Wilson-ish stderr for binomial
+                se = (wr * (1 - wr) / n) ** 0.5 if n else 0.0
+                print(f"  {label}={k!s:<12s} team_wr={wr:.4f} ± {se:.4f}  (n={n})")
+
+        # Round bin (early/mid/late) — sort early < mid < late.
+        rb_agg = _agg("by_round_bin")
+        rb_order = {"'early'": 0, "'mid'": 1, "'late'": 2}
+        _print_cells("round", rb_agg, sort_key=lambda kv: rb_order.get(kv[0], 99))
+
+        # Team partition (e.g., "2v2", "1v2", "2v1", "1v1v1"): from ref's
+        # POV, our_team_size + sorted opponent team sizes.
+        _print_cells("partition", _agg("by_partition"), sort_key=lambda kv: kv[0])
+
+        # (our_cards, opp_cards) — print most-frequent cells only, top 12.
+        cards_agg = _agg("by_cards")
+        if cards_agg:
+            top = sorted(cards_agg.items(), key=lambda kv: -(kv[1][0] + kv[1][1]))[:12]
+            print(f"[breakdown:cards] (top {len(top)} by frequency)")
+            for k, (w, l) in top:
+                n = w + l
+                wr = w / n
+                se = (wr * (1 - wr) / n) ** 0.5
+                print(f"  cards={k!s:<14s} team_wr={wr:.4f} ± {se:.4f}  (n={n})")
 
     if args.out:
         with open(args.out, "w") as f:
