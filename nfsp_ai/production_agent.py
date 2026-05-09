@@ -8,7 +8,9 @@ alongside optional card/history embedding artifacts.  It exposes a single helper
 
 from __future__ import annotations
 
+import glob
 import os
+import re
 from dataclasses import replace
 from functools import lru_cache
 from typing import Optional, Tuple
@@ -39,27 +41,118 @@ DEFAULT_DEVICE = os.environ.get("NFSP_DEVICE", "cpu")
 DEFAULT_GREEDY = os.environ.get("NFSP_GREEDY", "1") not in {"0", "false", "False"}
 
 
-def _resolve_model_paths(path: Optional[str]) -> list[str]:
-    candidates: list[str] = []
+# ---------------------------------------------------------------------------
+# Variant-aware model routing
+# ---------------------------------------------------------------------------
+#
+# Naming convention for inference artifacts:
+#
+#     artifacts/nfsp_inference_<deck>_<variant>.pt   (preferred)
+#     artifacts/nfsp_inference_<deck>.pt              (legacy fallback)
+#
+# `<deck>` is "24" or "32"; `<variant>` is one of:
+#
+#     "1v1"   — exactly two players, jokers=blanks=common_cards=0, no teams
+#     "multi" — anything that isn't 1v1 (multi-player, jokers, blanks,
+#               common cards, or any combination)
+#     "team"  — reserved for future team / partnership game variants
+#
+# Multiple checkpoints can coexist; at inference, `_routing_keys` produces
+# a priority chain (most specific first). The first key with a loaded
+# agent wins. The bare `<deck>` key acts as a final fallback so legacy
+# deployments without variant-specific files keep working unchanged.
+
+_INFERENCE_FILENAME_RE = re.compile(
+    r"^nfsp_inference_(?P<deck>24|32)(?:_(?P<variant>[A-Za-z0-9]+))?\.pt$"
+)
+_KNOWN_VARIANTS = ("1v1", "multi", "team")
+
+
+def _model_key_from_filename(path: str) -> Optional[str]:
+    """Map an inference file path to its routing key.
+
+    Returns None if the filename doesn't match the convention.
+    """
+    name = os.path.basename(path)
+    m = _INFERENCE_FILENAME_RE.match(name)
+    if not m:
+        return None
+    deck = m.group("deck")
+    variant = m.group("variant")
+    if variant is None:
+        return deck  # legacy
+    return f"{deck}_{variant}"
+
+
+def _routing_keys(rules: dict, n_players: int) -> list[str]:
+    """Return preferred routing keys, most-specific first.
+
+    The caller walks this list and picks the first key with a loaded
+    agent. Always ends with the bare `<deck>` legacy key so a
+    single-model deployment continues to work.
+    """
+    deck = int(rules.get("deck_size", 24))
+    is_team = bool(rules.get("teams", False))
+    j = int(rules.get("jokers", 0))
+    b = int(rules.get("blanks", 0))
+    cc = int(rules.get("common_cards", 0))
+    is_1v1 = (n_players == 2 and j == 0 and b == 0 and cc == 0 and not is_team)
+
+    keys: list[str] = []
+    if is_team:
+        keys.append(f"{deck}_team")
+    if is_1v1:
+        keys.append(f"{deck}_1v1")
+    keys.append(f"{deck}_multi")
+    keys.append(str(deck))  # legacy fallback
+    # de-dupe while preserving order
+    out: list[str] = []
     seen: set[str] = set()
-    if path:
-        candidates.append(path)
-    else:
-        candidates.extend(
-            [
-                "artifacts/nfsp_inference_32.pt",
-                "artifacts/nfsp_inference_24.pt",
-                DEFAULT_MODEL_PATH,
-            ]
-        )
-    resolved: list[str] = []
-    for cand in candidates:
-        if not cand or cand in seen:
+    for k in keys:
+        if k in seen:
             continue
-        seen.add(cand)
-        if os.path.exists(cand):
-            resolved.append(cand)
-    return resolved
+        seen.add(k)
+        out.append(k)
+    return out
+
+
+def _resolve_model_paths(path: Optional[str]) -> dict[str, str]:
+    """Discover inference checkpoints. Returns {routing_key: path}.
+
+    If `path` is given, treat it as a single explicit checkpoint and
+    derive its key from the filename (or use a synthesised key when the
+    filename is non-standard).
+    """
+    out: dict[str, str] = {}
+    if path:
+        if not os.path.exists(path):
+            return out
+        key = _model_key_from_filename(path)
+        if key is None:
+            # Non-standard filename: store under a synthetic deck-only key
+            # using the act_dim probe at load time. We cannot infer it from
+            # the filename, so store under "explicit" and let the loader
+            # rewrite the key.
+            key = "explicit"
+        out[key] = path
+        return out
+
+    # Discovery: scan artifacts/ for files matching the naming convention.
+    # Search both relative ("artifacts/...") and an explicit absolute env
+    # override (DEFAULT_MODEL_PATH) so deployments can point at a custom
+    # directory.
+    search_globs = ["artifacts/nfsp_inference_*.pt"]
+    extra_dir = os.path.dirname(DEFAULT_MODEL_PATH) if DEFAULT_MODEL_PATH else ""
+    if extra_dir and extra_dir not in {"", "artifacts"}:
+        search_globs.append(os.path.join(extra_dir, "nfsp_inference_*.pt"))
+    for pattern in search_globs:
+        for cand in glob.glob(pattern):
+            key = _model_key_from_filename(cand)
+            if key is None:
+                continue
+            # First file wins per key; prefer the order produced by glob (alphabetical).
+            out.setdefault(key, cand)
+    return out
 
 
 def _load_card_embedding_map(path: Optional[str], device: torch.device) -> dict[int, CardEmbeddingRuntime]:
@@ -144,9 +237,11 @@ class NFSPProductionAgent:
         self.device = torch.device(device)
         self.greedy = bool(greedy)
 
-        self.agents: dict[int, NFSPAgent] = {}
-        self.model_sources: dict[int, str] = {}
-        for cand in _resolve_model_paths(model_path):
+        # agents: routing-key -> NFSPAgent
+        # routing-key examples: "24" (legacy), "24_1v1", "24_multi", "32_team"
+        self.agents: dict[str, NFSPAgent] = {}
+        self.model_sources: dict[str, str] = {}
+        for key, cand in _resolve_model_paths(model_path).items():
             ckpt = torch.load(cand, map_location=self.device)
             act_dim = int(ckpt.get("act_dim", 0))
             if act_dim == GameRules(24).num_actions:
@@ -158,16 +253,21 @@ class NFSPProductionAgent:
                     f"Inference checkpoint '{cand}' has unsupported act_dim={act_dim}; "
                     "expected 89 (24-card) or 141 (32-card)."
                 )
-            if deck_size in self.agents:
+            # If the filename was non-standard ("explicit"), rewrite the
+            # key from the probed deck size so the legacy fallback still
+            # kicks in.
+            if key == "explicit":
+                key = str(deck_size)
+            if key in self.agents:
                 continue
             agent = self._build_agent_from_checkpoint(ckpt)
-            self.agents[deck_size] = agent
-            self.model_sources[deck_size] = cand
+            self.agents[key] = agent
+            self.model_sources[key] = cand
 
         if not self.agents:
             raise FileNotFoundError(
                 "No inference checkpoints found. Provide NFSP_MODEL_PATH or place "
-                "artifacts/nfsp_inference_<deck>.pt alongside the Lambda package."
+                "artifacts/nfsp_inference_<deck>[_<variant>].pt alongside the Lambda package."
             )
 
         self.card_embeddings = _load_card_embedding_map(card_embedding_path, self.device)
@@ -184,9 +284,22 @@ class NFSPProductionAgent:
             )
         ckpt_cfg = checkpoint.get("cfg", {})
         base_cfg = NFSPConfig()
+        # Hidden width: prefer the value saved in cfg, but fall back to
+        # detecting it from the Q-net state dict (older exports omitted
+        # `hidden` from cfg, so checkpoints with hidden != default would
+        # mismatch on load_state_dict).
+        hidden = ckpt_cfg.get("hidden")
+        if hidden is None:
+            q_sd = checkpoint.get("q", {})
+            for key in ("net.0.weight", "trunk.0.weight"):
+                if key in q_sd:
+                    hidden = int(q_sd[key].shape[0])
+                    break
+            if hidden is None:
+                hidden = base_cfg.hidden
         cfg = replace(
             base_cfg,
-            hidden=ckpt_cfg.get("hidden", base_cfg.hidden),
+            hidden=int(hidden),
             anticipatory_eta=ckpt_cfg.get("anticipatory_eta", base_cfg.anticipatory_eta),
         )
         cfg.rl_capacity = 1
@@ -220,14 +333,25 @@ class NFSPProductionAgent:
         if not cp:
             raise ValueError("Game state missing 'cp_nickname'")
 
-        deck_size = int(game_state.get("rules", {}).get("deck_size", 24))
-        agent = self.agents.get(deck_size)
+        rules = game_state.get("rules", {}) or {}
+        deck_size = int(rules.get("deck_size", 24))
+        n_players = len(game_state.get("players", []) or [])
+        keys = _routing_keys(rules, n_players)
+        agent = None
+        chosen_key = None
+        for key in keys:
+            agent = self.agents.get(key)
+            if agent is not None:
+                chosen_key = key
+                break
         if agent is None:
-            available = ", ".join(str(k) for k in sorted(self.agents.keys()))
+            available = ", ".join(sorted(self.agents.keys()))
             raise RuntimeError(
-                f"No NFSP checkpoint loaded for deck size {deck_size}. "
-                f"Available decks: {available or 'none'}."
+                f"No NFSP checkpoint loaded for deck={deck_size} n={n_players}. "
+                f"Tried keys: {keys}. Available: {available or 'none'}."
             )
+        # Embeddings remain keyed by deck size; variant doesn't change
+        # the card / history vocabulary.
         card_embedding = self.card_embeddings.get(deck_size)
         history_embedding = self.history_embeddings.get(deck_size)
         spec = _deck_spec_from_game(

@@ -1899,12 +1899,14 @@ class NFSPAgent:
 
     def export_inference(self, path: str):
         payload = {
-            "version": 1,
+            "version": 2,
             "obs_dim": int(self.obs_dim),
             "act_dim": int(self.act_dim),
             "q": self.q.state_dict(),
             "pi": self.pi.state_dict(),
             "cfg": {
+                "hidden": int(self.cfg.hidden),
+                "factorize_action_head": bool(getattr(self.cfg, "factorize_action_head", False)),
                 "gamma": float(self.cfg.gamma),
                 "anticipatory_eta": float(self.cfg.anticipatory_eta),
                 "eps_start": float(self.cfg.eps_start),
