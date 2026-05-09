@@ -84,8 +84,14 @@ def _model_key_from_filename(path: str) -> Optional[str]:
     return f"{deck}_{variant}"
 
 
-def _routing_keys(rules: dict, n_players: int, players: Optional[list] = None) -> list[str]:
+def _routing_keys(rules: dict, n_active: int, players: Optional[list] = None) -> list[str]:
     """Return preferred routing keys, most-specific first.
+
+    Routes by *active* player count (players with cards remaining), not
+    seated count. A 4-player game collapsed to 2 active players is
+    structurally a 1v1 subtree and routes to the 1v1 specialist —
+    provided the obs is canonicalized to drop eliminated seats before
+    inference (see `_canonicalize_to_active`).
 
     The caller walks this list and picks the first key with a loaded
     agent. Always ends with the bare `<deck>` legacy key so a
@@ -103,7 +109,7 @@ def _routing_keys(rules: dict, n_players: int, players: Optional[list] = None) -
     j = int(rules.get("jokers", 0))
     b = int(rules.get("blanks", 0))
     cc = int(rules.get("common_cards", 0))
-    is_1v1 = (n_players == 2 and j == 0 and b == 0 and cc == 0 and not is_team)
+    is_1v1 = (n_active == 2 and j == 0 and b == 0 and cc == 0 and not is_team)
 
     keys: list[str] = []
     if is_team:
@@ -120,6 +126,27 @@ def _routing_keys(rules: dict, n_players: int, players: Optional[list] = None) -
             continue
         seen.add(k)
         out.append(k)
+    return out
+
+
+def _canonicalize_to_active(game_state: dict) -> dict:
+    """Return a shallow copy of `game_state` with eliminated players removed.
+
+    Players with `n_cards == 0` are dropped from the players list so the
+    seat block in `vectorize_obs` matches a fresh game at the same
+    active-player count. The 1v1 specialist trained without
+    eliminations sees in-distribution input on collapsed games.
+
+    History is round-scoped and only contains active-player events
+    within the current round (eliminations happen at round boundaries),
+    so it does not need filtering.
+    """
+    players = game_state.get("players") or []
+    active = [p for p in players if int(p.get("n_cards", 0)) > 0]
+    if len(active) == len(players):
+        return game_state
+    out = dict(game_state)
+    out["players"] = active
     return out
 
 
@@ -343,8 +370,9 @@ class NFSPProductionAgent:
         rules = game_state.get("rules", {}) or {}
         deck_size = int(rules.get("deck_size", 24))
         players = game_state.get("players", []) or []
-        n_players = len(players)
-        keys = _routing_keys(rules, n_players, players=players)
+        n_seated = len(players)
+        n_active = sum(1 for p in players if int(p.get("n_cards", 0)) > 0)
+        keys = _routing_keys(rules, n_active, players=players)
         agent = None
         chosen_key = None
         for key in keys:
@@ -355,9 +383,17 @@ class NFSPProductionAgent:
         if agent is None:
             available = ", ".join(sorted(self.agents.keys()))
             raise RuntimeError(
-                f"No NFSP checkpoint loaded for deck={deck_size} n={n_players}. "
+                f"No NFSP checkpoint loaded for deck={deck_size} "
+                f"n_active={n_active} (seated={n_seated}). "
                 f"Tried keys: {keys}. Available: {available or 'none'}."
             )
+        # The 1v1 specialist trained without eliminations; canonicalize
+        # the state (drop eliminated seats) so the obs matches its
+        # training distribution. multi/team specialists trained on
+        # games that include eliminations and expect the seat block
+        # to retain eliminated slots, so they pass through unchanged.
+        if chosen_key and chosen_key.endswith("_1v1") and n_active < n_seated:
+            game_state = _canonicalize_to_active(game_state)
         # Embeddings remain keyed by deck size; variant doesn't change
         # the card / history vocabulary.
         card_embedding = self.card_embeddings.get(deck_size)
