@@ -1825,7 +1825,12 @@ def main():
     if args.export_inference:
         export_path = os.path.abspath(args.export_inference)
         os.makedirs(os.path.dirname(export_path) or ".", exist_ok=True)
-        agent.export_inference(export_path)
+        # Stamp team_aware from the training env's deck spec so the
+        # production loader doesn't have to probe obs_dim.
+        agent.export_inference(
+            export_path,
+            team_aware=bool(getattr(env.deck_spec, "team_aware", True)),
+        )
         print(f"[export] inference-only checkpoint saved to {export_path}")
         return
 

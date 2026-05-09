@@ -1927,7 +1927,14 @@ class NFSPAgent:
             "check_explore_prob": float(getattr(self, "_check_explore_prob", 0.0)),
         }, path)
 
-    def export_inference(self, path: str):
+    def export_inference(self, path: str, *, team_aware: Optional[bool] = None):
+        """Persist an inference-only checkpoint.
+
+        `team_aware` records whether the model's expected obs vector
+        includes the per-slot team-flag block. Stamped in cfg so the
+        production loader doesn't have to probe obs_dim. Defaults to
+        True (current training-time obs format) when not specified.
+        """
         payload = {
             "version": 2,
             "obs_dim": int(self.obs_dim),
@@ -1937,6 +1944,7 @@ class NFSPAgent:
             "cfg": {
                 "hidden": int(self.cfg.hidden),
                 "factorize_action_head": bool(getattr(self.cfg, "factorize_action_head", False)),
+                "team_aware": bool(team_aware) if team_aware is not None else True,
                 "gamma": float(self.cfg.gamma),
                 "anticipatory_eta": float(self.cfg.anticipatory_eta),
                 "eps_start": float(self.cfg.eps_start),
