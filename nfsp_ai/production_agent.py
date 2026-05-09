@@ -305,12 +305,17 @@ class NFSPProductionAgent:
             if key in self.agents:
                 continue
             agent = self._build_agent_from_checkpoint(ckpt)
-            # Determine team_aware by matching ckpt obs_dim against the
-            # spec built with embeddings active. New trainings have +8
-            # for team flags; legacy artifacts predate that block.
+            # team_aware: prefer cfg.team_aware stamped at export
+            # (post-2026-05-09 trainings); fall back to obs_dim probe
+            # for legacy artifacts that predate the cfg field.
             self.agents[key] = agent
             self.model_sources[key] = cand
-            self.agent_team_aware[key] = self._infer_team_aware(deck_size, int(ckpt["obs_dim"]))
+            cfg = ckpt.get("cfg") or {}
+            cfg_team_aware = cfg.get("team_aware")
+            if cfg_team_aware is None:
+                self.agent_team_aware[key] = self._infer_team_aware(deck_size, int(ckpt["obs_dim"]))
+            else:
+                self.agent_team_aware[key] = bool(cfg_team_aware)
 
         if not self.agents:
             raise FileNotFoundError(
