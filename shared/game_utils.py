@@ -13,6 +13,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+@lru_cache(maxsize=8)
 def _build_rule_components(deck_size: int) -> Tuple[int, Dict[str, List[int]], Dict[str, List[int]], Dict[str, int]]:
     if deck_size == RuleValues.DECK_SIZE_DEFAULT:
         vals = 6
@@ -61,8 +62,16 @@ class GameRules:
         self.check_action_id = self.num_actions - 1
 
 
+@lru_cache(maxsize=4096)
+def _get_set_details_cached(action_id: int, deck_size: int) -> Dict[str, object]:
+    return _get_set_details_impl(action_id, deck_size)
+
+
 def get_set_details_from_action_id(action_id: int, deck_size: int = RuleValues.DECK_SIZE_DEFAULT) -> Dict[str, object]:
-    action_id = int(action_id)
+    return _get_set_details_cached(int(action_id), int(deck_size))
+
+
+def _get_set_details_impl(action_id: int, deck_size: int) -> Dict[str, object]:
     vals, straight_types, flush_straight_types, boundaries = _build_rule_components(int(deck_size))
 
     if action_id < boundaries["High card"]:

@@ -6,6 +6,7 @@ from typing import Iterable, Tuple, NamedTuple
 from shared.game_utils import GameRules, get_set_details_from_action_id
 
 
+@lru_cache(maxsize=4096)
 def binom(n, k):
     if n < k or k < 0:
         return 0
