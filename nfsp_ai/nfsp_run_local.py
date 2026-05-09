@@ -878,6 +878,7 @@ class MyEnv:
         pick_n_teams_in_range: bool = False,
         n_teams: int = 0,
         randomize_initial_hands: bool = False,
+        team_aware: bool = True,
     ):
         if n_agents < 2 or n_agents > 8:
             raise ValueError("n_agents must be in [2, 8]")
@@ -890,6 +891,7 @@ class MyEnv:
         self.blank_cap = max(0, int(blanks))
         self.common_card_cap = max(0, int(common_cards))
         self.n_teams_cap = max(0, int(n_teams))
+        self.team_aware = bool(team_aware)
         self.rules = {
             "deck_size": int(deck_size),
             "jokers": self.joker_cap,
@@ -903,6 +905,7 @@ class MyEnv:
             self.rules,
             card_embedding=self.card_embedding,
             history_embedding=self.history_embedding,
+            team_aware=self.team_aware,
         )
 
         self.verbose = verbose
@@ -953,6 +956,7 @@ class MyEnv:
                 self.game,
                 card_embedding=self.card_embedding,
                 history_embedding=self.history_embedding,
+                team_aware=self.team_aware,
             )
             cp = self.game.get("cp_nickname")
             obs, pub_prior = vectorize_obs(
@@ -1026,6 +1030,7 @@ class MyEnv:
             self.game,
             card_embedding=self.card_embedding,
             history_embedding=self.history_embedding,
+            team_aware=self.team_aware,
         )
 
         # New match bookkeeping
@@ -1105,6 +1110,7 @@ class MyEnv:
             self.game,
             card_embedding=self.card_embedding,
             history_embedding=self.history_embedding,
+            team_aware=self.team_aware,
         )
         cp = self.game.get("cp_nickname")
         obs, pub_prior = vectorize_obs(

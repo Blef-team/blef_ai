@@ -170,37 +170,43 @@ def run_team_eval(
     card_emb = _load_card_embedding(card_embedding_path, device=device) if card_embedding_path else None
     hist_emb = _load_history_embedding(history_embedding_path, device=device) if history_embedding_path else None
 
-    env = MyEnv(
-        n_agents=n_players,
-        max_cards=max_cards,
-        deck_size=deck_size,
-        jokers=jokers,
-        blanks=blanks,
-        common_cards=common_cards,
-        n_teams=n_teams,
-        card_embedding=card_emb,
-        history_embedding=hist_emb,
-    )
+    # Pick env's team_aware to match the learner's expected obs_dim.
+    # Try team_aware=True first; fall back to False (legacy artifacts).
+    spec_team = _build_deck_spec({"deck_size": deck_size}, card_emb, hist_emb, team_aware=True)
+    spec_no = _build_deck_spec({"deck_size": deck_size}, card_emb, hist_emb, team_aware=False)
+    if int(learner.obs_dim) == spec_team.obs_dim:
+        env_team_aware = True
+    elif int(learner.obs_dim) == spec_no.obs_dim:
+        env_team_aware = False
+    else:
+        raise ValueError(
+            f"learner obs_dim {int(learner.obs_dim)} matches neither team-aware spec "
+            f"({spec_team.obs_dim}) nor legacy spec ({spec_no.obs_dim}) for deck "
+            f"{deck_size} (embedding paths may be wrong)"
+        )
 
-    # Sanity: obs_dim match
+    def _make_env():
+        return MyEnv(
+            n_agents=n_players,
+            max_cards=max_cards,
+            deck_size=deck_size,
+            jokers=jokers,
+            blanks=blanks,
+            common_cards=common_cards,
+            n_teams=n_teams,
+            card_embedding=card_emb,
+            history_embedding=hist_emb,
+            team_aware=env_team_aware,
+        )
+
+    env = _make_env()
+    # Sanity: obs_dim match (should be guaranteed by the team_aware probe).
     obs, _mask, _pid = env.reset()
     if int(obs.shape[-1]) != int(learner.obs_dim):
         raise ValueError(
-            f"env obs_dim {int(obs.shape[-1])} != learner obs_dim {int(learner.obs_dim)} "
-            f"(deck/jokers/blanks/common_cards / embeddings mismatch)"
+            f"env obs_dim {int(obs.shape[-1])} != learner obs_dim {int(learner.obs_dim)}"
         )
-
-    env = MyEnv(
-        n_agents=n_players,
-        max_cards=max_cards,
-        deck_size=deck_size,
-        jokers=jokers,
-        blanks=blanks,
-        common_cards=common_cards,
-        n_teams=n_teams,
-        card_embedding=card_emb,
-        history_embedding=hist_emb,
-    )
+    env = _make_env()
 
     team_wins = team_losses = 0
     indiv_wins = indiv_losses = 0

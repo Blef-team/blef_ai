@@ -165,15 +165,30 @@ def main() -> None:
                 options=metric_cols,
                 default=[c for c in ("avg_reward", "win_rate", "q_loss", "sl_loss", "policy_entropy") if c in metric_cols][:5],
             )
+            ma_window = st.slider(
+                "Moving-average window (samples)",
+                min_value=1, max_value=200, value=20, step=1,
+                help="1 = raw only. >1 overlays a rolling-mean trend line on each metric.",
+            )
+            show_raw = st.checkbox("Show raw alongside moving average", value=True)
             for col in picked:
                 if x_col:
-                    chart = (
+                    raw = (
                         all_df.pivot_table(index=x_col, columns="__run", values=col, aggfunc="last")
                               .sort_index()
                     )
                 else:
-                    chart = all_df[[col, "__run"]].pivot_table(columns="__run", values=col, aggfunc="last")
+                    raw = all_df[[col, "__run"]].pivot_table(columns="__run", values=col, aggfunc="last")
                 st.markdown(f"**{col}**")
+                if ma_window > 1:
+                    ma = raw.rolling(window=ma_window, min_periods=1).mean()
+                    ma.columns = [f"{c} (MA{ma_window})" for c in ma.columns]
+                    if show_raw:
+                        chart = pd.concat([raw, ma], axis=1)
+                    else:
+                        chart = ma
+                else:
+                    chart = raw
                 st.line_chart(chart, use_container_width=True)
 
     # ----- Backfilled ladder -----
