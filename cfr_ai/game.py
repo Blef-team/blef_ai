@@ -15,59 +15,96 @@ class Game():
         """
         Calculates the outcome for all 88 possible bets at once for a given deal.
         Returns a boolean numpy array of size 88.
+
+        Optimisation: build value and (value, suit) tables once, then do all
+        88 bet checks with plain Python integer comparisons. The previous
+        implementation called np.sum / np.isin once per bet, which is ~100x
+        more expensive than int lookups on these small arrays (2-22 cards)
+        and dominated the per-iteration training cost.
         """
-        all_cards = np.concatenate(hands)
-        card_values = all_cards // 4
-        card_suits = all_cards % 4
+        # Count cards per value, and presence per (value, suit). Cards are
+        # unique within a deal, so val_x_suit[v][s] is just a boolean.
+        val_counts = [0] * 6
+        val_x_suit = [[False] * 4 for _ in range(6)]
+        suit_counts = [0] * 4
+        for hand in hands:
+            for card in hand:
+                v = int(card) // 4
+                s = int(card) % 4
+                val_counts[v] += 1
+                val_x_suit[v][s] = True
+                suit_counts[s] += 1
 
-        existence_array = np.zeros(88, dtype=np.bool_)
+        existence = [False] * 88
 
-        for bet in range(88):
-            if bet < 6: # High card (e.g., last_bet=0 for card '9')
-                correct = np.sum(card_values == bet) >= 1
-            elif bet < 12: # Pair (e.g., last_bet=6 for pair of '9's)
-                correct = np.sum(card_values == (bet - 6)) >= 2
-            elif bet < 27: # Two pair
-                if bet == 12: v1, v2 = 1, 0
-                elif bet < 15: v1, v2 = 2, bet - 13
-                elif bet < 18: v1, v2 = 3, bet - 15
-                elif bet < 22: v1, v2 = 4, bet - 18
-                else: v1, v2 = 5, bet - 22
-                correct = (np.sum(card_values == v1) >= 2) and (np.sum(card_values == v2) >= 2)
-            elif bet < 30: # Straights
-                if bet == 27:
-                    correct = np.all(np.isin(np.array([0, 1, 2, 3, 4]), card_values))
-                elif bet == 28:
-                    correct = np.all(np.isin(np.array([1, 2, 3, 4, 5]), card_values))
-                elif bet == 29:
-                    correct = np.all(np.isin(np.array([0, 1, 2, 3, 4, 5]), card_values))
-            elif bet < 36: # Three of a kind
-                correct = np.sum(card_values == (bet - 30)) >= 3
-            elif bet < 66: # Full house
-                if bet < 41:   v_three, v_two = 0, bet - 35
-                elif bet == 41: v_three, v_two = 1, 0
-                elif bet < 46: v_three, v_two = 1, bet - 40
-                elif bet < 48: v_three, v_two = 2, bet - 46
-                elif bet < 51: v_three, v_two = 2, bet - 45
-                elif bet < 54: v_three, v_two = 3, bet - 51
-                elif bet < 56: v_three, v_two = 3, bet - 50
-                elif bet < 60: v_three, v_two = 4, bet - 56
-                elif bet == 60: v_three, v_two = 4, 5
-                else: v_three, v_two = 5, bet - 61
-                correct = (np.sum(card_values == v_three) >= 3) and (np.sum(card_values == v_two) >= 2)
-            elif bet < 70: # Flush
-                correct = np.sum(card_suits == (bet - 66)) >= 5
-            elif bet < 76: # Four of a kind
-                correct = np.sum(card_values == (bet - 70)) >= 4
-            elif bet < 88: # Straight Flushes
-                suit = bet % 4
-                if bet in range(76, 80): required_values = np.array([0, 1, 2, 3, 4])
-                elif bet in range(80, 84): required_values = np.array([1, 2, 3, 4, 5])
-                else: required_values = np.array([0, 1, 2, 3, 4, 5])
-                required_cards = required_values * 4 + suit
-                correct = np.all(np.isin(required_cards, all_cards))
-            existence_array[bet] = correct
-        return existence_array
+        # 0..5: high card (any card of value v)
+        for v in range(6):
+            existence[v] = val_counts[v] >= 1
+
+        # 6..11: pair
+        for v in range(6):
+            existence[6 + v] = val_counts[v] >= 2
+
+        # 12..26: two pair (mapping from the original code)
+        two_pair_specs = (
+            (12, 1, 0),
+            (13, 2, 0), (14, 2, 1),
+            (15, 3, 0), (16, 3, 1), (17, 3, 2),
+            (18, 4, 0), (19, 4, 1), (20, 4, 2), (21, 4, 3),
+            (22, 5, 0), (23, 5, 1), (24, 5, 2), (25, 5, 3), (26, 5, 4),
+        )
+        for bet, v1, v2 in two_pair_specs:
+            existence[bet] = (val_counts[v1] >= 2) and (val_counts[v2] >= 2)
+
+        # 27..29: straights
+        s_low = (val_counts[0] >= 1 and val_counts[1] >= 1 and val_counts[2] >= 1
+                 and val_counts[3] >= 1 and val_counts[4] >= 1)
+        s_high = (val_counts[1] >= 1 and val_counts[2] >= 1 and val_counts[3] >= 1
+                  and val_counts[4] >= 1 and val_counts[5] >= 1)
+        existence[27] = s_low
+        existence[28] = s_high
+        existence[29] = s_low and val_counts[5] >= 1  # full 6-card straight
+
+        # 30..35: three of a kind
+        for v in range(6):
+            existence[30 + v] = val_counts[v] >= 3
+
+        # 36..65: full house (three of v_three + pair of v_two)
+        for bet in range(36, 66):
+            if bet < 41:    v_three, v_two = 0, bet - 35
+            elif bet == 41: v_three, v_two = 1, 0
+            elif bet < 46:  v_three, v_two = 1, bet - 40
+            elif bet < 48:  v_three, v_two = 2, bet - 46
+            elif bet < 51:  v_three, v_two = 2, bet - 45
+            elif bet < 54:  v_three, v_two = 3, bet - 51
+            elif bet < 56:  v_three, v_two = 3, bet - 50
+            elif bet < 60:  v_three, v_two = 4, bet - 56
+            elif bet == 60: v_three, v_two = 4, 5
+            else:           v_three, v_two = 5, bet - 61
+            existence[bet] = (val_counts[v_three] >= 3) and (val_counts[v_two] >= 2)
+
+        # 66..69: flush (5+ cards of suit s)
+        for s in range(4):
+            existence[66 + s] = suit_counts[s] >= 5
+
+        # 70..75: four of a kind
+        for v in range(6):
+            existence[70 + v] = val_counts[v] >= 4
+
+        # 76..87: straight flushes (low / high / great × 4 suits)
+        for bet in range(76, 88):
+            suit = bet % 4
+            if bet < 80:    vals = (0, 1, 2, 3, 4)
+            elif bet < 84:  vals = (1, 2, 3, 4, 5)
+            else:           vals = (0, 1, 2, 3, 4, 5)
+            ok = True
+            for v in vals:
+                if not val_x_suit[v][suit]:
+                    ok = False
+                    break
+            existence[bet] = ok
+
+        return np.array(existence, dtype=np.bool_)
     
     @staticmethod
     def deal_cards(hand_sizes: List[int]) -> List[List[int]]:
