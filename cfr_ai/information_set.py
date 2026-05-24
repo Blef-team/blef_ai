@@ -119,11 +119,6 @@ def make_key(hand: List[int], hand_abstractions: List[str], history: List[int], 
     return key
 
 
-def make_full_key(my_cards: List[str], history: List[int]) -> str:
-    my_cards.sort()
-    return str(my_cards) + ' ' + str(history)
-
-
 class InformationSet():
     def __init__(self, history: List[int], iter: int, min_bet: int):
         self.possible_actions = get_possible_actions(history, min_bet)

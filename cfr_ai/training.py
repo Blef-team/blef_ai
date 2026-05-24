@@ -1,12 +1,37 @@
 import argparse
 from cfr_ai.trainer import *
-from cfr_ai.exploitability import *
 from cfr_ai.encoding import encode_probabilities, clear_lows
+from cfr_ai.lbr import lbr_exploitability
 import csv, os, psutil
 from datetime import datetime
 import time
 
 VERSION_CODE = 'TV-NR-SS-SD-MB'
+
+
+def _snapshot_exploitability(hand_sizes, min_bet, depth, n_belief, n_lbr_hand):
+    """Returns a snapshot callback that computes LBR-K on the live infoset_map
+    and appends to the provided log dict. Closure over `exploitability_log`."""
+    exploitability_log: Dict[str, Any] = {}
+
+    def callback(iter_num, infoset_map):
+        cfr_strategy = {k: v.get_final_strategy() for k, v in infoset_map.items()}
+        sps = [0] if hand_sizes[0] == hand_sizes[1] else [0, 1]
+        for sp in sps:
+            r = lbr_exploitability(
+                hand_sizes, sp, cfr_strategy, min_bet, depth,
+                n_belief_samples=n_belief, n_lbr_hand_samples=n_lbr_hand, seed=42,
+            )
+            tqdm.write(
+                f"  Iter {iter_num} LBR-{depth} sp={sp}: "
+                f"{r['expl']*100:+.3f}% ± {r['se_worst']*100:.3f}pp (K={r['K_lbr_hand']})"
+            )
+            exploitability_log[f"LBR-{depth} expl sp={sp} at Iter {iter_num}"] = (
+                f"{r['expl']*100:+.4f}% ± {r['se_worst']*100:.4f}pp"
+            )
+
+    return callback, exploitability_log
+
 
 def main() -> None:
     CLI = argparse.ArgumentParser(description="Train a CFR AI for Blef.")
@@ -16,30 +41,39 @@ def main() -> None:
     CLI.add_argument("--pruning-range", nargs=2, type=int, default=[-20, -22], help="Regret pruning threshold and minimum regret value. Default: -20 -22")
     CLI.add_argument("--penalty", type=float, default=0.0, help="Penalty for betting instead of checking. Default: 0.0")
     CLI.add_argument("--log-points", type=int, default=25, help="Number of intervals for logging utility values. Default: 25")
-    CLI.add_argument("--get-exploitability", action=argparse.BooleanOptionalAction, help="Flag to run the (potentially slow) exploitability calculation after training.")
+    CLI.add_argument(
+        "--get-exploitability", action="store_true",
+        help="Compute LBR-1 exploitability at several points during training "
+             "and record them alongside utility in metadata.csv.",
+    )
+    CLI.add_argument("--exploitability-points", type=int, default=10,
+                     help="Number of evenly-spaced points at which to compute exploitability (default 10).")
+    CLI.add_argument("--exploitability-depth", type=int, default=1)
+    CLI.add_argument("--exploitability-n-belief", type=int, default=300)
+    CLI.add_argument("--exploitability-n-lbr-hand", type=int, default=200)
     CLI.add_argument("--no-save", action="store_false", dest="save", help="Flag to disable recording any outputs.")
     CLI.set_defaults(save=True)
     args = CLI.parse_args()
 
     cfr_trainer = Trainer(args.hand_sizes, args.min_bet, args.pruning_range, args.penalty, args.log_points)
 
+    snapshot_cb, exploitability_log = (None, {})
+    snapshot_every = 1
+    if args.get_exploitability:
+        snapshot_cb, exploitability_log = _snapshot_exploitability(
+            args.hand_sizes, args.min_bet, args.exploitability_depth,
+            args.exploitability_n_belief, args.exploitability_n_lbr_hand,
+        )
+        # If exploitability-points < log-points, snapshot only every Nth log point.
+        snapshot_every = max(1, args.log_points // args.exploitability_points)
+
     start_time = time.time()
-    util0, util1, utility_log = cfr_trainer.train(args.num_iterations)
+    util0, util1, utility_log = cfr_trainer.train(
+        args.num_iterations, snapshot_callback=snapshot_cb,
+        snapshot_every_log_points=snapshot_every,
+    )
     duration_seconds = time.time() - start_time
     training_duration = time.strftime('%H:%M', time.gmtime(duration_seconds))
-
-    exploitability_log = {}
-    if args.get_exploitability:
-        cfr_strategy = {k: v.get_final_strategy() for k,v in cfr_trainer.infoset_map.items()}
-        print(f"\nComputing exploitability")
-        calculator = ExploitabilityCalculator(cfr_strategy, args.hand_sizes, args.min_bet)
-        exploitability_p0 = calculator.calculate_for_starting_player(starting_player=0)
-        exploitability_log['Exploitability when player 0 starts'] = exploitability_p0
-        print(f"\nExploitability when player 0 starts: {exploitability_p0}")
-        if args.hand_sizes[0] != args.hand_sizes[1]:
-            exploitability_p1 = calculator.calculate_for_starting_player(starting_player=1)
-            exploitability_log['Exploitability when player 1 starts'] = exploitability_p1
-            print(f"\nExploitability when player 1 starts: {exploitability_p1}")
 
     if args.save:
         files = {}
@@ -85,9 +119,10 @@ def main() -> None:
             writer.writerow({"k": "--- Utility Log ---", "v": ""})
             for log_key, log_value in utility_log.items():
                 writer.writerow({"k": log_key, "v": log_value})
-            writer.writerow({"k": "--- Exploitability ---", "v": ""})
-            for log_key, log_value in exploitability_log.items():
-                writer.writerow({"k": log_key, "v": f"{log_value:.6f}"})
+            if exploitability_log:
+                writer.writerow({"k": "--- Exploitability Log ---", "v": ""})
+                for log_key, log_value in exploitability_log.items():
+                    writer.writerow({"k": log_key, "v": log_value})
 
 if __name__ == "__main__":
     main()

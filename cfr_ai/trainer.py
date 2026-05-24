@@ -54,10 +54,16 @@ class Trainer():
             self.nodes_touched += 1
             return node_value
 
-    def train(self, num_iterations: int) -> Tuple[float, float, Dict[str, Any]]:
+    def train(self, num_iterations: int, snapshot_callback=None, snapshot_every_log_points: int = 1) -> Tuple[float, float, Dict[str, Any]]:
+        """
+        snapshot_callback: optional fn(iter_num, infoset_map) called at every
+            `snapshot_every_log_points`-th utility log point. Lets the caller
+            compute exploitability mid-training.
+        """
         utils = [0.0, 0.0]
         last_utils = [0.0, 0.0]
         utility_log: Dict[str, Any] = {}
+        log_point_idx = 0
         for i in trange(num_iterations, desc = "Training"):
             if i == int(num_iterations * 0.3):
                 for _,v in self.infoset_map.items():
@@ -80,4 +86,7 @@ class Trainer():
                 utility_log[f"P0 Utility at Iter {i + 1}"] = f"{util0_chunk:.4f}"
                 utility_log[f"P1 Utility at Iter {i + 1}"] = f"{util1_chunk:.4f}"
                 last_utils = list(utils)
+                log_point_idx += 1
+                if snapshot_callback is not None and log_point_idx % snapshot_every_log_points == 0:
+                    snapshot_callback(i + 1, self.infoset_map)
         return utils[0] * 2 / num_iterations, utils[1] * 2 / num_iterations, utility_log

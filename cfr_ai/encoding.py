@@ -4,15 +4,17 @@ encoding_characters = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXY'
 digit_strings = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9']
 
 def clear_lows(probabilities: np.ndarray) -> np.ndarray:
-    probabilities[probabilities < 0.01] = 0
-    return probabilities / sum(probabilities)
+    """Return a copy with sub-1% entries zeroed and the rest renormalised."""
+    cleaned = np.where(probabilities < 0.01, 0.0, probabilities)
+    s = cleaned.sum()
+    return cleaned / s if s > 0 else cleaned
 
 
 def encode_probabilities(probabilities: np.ndarray) -> str:
     concatenated = ''
     zero_counter = 0
     for p in probabilities:
-        inflated = int(p * 2500)
+        inflated = int(round(p * 2500)) # Round instead of truncating to not bias the probabilites
         if inflated == 0:
             zero_counter += 1
         else:

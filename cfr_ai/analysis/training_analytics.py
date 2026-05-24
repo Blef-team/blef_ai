@@ -109,11 +109,8 @@ def main() -> None:
             p1_value = format_value(data.get('Player 2 game value', 'N/A'))
             exp_value_str = f"{p0_value}, {p1_value}"
 
-            exploit_p0 = format_value(data.get('Exploitability when player 0 starts', 'N/A'), is_percent=True)
-            exploit_p1 = format_value(data.get('Exploitability when player 1 starts', 'N/A'), is_percent=True)
-            exploit_str = exploit_p0
-            if exploit_p1 != 'N/A':
-                exploit_str += f", {exploit_p1}"
+            # Exploitability is now produced by cfr_ai/lbr.py and lives in
+            # outputs/lbr_summary.csv; no longer written into metadata.csv.
 
             date_str = data.get('Time finished', '')
             day_month = datetime.strptime(date_str, "%Y-%m-%d, %H:%M:%S").strftime("%d.%m")
@@ -132,7 +129,6 @@ def main() -> None:
                 'Exp. Value': exp_value_str,
                 'Memory (MB)': round(float(data.get('RAM taken (MB)', 0))),
                 'Storage (MB)': storage_mb,
-                'Exploitability': exploit_str,
                 'Version': data.get('Version code', 'N/A')
             }
             all_runs_data.append(run_summary)

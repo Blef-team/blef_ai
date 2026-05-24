@@ -218,7 +218,7 @@ python -m cfr_ai.training --hand-sizes 1 1
 
 `--log-points` (default: 25) specifies the number of points (at equal intervals) where utility will be measured.
 
-`--get-exploitability` computes exact exploitability in the unabstracted game, disaggregated by which player starts.
+`--get-exploitability` runs LBR-1 exploitability checks at several evenly-spaced points during training and records them in `metadata.csv` next to the utility log. The cost can be significant for deep setups; tune with `--exploitability-points`, `--exploitability-n-belief`, and `--exploitability-n-lbr-hand` (see the LBR-based exploitability section below).
 
 You will see a `tqdm` progress bar during training and exploitability calculations.
 
@@ -240,9 +240,9 @@ There is also a version of the strategy files with extra, diagnostic columns in 
 
 ## Evaluation & analytics
 
-Evaluation is key to informed development of the algorithm. Usually in the case of CFR, it is done by computing exploitability. We have created optimised tools to compute the exploitability of this AI in the unabstracted game. However, we are unable to run them within 1 core-day beyond the 3rd round. Therefore, we use a suite of other tools to get a rough idea as to the performance of the algorithm. 
+Evaluation is key to informed development of the algorithm. The canonical metric for CFR is **exploitability** — how much an optimal opponent can win against the trained agent. Computing the exact exploitability (full best response) is tractable for the first few rounds but explodes in cost beyond ~round 4, so we use a more scalable proxy.
 
-Along each setup's outputs, there's a training metadata file (`metadata.csv`), which notes: 
+Along each setup's outputs, there's a training metadata file (`metadata.csv`), which notes:
 
 * the time the training finished;
 * training duration (Hours:Minutes);
@@ -254,9 +254,39 @@ Along each setup's outputs, there's a training metadata file (`metadata.csv`), w
 * the number of explored infosets;
 * the number of infosets in which the strategy is not a check with 100% chance;
 * the amount of RAM taken by the training Python process (including the memory claimed by the code that saves the strategies);
-* the game value of each player (e.g. if we're training the 2 cards vs 3 cards case, it's 1. the game value for the starting player when the 2-card player is starting and 2. the game value for the starting player when the 3-card player is starting);
-* the log of utilities along the training run; and
-* exploitability, if applicable.
+* the game value of each player (e.g. if we're training the 2 cards vs 3 cards case, it's 1. the game value for the starting player when the 2-card player is starting and 2. the game value for the starting player when the 3-card player is starting); and
+* the log of utilities along the training run.
+
+### LBR-based exploitability (`lbr.py`)
+
+The exploitability calculation is decoupled from training and lives in `lbr.py`. Run it independently on a saved strategy:
+
+```
+python -m cfr_ai.lbr --hand-sizes 3 3 --depth 1 --update-summary
+```
+
+Key flags:
+
+* `--depth K` — LBR-K (number of LBR-optimised decisions per game before falling back to CFR rollout). K=1 is the classic [Lisý-Bowling local best response](https://arxiv.org/abs/1612.07547); K=∞ (default) is exact best response.
+* `--n-belief-samples N` — sample N opponent hands without replacement instead of enumerating the whole posterior. Required for deep setups where the opp population is in the thousands or more.
+* `--n-lbr-hand-samples K` — sample K LBR hands without replacement instead of enumerating all C(24, h) of them. Unbiased; adds variance.
+* `--update-summary` — append/update this setup's row in `outputs/lbr_summary.csv`.
+
+When opponent hands are enumerated, the result is the exact LBR-K value. When they are sampled, we use a **double-sampling** scheme: an independent belief sample S2 is used to value the action that another sample S1 chose. This produces a conservative *lower bound* on LBR-K — sometimes the chosen action is suboptimal, but its EV is computed without winner's-curse bias. The standard error reported in the summary combines lbr_hand sampling variance and opp belief sampling variance, with a chi-squared upper bound on the std err itself.
+
+LBR-1 captures roughly 85% of full BR on our verified shallow setups; LBR-2 captures ~99% but takes 4× longer per setup, and quickly becomes infeasible past round 3.
+
+### `lbr_summary.csv`
+
+`outputs/lbr_summary.csv` collects LBR exploitability across setups. Columns:
+
+* **Setup** — e.g. `"3,3"`.
+* **Sampling** — the caps used as `(lbr, opp)`, e.g. `(300, 500)`. Populations smaller than the cap are enumerated; otherwise sampled without replacement.
+* **LBR-K expl** (one pair of columns per depth K that's been run) — point estimate (and `± std_err_worst_case` if sampled). One value for symmetric setups, two `sp=0 | sp=1` for asymmetric. Reported as a percentage of game value.
+* **LBR-K duration** — seconds per starting player.
+* **Finished** — date the most recent calculation for this row ran (so we know which rows are stale).
+
+Each invocation of `lbr.py --update-summary --depth K` writes/updates the `LBR-K` columns for the chosen setup; running a sequence of depths populates `LBR-1 / LBR-2 / ...` side by side on the same row.
 
 ### Utility logging
 
