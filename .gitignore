@@ -135,6 +135,9 @@ dmypy.json
 # AI strategy output
 cfr_ai/outputs
 
+# local CFR strategy archive, including auto-created README index
+cfr_ai/archive/
+
 # Game orchestration
 games*/
 

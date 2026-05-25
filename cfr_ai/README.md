@@ -302,6 +302,18 @@ To use it, run `python -m cfr_ai.analysis.training_analytics`.
 
 There is a `analysis/head_to_head.py` script that can be used to compare two versions of strategies for a single setup by making them play against each other. Using the Monte Carlo sampling, it takes in the order of 10 minutes to run 10,000 games for most setups. It is the best tool for evaluating modifications to the core algorithm.
 
+The script accepts either explicit folder paths (`--model1-folder`, `--model2-folder`) or archive-tag shortcuts (`--model1 <tag>`, `--model2 <tag>`) that resolve to `cfr_ai/archive/<tag>/`. The tag `current` (or `.`) refers to the working `cfr_ai/` tree.
+
+### Strategy archive
+
+Trained strategies can be snapshotted into versioned tags for later head-to-head comparison. Run from the project root:
+
+```
+python -m cfr_ai.archive_tool --tag v0_baseline --note "Production CFR baseline"
+```
+
+By default this archives every setup currently in `outputs/`; pass `--setups 1_1 2_3` to limit scope. Each archive is a self-contained model folder (containing snapshots of `information_set.py`, `history.csv`, and the relevant `outputs/<setup>/` subtrees) directly consumable by `analysis/head_to_head.py` via the tag shortcut. `cfr_ai/archive/` is gitignored — archives are local to each machine.
+
 ### Winning probabilities
 
 Using the game values noted down for each setup in the `summary_of_all_runs.csv`, we can compute the probabilities of winning the game starting from a specific setup and with a specific starting player within that setup. To compute those, use the `analysis/win_probabilities.py` script.

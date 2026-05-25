@@ -240,21 +240,40 @@ def run_mc_playout(models: Tuple[Model, Model], hands: Hands, starting_player_id
     else:
         return -payoff_for_checked_player
 
+def _resolve_model_path(tag: str | None, folder: str | None) -> str:
+    """Resolve a model location from either an archive tag or an explicit folder.
+
+    ``tag='current'`` (or ``.``) points at the working ``cfr_ai/`` tree;
+    any other tag is looked up under ``cfr_ai/archive/<tag>/``.
+    """
+    if folder:
+        return folder
+    if tag in ("current", "."):
+        return "cfr_ai"
+    return os.path.join("cfr_ai", "archive", tag)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run a head-to-head comparison between two Blef CFR AIs.")
     parser.add_argument("--hand-sizes", nargs=2, type=int, required=True, help="The number of cards for each player (e.g., 1 2).")
-    parser.add_argument("--model1-folder", type=str, required=True, help="Path to the folder for the first AI model (Model A).")
-    parser.add_argument("--model2-folder", type=str, required=True, help="Path to the folder for the second AI model (Model B).")
+    g1 = parser.add_mutually_exclusive_group(required=True)
+    g1.add_argument("--model1", type=str, help="Archive tag (folder under cfr_ai/archive/) or 'current' for the working tree.")
+    g1.add_argument("--model1-folder", type=str, help="Explicit path to the first model's folder (Model A).")
+    g2 = parser.add_mutually_exclusive_group(required=True)
+    g2.add_argument("--model2", type=str, help="Archive tag (folder under cfr_ai/archive/) or 'current' for the working tree.")
+    g2.add_argument("--model2-folder", type=str, help="Explicit path to the second model's folder (Model B).")
     parser.add_argument("--num-deals", type=int, default=1000, help="Number of random card deals to simulate.")
     parser.add_argument("--preload-strategies", action="store_true", help="Pre-load strategies for faster, memory-intensive evaluation.")
     parser.add_argument("--monte-carlo", action="store_true", help="Use fast Monte Carlo playouts instead of full tree traversal.")
     args = parser.parse_args()
 
     hand_sizes = sorted(args.hand_sizes)
+    model1_path = _resolve_model_path(args.model1, args.model1_folder)
+    model2_path = _resolve_model_path(args.model2, args.model2_folder)
 
     print("Loading AI models, logic, and metadata...")
     models_list = []
-    for i, folder in enumerate([args.model1_folder, args.model2_folder]):
+    for i, folder in enumerate([model1_path, model2_path]):
         try:
             module, metadata = load_model_components(folder, hand_sizes)
             model_name = f"Model {'A' if i == 0 else 'B'}"
