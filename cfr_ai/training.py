@@ -51,11 +51,13 @@ def main() -> None:
     CLI.add_argument("--exploitability-depth", type=int, default=1)
     CLI.add_argument("--exploitability-n-belief", type=int, default=300)
     CLI.add_argument("--exploitability-n-lbr-hand", type=int, default=200)
+    CLI.add_argument("--algorithm", choices=['es', 'cfr_plus', 'dcfr'], default='es',
+                     help="Regret-matching algorithm: 'es' (current default), 'cfr_plus', or 'dcfr' (α=1.5, β=0, γ=1).")
     CLI.add_argument("--no-save", action="store_false", dest="save", help="Flag to disable recording any outputs.")
     CLI.set_defaults(save=True)
     args = CLI.parse_args()
 
-    cfr_trainer = Trainer(args.hand_sizes, args.min_bet, args.pruning_range, args.penalty, args.log_points)
+    cfr_trainer = Trainer(args.hand_sizes, args.min_bet, args.pruning_range, args.penalty, args.log_points, algorithm=args.algorithm)
 
     snapshot_cb, exploitability_log = (None, {})
     snapshot_every = 1

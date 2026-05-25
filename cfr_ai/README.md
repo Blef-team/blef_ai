@@ -46,6 +46,18 @@ However, we are discounting the strategy sum contributions. Contributions from t
 * Contributions from the 30-40% range of iterations weigh 40% as much as those from the 90-100% range
 * Contributions from the 40-50% range of tierations weigh 50% as much as those from the 90-100% range
 
+### DCFR and CFR+ algorithm options
+
+`trainer.py` supports two algorithm variants beyond the default `es` (the one described in the sections above). They can be selected via the `--algorithm` flag in `training.py`.
+
+* `cfr_plus` — after each regret update, the cumulative regrets are clipped at 0. Strategy averaging weights iteration `t` by `(t + 1)` instead of using the staircase discount described above. Regret-based pruning is disabled (regrets cannot go below 0, so there's nothing to prune). This is the canonical [Tammelin 2014](https://arxiv.org/abs/1407.5042) CFR+, with the difference that we use MCCFR external sampling rather than full traversal.
+
+* `dcfr` — `cfr_plus` plus a per-iteration α-discount on positive regrets (default α=1.5), applied lazily on visit using a precomputed cumulative log-discount table. This is [Brown & Sandholm 2019](https://arxiv.org/abs/1809.04040) DCFR with β=0 (clip negatives at 0) and γ=1 (linear strategy averaging; we use γ=1 rather than the canonical γ=2 because the latter exceeds float32 precision on `strategy_sum` at 5M iterations).
+
+**Empirical finding (rounds 1-3, 5M iter):** DCFR is statistically indistinguishable from `es` at this iteration budget on (1,3) (LBR-1 1.93% vs ES 1.69%, overlap within sampling noise) and identical to within 0.5 thousandths of one percent on (2,2) (LBR-1 1.000% vs 1.006%, both exact; LBR-2 2.332% vs 2.300%, both exact). The interpretation is that **the hand+history abstraction is the exploitability floor on rounds 1-3**, and both algorithms saturate at that ceiling by 5M iter — no per-iteration regret-update improvement breaks through it.
+
+**Crucially, DCFR took 10-18× longer wall-clock** to reach that identical exploitability because of disabled pruning and adding the α-discount lookup. Therefore, `dcfr` is strictly worse than `es` on a resource-adjusted basis. The variant remains in the codebase as a starting point for any future research that wants to compose CFR+/DCFR-style updates with variance-reduction or a richer abstraction.
+
 ### Action thresholding
 
 In the final (outputted) strategy, actions with probabilities of less than 1% are reset to 0%. This is primarily to save storage space.
