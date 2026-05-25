@@ -71,12 +71,13 @@ In most setups in Blef, most information sets will never be reached by good play
 
 We are then instructing the agent who uses the CFR strategy to check with 100% probability if it cannot find the strategy for a given information set during online play.
 
-### Note: modifications considered but not used
+### Note: modifications considered
 
-We have considered but ultimately not implemented:
-* ICFR, because of the expected effort/benefit ratio;
-* some variance-reduction techniques with respect to opponent's sampled actions or cards, because of no noticeable benefit when trying them; and
-* discounting regrets, as we haven't found benefits.
+We have considered:
+* ICFR — not implemented due to the expected effort/benefit ratio;
+* variance-reduction techniques on opponent's sampled actions or cards — tried, no noticeable benefit;
+* DCFR / CFR+ regret-matching variants — implemented as algorithm options above; on rounds 1-3 they converge to the same exploitability as `es` but take 10-18× more wall-clock to do so, because they disable pruning and add per-iteration discount overhead. See the subsection for details; and
+* outcome-sampling MCCFR — implemented but **not** competitive with external sampling on Blef's structure. See `README_Appendix_B.md` for the full diagnosis.
 
 ## Resource limits and abstraction
 
