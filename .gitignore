@@ -138,6 +138,9 @@ cfr_ai/outputs
 # local CFR strategy archive, including auto-created README index
 cfr_ai/archive/
 
+# local working notes — distilled content lives in README + appendices
+cfr_ai/SESSION_NOTES.md
+
 # Game orchestration
 games*/
 
@@ -149,3 +152,6 @@ logs*/*
 
 # self-play runs
 runs*/*
+
+# Temporary notes
+scratch/
