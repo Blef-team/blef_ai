@@ -211,27 +211,31 @@ That is why we have left the temporary solution as the only one available to use
 
 ## Usage
 
-The training is done by setup, which is the ordered number of cards per player, no matter which player the AI is and who is starting. To train a model for a specific setup, execute `training.py`, specifying the number of hands. For example, the train the 1 card vs 1 card setup, run this from the project root:
+Training is done per setup, where a setup is the ordered number of cards per player. The recommended entry point is `training_numba.py`, which uses the JIT-compiled trainer. To train the 1 card vs 1 card setup, run this from the project root:
 
 ```
-python -m cfr_ai.training --hand-sizes 1 1
+python -m cfr_ai.training_numba --hand-sizes 1 1
 ```
 
-`--hand-sizes` (required) sets the number of cards per player.
+CLI flags:
 
-`--num-iterations` (default: 5 million) specifies the number of Monte Carlo iterations to run. Within one iteration, each player gets one set of cards and there is only one traverser.
+* `--hand-sizes` (required) — number of cards per player.
+* `--iter` (default: 5,000,000) — Monte Carlo iterations.
+* `--penalty` (default: 0.0) — penalty for non-checking moves (see Penalty above).
+* `--dtype` (default: `fp32`) — regret-array dtype; `fp32` halves memory at no measurable quality cost on production setups.
+* `--min-bet` (default: 0) — minimum bet the AI will make or acknowledge.
+* `--capacity` (default: 64,000) — initial row capacity; auto-grows by chunks as needed, so the default is fine.
+* `--seed` (default: 42) — RNG seed for deals + opponent sampling.
+* `--log-points` (default: 20) — number of evenly-spaced iter-rate / utility log lines.
+* `--archive-tag X` — save into `cfr_ai/archive/X/outputs/<setup>/` (snapshot for `head_to_head.py`) instead of the production `cfr_ai/outputs/<setup>/`.
+* `--high-priority` — bump the process to a higher OS priority (Windows: `HIGH_PRIORITY_CLASS`; POSIX: `nice -5`). Useful for shared machines.
 
-`--no-save` (default: no) doesn't save any outputs. Designed for trial runs where you measure performance.
+The pure-Python `training.py` is retained as a reference / debug implementation and supports two extras the JIT path does not:
 
-`--min-bet` (default: 0) specifies the minimum bet the AI will make or acknowledge.
+* `--get-exploitability` — run LBR-K exploitability checks at evenly-spaced points during training and record them in `metadata.csv`. Tune with `--exploitability-points`, `--exploitability-depth`, `--exploitability-n-belief`, `--exploitability-n-lbr-hand`.
+* `--algorithm {es,cfr_plus,dcfr}` — pick the regret-update rule. DCFR is documented but, in our experiments, strictly worse than ES on a wall-clock basis (see `README_Appendix_B.md` and the DCFR notes in this file).
 
-`--pruning-range` (default: -20 and -22) is a tuple that specifies the threshold for pruning and the minimum regret.
-
-`--penalty` (default: 0) sets the penalty (see Penalty above).
-
-`--log-points` (default: 25) specifies the number of points (at equal intervals) where utility will be measured.
-
-`--get-exploitability` runs LBR-1 exploitability checks at several evenly-spaced points during training and records them in `metadata.csv` next to the utility log. The cost can be significant for deep setups; tune with `--exploitability-points`, `--exploitability-n-belief`, and `--exploitability-n-lbr-hand` (see the LBR-based exploitability section below).
+If you need either of those, use `python -m cfr_ai.training` instead. Expect ~7-10× slower training; see the Performance section for the speedup table.
 
 You will see a `tqdm` progress bar during training and exploitability calculations.
 
@@ -270,24 +274,27 @@ Along each setup's outputs, there's a training metadata file (`metadata.csv`), w
 * the game value of each player (e.g. if we're training the 2 cards vs 3 cards case, it's 1. the game value for the starting player when the 2-card player is starting and 2. the game value for the starting player when the 3-card player is starting); and
 * the log of utilities along the training run.
 
-### LBR-based exploitability (`lbr.py`)
+### LBR-based exploitability (`lbr_numba.py`)
 
-The exploitability calculation is decoupled from training and lives in `lbr.py`. Run it independently on a saved strategy:
+The exploitability calculation is decoupled from training. The recommended entry point is `lbr_numba.py` (JIT-compiled, 13-40× faster than the Python reference, see Performance). Both produce identical exploitability values within fp32 noise and write the same `outputs/lbr_summary.csv`.
 
 ```
-python -m cfr_ai.lbr --hand-sizes 3 3 --depth 1 --update-summary
+python -m cfr_ai.lbr_numba --hand-sizes 3 3 --depth 2 --update-summary
 ```
 
 Key flags:
 
-* `--depth K` — LBR-K (number of LBR-optimised decisions per game before falling back to CFR rollout). K=1 is the classic [Lisý-Bowling local best response](https://arxiv.org/abs/1612.07547); K=∞ (default) is exact best response.
-* `--n-belief-samples N` — sample N opponent hands without replacement instead of enumerating the whole posterior. Required for deep setups where the opp population is in the thousands or more.
-* `--n-lbr-hand-samples K` — sample K LBR hands without replacement instead of enumerating all C(24, h) of them. Unbiased; adds variance.
+* `--depth K` — LBR-K (number of LBR-optimised decisions per game before falling back to CFR rollout). K=1 is the classic [Lisý-Bowling local best response](https://arxiv.org/abs/1612.07547). The JIT path supports finite K only; for exact best response on small setups use `cfr_ai.lbr` instead.
+* `--n-belief-samples N` (default: 300) — sample N opponent hands without replacement instead of enumerating the whole posterior. Default works on all setups.
+* `--n-lbr-hand-samples K` (default: 500) — sample K LBR hands without replacement instead of enumerating all C(24, h) of them. Unbiased; adds variance.
+* `--starting-player {0,1}` — fix the starting player; default runs both seats for asymmetric setups.
 * `--update-summary` — append/update this setup's row in `outputs/lbr_summary.csv`.
 
 When opponent hands are enumerated, the result is the exact LBR-K value. When they are sampled, we use a **double-sampling** scheme: an independent belief sample S2 is used to value the action that another sample S1 chose. This produces a conservative *lower bound* on LBR-K — sometimes the chosen action is suboptimal, but its EV is computed without winner's-curse bias. The standard error reported in the summary combines lbr_hand sampling variance and opp belief sampling variance, with a chi-squared upper bound on the std err itself.
 
-LBR-1 captures roughly 85% of full BR on our verified shallow setups; LBR-2 captures ~99% but takes 4× longer per setup, and quickly becomes infeasible past round 3.
+LBR-1 captures roughly 85% of full BR on our verified shallow setups; LBR-2 captures ~99% but takes 4× longer per setup, and quickly becomes infeasible past round 3 even with the JIT speedup.
+
+The pure-Python `lbr.py` is retained as a reference / debug implementation and adds one capability the JIT path does not: `--depth INF_DEPTH` (exact best response). Use it for spot-checks on small setups.
 
 ### `lbr_summary.csv`
 
@@ -345,9 +352,28 @@ To deploy all setups at once, run `python -m cfr_ai.deployment.deploy_all`
 
 ## Performance
 
-The core of the program, including `information_set.py`, `get_node_value` and `precompute_set_existence`, have gone through many rounds of optimisation. However, they would probably be much faster if they were written in a language like C++. We have tried using the `numba` package to compile a C++ version of some functions, but this actually worsened the performance. This is likely due to the frequent interface between Python and C++ (at least once per iteration, of which there are usually tens or hundreds in every second).
+The hot paths — training (`trainer_numba.py`) and exploitability (`lbr_numba.py`) — are JIT-compiled with [numba](https://numba.pydata.org/). They run alongside the original pure-Python reference implementations (`trainer.py`, `lbr.py`), which remain canonical for correctness and are used for occasional spot-checks. The numba versions are bit-equivalent within fp32 noise.
+
+End-to-end measurements (vs the pure-Python reference, single core):
+
+| Workload | Setup | Reference | Numba | Speedup |
+|----------|-------|----------:|------:|--------:|
+| Training 5M iter | (1,2) | ~63 min† | **6.4 min** (measured) | **~10×** |
+| LBR-1 | (1,3) | 14.7 s | 0.6 s | **24×** |
+| LBR-2 | (1,3) | 152 s | 3.8 s | **40×** |
+| LBR-2 | (3,3) | 519 s | 34 s | **15×** |
+
+†(1,2) reference is extrapolated from the measured 5M-iter steady-state rate (~1,320 it/s). All numba rows are direct wall-clock measurements.
+
+Larger setups have not been measured directly post-cleanup; the only big-setup data point we have is **(3,7) 5M iter in 3h 19m, but that was pre-cleanup and on a contended machine with 5 competing Python processes**. A clean-machine, post-cleanup run on (3,7) would likely land in the 1.5-2.5h range based on per-iter-rate scaling, but that's a projection, not a measurement. The relative speedup vs production may also differ from (1,2) because the JIT-dominated portion of the per-iter cost grows with tree depth, while the Python-side overhead is roughly constant — so the cleanups' relative gain shrinks on bigger setups even as the absolute time saved grows.
+
+The numba paths use a composite int64 infoset key `[abs_id | h_m2 | h_m1 | last_bet | hand_size]` to replace the per-call string concatenation, store regrets and strategies in flat 2D numpy arrays indexed by row, and recurse inside a single `@njit` function. The Python orchestration around the JIT-ed core is kept minimal (deal cards, build per-iter abstraction-id lookup, drive the iteration loop). Memory is held in fp32 by default; storage is ~50 % of the reference trainer's on production-scale setups.
 
 `precompute_set_existence` is called once per training iteration to evaluate the truth of all 88 possible bets against the dealt hands. It builds value-count and (value, suit)-presence tables in one pass over the deal, then resolves every bet via Python int comparisons. The whole call costs ~15 µs regardless of hand size — small enough that the per-iteration cost is dominated by the recursion rather than by this function.
+
+### Historical note
+
+An earlier round of numba experimentation regressed performance because it left the dict-of-`InformationSet`-objects structure in place and just JIT-ed the inner math. Numba can't usefully accelerate Python object attribute access, so each per-node `info_set.regrets`/`info_set.strategy_sum` access crossed the JIT-Python boundary. The current implementation flattens the entire trainer state into typed numpy arrays + a `numba.typed.Dict[int64, int64]` index, so the JIT-ed recursion never touches Python objects.
 
 ## Other notes
 

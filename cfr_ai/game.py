@@ -108,13 +108,14 @@ class Game():
     
     @staticmethod
     def deal_cards(hand_sizes: List[int]) -> List[List[int]]:
+        """Draw sum(hand_sizes) distinct cards from BlefCards and partition them
+        into one sorted hand per entry of hand_sizes (in order)."""
         all_cards = rng.choice(BlefCards, size=sum(hand_sizes), replace=False)
-        hands = []
-        for i in range(0, len(hand_sizes)):
-            cumsum = [0] + list(itertools.accumulate(hand_sizes))
-            i_cards = [all_cards[i] for i in range(cumsum[i], cumsum[i+1])]
-            i_cards.sort()
-            hands.append(i_cards)
+        hands: List[List[int]] = []
+        offset = 0
+        for hs in hand_sizes:
+            hands.append(sorted(all_cards[offset:offset + hs].tolist()))
+            offset += hs
         return hands
 
     @staticmethod
