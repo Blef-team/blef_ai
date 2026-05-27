@@ -27,53 +27,57 @@ from cfr_ai.game import Game, BlefCards
 from cfr_ai.information_set import (
     make_key, get_hand_abstraction, get_possible_actions
 )
-from cfr_ai.encoding import decode_probabilities
-
-
 CFRStrategy = Dict[str, np.ndarray]
 INF_DEPTH = 10**6
 
 
 def load_cfr_strategy(hand_sizes: List[int]) -> Tuple[CFRStrategy, int]:
     """Load saved strategies from disk for a setup and renormalise each array
-    to sum to 1. This matches what the deployed agent effectively does via
-    `random.choices(weights=...)`, where the clear_lows + encoding round-trip
-    can leave the raw stored array summing to slightly less than 1."""
-    setup_dir = os.path.join("cfr_ai", "outputs", "_".join(str(x) for x in hand_sizes))
-    if not os.path.isdir(setup_dir):
-        raise FileNotFoundError(f"No strategy directory at {setup_dir}")
-    min_bet = 0
-    metadata_path = os.path.join(setup_dir, "metadata.csv")
-    if os.path.exists(metadata_path):
-        with open(metadata_path, "r") as f:
-            for row in csv.reader(f):
-                if len(row) >= 2 and row[0].strip() == "Minimum bet":
-                    try:
-                        min_bet = int(row[1].strip())
-                    except ValueError:
-                        pass
+    to sum to 1.
+
+    Reads `cfr_ai/outputs/<setup>/strategy.npz` (the canonical format),
+    then converts to the legacy `Dict[str, np.ndarray]` form this LBR
+    reference implementation consumes. The numba LBR
+    (`lbr_numba.lbr_exploitability_numba`) skips this conversion and uses
+    the composite-int64 keyed FlatStrategy directly.
+    """
+    from cfr_ai.strategy_io import load_strategy
+    from cfr_ai.trainer_numba import (
+        LAST_BET_SHIFT, H_M1_SHIFT, H_M2_SHIFT, ABS_ID_SHIFT, ABSENT_CODE,
+        _HISTORY_CODE_STRS,
+    )
+
+    setup_dir = os.path.join("cfr_ai", "outputs",
+                             "_".join(str(x) for x in hand_sizes))
+    fs = load_strategy(setup_dir)
+    id_to_abs = {v: k for k, v in fs.abs_str_to_id.items()}
+
     strategies: CFRStrategy = {}
-    for hand_size in set(hand_sizes):
-        size_dir = os.path.join(setup_dir, str(hand_size))
-        if not os.path.isdir(size_dir):
-            raise FileNotFoundError(f"No strategy folder at {size_dir}")
-        for fname in os.listdir(size_dir):
-            if not fname.endswith(".csv"):
-                continue
-            last_bet = fname[:-4]
-            with open(os.path.join(size_dir, fname), "r") as f:
-                reader = csv.reader(f)
-                next(reader, None)
-                for row in reader:
-                    if not row or not row[0]:
-                        continue
-                    full_key = f"{hand_size}-{last_bet}-{row[0]}"
-                    arr = decode_probabilities(row[1])
-                    s = arr.sum()
-                    if s > 0:
-                        arr = arr / s
-                    strategies[full_key] = arr
-    return strategies, min_bet
+    for k_int, row in fs.key_to_row.items():
+        k = int(k_int)
+        row = int(row)
+        hand_size = k & 0xF
+        last_bet = (k >> LAST_BET_SHIFT) & 0xFF
+        h_m1_id = (k >> H_M1_SHIFT) & 0xFF
+        h_m2_id = (k >> H_M2_SHIFT) & 0xFF
+        abs_id = k >> ABS_ID_SHIFT
+
+        key_str = f"{hand_size}-{last_bet}-"
+        if h_m1_id != ABSENT_CODE:
+            key_str += _HISTORY_CODE_STRS[h_m1_id] + "-"
+            if h_m2_id != ABSENT_CODE:
+                key_str += _HISTORY_CODE_STRS[h_m2_id] + "-"
+        key_str += id_to_abs[abs_id]
+
+        lo = int(fs.lower_action[row])
+        hi = int(fs.upper_action[row])
+        arr = fs.strategy[row, lo:hi + 1].astype(np.float64)
+        s = arr.sum()
+        if s > 0:
+            arr = arr / s
+        strategies[key_str] = arr
+
+    return strategies, fs.min_bet
 
 
 def _cfr_action_dist(

@@ -484,6 +484,92 @@ class NumbaTrainer:
             out[key_str] = strategy
         return out
 
+    def get_final_flat_strategy(self, drop_check_only: bool = True,
+                                clear_lows_threshold: float = 0.01):
+        """Build a `FlatStrategy` (defined in `lbr_numba.py`) from the
+        trainer's averaged strategy arrays. Cheaper than
+        `get_final_strategy_dict()` for the save path because we skip the
+        string-key intermediate. Returns the strategy AND the number of
+        non-check-only rows actually included (useful for metadata).
+
+        Args:
+            drop_check_only: if True (default), rows where the cleaned
+                strategy is 100% check (i.e. all mass on action 88) are
+                NOT stored. Matches the legacy CSV convention; the JIT
+                lookup defaults to check-100% on missing keys.
+            clear_lows_threshold: probabilities below this fraction of the
+                row max are zeroed and the remainder renormalised. Set to
+                0 to skip cleaning.
+        """
+        # Local import: avoids circular dependency at module load time.
+        from cfr_ai.lbr_numba import FlatStrategy
+        from cfr_ai.encoding import clear_lows
+        from numba.typed import Dict as _NbDict
+        from numba import types as _types
+
+        id_to_abs = [None] * len(self._abs_to_id)
+        for s, i in self._abs_to_id.items():
+            id_to_abs[i] = s
+        abs_str_to_id = dict(self._abs_to_id)
+
+        # Pre-scan: count rows we'll keep (after drop_check_only).
+        keep_indices: List[int] = []
+        keep_keys: List[int] = []
+        keep_cleaned: List[np.ndarray] = []
+        for key in list(self.key_to_row.keys()):
+            row = int(self.key_to_row[key])
+            lower = int(self.lower_action[row])
+            upper = int(self.upper_action[row])
+            ssum = self.strategy_sum[row, lower:upper + 1].astype(np.float64)
+            total = ssum.sum()
+            if total > 0:
+                strat = ssum / total
+            else:
+                strat = np.zeros(upper - lower + 1, dtype=np.float64)
+                strat[-1] = 1.0
+            if clear_lows_threshold > 0:
+                strat = clear_lows(strat)
+            if drop_check_only and strat[-1] >= 1.0:
+                continue
+            keep_keys.append(int(key))
+            keep_indices.append(row)
+            keep_cleaned.append(strat.astype(np.float32))
+
+        n = len(keep_keys)
+        keys_arr = np.array(keep_keys, dtype=np.int64)
+        lower_arr = np.empty(n, dtype=np.int16)
+        upper_arr = np.empty(n, dtype=np.int16)
+        probs_arr = np.zeros((n, 89), dtype=np.float32)
+        for i, (row, cleaned) in enumerate(zip(keep_indices, keep_cleaned)):
+            lo = int(self.lower_action[row])
+            hi = int(self.upper_action[row])
+            lower_arr[i] = lo
+            upper_arr[i] = hi
+            probs_arr[i, lo:hi + 1] = cleaned[:hi - lo + 1]
+
+        # Sort by composite key so the on-disk layout matches what
+        # `strategy_io.save_strategy` would write, and the typed.Dict
+        # build order matches future reads. (save_strategy will resort
+        # anyway, but doing it here lets us reuse the keys array.)
+        order = np.argsort(keys_arr, kind="stable")
+        keys_arr = keys_arr[order]
+        lower_arr = lower_arr[order]
+        upper_arr = upper_arr[order]
+        probs_arr = probs_arr[order]
+
+        key_to_row = _NbDict.empty(key_type=_types.int64, value_type=_types.int64)
+        for i in range(n):
+            key_to_row[np.int64(keys_arr[i])] = np.int64(i)
+
+        return FlatStrategy(
+            key_to_row=key_to_row,
+            strategy=probs_arr,
+            lower_action=lower_arr,
+            upper_action=upper_arr,
+            abs_str_to_id=abs_str_to_id,
+            min_bet=int(self.min_bet),
+        ), n
+
 
 @njit(cache=True)
 def _seed_numba(seed):

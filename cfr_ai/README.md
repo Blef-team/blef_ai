@@ -190,9 +190,16 @@ With 14 cards, any specific high card has 98% chance of existing (97% and 99% wi
 
 With 16 cards on the table, the great straight has 96% chance of existing (88%, 93%, 98% and 99% for 14, 15, 17 and 18 cards respectively). In an experiment we found that having the 11 11 setup discard all bets below straights results in an approximately twofold improvement in time, memory and strategy storage space used.
 
-### Strategy encoding
+### Strategy storage format
 
-There is an encoding that highly compresses strategies so that they can be deployed on platforms with limited storage, such as within AWS Lambda functions.
+Strategies are stored as compressed numpy archives (`strategy.npz` per setup) keyed by a composite int64 (encoding hand size, last bet, two history-code ids and an abstraction id). The deployed agent loads the whole file once per setup (~1-4 s even for the largest setups) and serves lookups via the JIT-friendly numba `typed.Dict[int64, int64]` built at load time.
+
+Files written per setup under `cfr_ai/outputs/<setup>/`:
+
+* `strategy.npz` — keys, lower/upper action bounds, padded float32 probability table. Only non-checking infosets are stored; the JIT lookup defaults to "check 100%" on missing keys.
+* `strategy.abs.json` — abstraction-string → id table, also covering any diagnostic-only abstractions so they remain interpretable.
+* `diagnostic.npz` (optional) — touch counters + the raw (uncleaned) averaged strategy for every infoset, including check-only ones. Used by analysis scripts, not by the deployed agent.
+* `metadata.csv` — human-readable training params (iterations, penalty, duration, game values, utility log).
 
 ## History abstraction and convergence
 
@@ -241,19 +248,9 @@ You will see a `tqdm` progress bar during training and exploitability calculatio
 
 ### Training outputs
 
-A training without the `--no-save` flag will output strategy files to the `outputs` folder. Each setup gets a different folder (e.g. `1_1` for 1 vs 1 card). The strategy for each player (depending on the number of cards) will be a separate folder inside that one (e.g. `1`). 
+A training without the `--no-save` flag writes its strategy under `cfr_ai/outputs/<setup>/` — see [Strategy storage format](#strategy-storage-format) above for the file layout (`strategy.npz`, `strategy.abs.json`, `diagnostic.npz`, `metadata.csv`).
 
-Then, infosets are stored in separate csv files depending on the last bet (88 if  there was none). The keys in the csv complete the abstraction key. For example, in a 1v1 setup, if the CFR player has an Ace and the only previous bet was a High card, Ace, you will find the strategy in `outputs/1_1/1/5.csv` under `k` of `5`. 
-
-The `v` represents the strategy. A two-digit number symbolises the number of consecutive actions with 0% chance. Two-character fragments represent non-zero chances, with higher values representing higher chances and `Ya` being 100%.
-
-As mentioned before, information sets where the strategy is to check 100% of the time are not recorded, in order to save on storage.
-
-There is also a version of the strategy files with extra, diagnostic columns in a separate folder (e.g. `1_diagnostic` instead of `1`). The diagnostic version:
-
-* contains all infosets, including the ones where we only check;
-* for every infoset, it notes the iterations it was first and last touched and the number of times it was touched; and
-* we include probabilities below 1%, which are reset to 0% in the normal output file.
+The deployment file `strategy.npz` contains only non-checking infosets — at lookup time, a missing key is interpreted as "check 100%". The optional `diagnostic.npz` (always written by `cfr_ai/training.py`; written by `cfr_ai/training_numba.py` when the relevant flag is set) contains *every* infoset, including check-only ones, plus the iteration counters (`first_touched`, `last_touched`, `times_touched`) used by the analysis scripts in `analysis/`.
 
 ## Evaluation & analytics
 
@@ -329,10 +326,10 @@ The script accepts either explicit folder paths (`--model1-folder`, `--model2-fo
 Trained strategies can be snapshotted into versioned tags for later head-to-head comparison. Run from the project root:
 
 ```
-python -m cfr_ai.archive_tool --tag v0_baseline --note "Production CFR baseline"
+python -m cfr_ai.archive_tool --tag v0 --note "Pre-Hetzner-retrain baseline"
 ```
 
-By default this archives every setup currently in `outputs/`; pass `--setups 1_1 2_3` to limit scope. Each archive is a self-contained model folder (containing snapshots of `information_set.py`, `history.csv`, and the relevant `outputs/<setup>/` subtrees) directly consumable by `analysis/head_to_head.py` via the tag shortcut. `cfr_ai/archive/` is gitignored — archives are local to each machine.
+By default this archives every setup currently in `outputs/` and skips diagnostics (pass `--include-diagnostics` to include them). Each archive is a self-contained model folder containing snapshots of `information_set.py`, `history.csv`, and the relevant `outputs/<setup>/` subtrees (the `strategy.npz` / `strategy.abs.json` per setup, optionally `diagnostic.npz`), directly consumable by `analysis/head_to_head.py` via the tag shortcut. `cfr_ai/archive/` is gitignored — archives are local to each machine.
 
 ### Winning probabilities
 

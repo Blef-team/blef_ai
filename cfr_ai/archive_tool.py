@@ -46,12 +46,18 @@ def _all_setups() -> List[str]:
 
 
 def _copy_setup(setup: str, dest_outputs: Path, include_diagnostics: bool) -> None:
-    """Copy outputs/<setup>/ into the archive, skipping diagnostic dirs by default."""
+    """Copy outputs/<setup>/ into the archive, skipping diagnostic data by default.
+
+    Diagnostic data was previously a `<hand_size>_diagnostic/` folder of
+    CSVs; it now lives in a single `diagnostic.npz` next to `strategy.npz`.
+    We skip either form unless `include_diagnostics` is set."""
     src = SOURCE_ROOT / "outputs" / setup
     dst = dest_outputs / setup
     dst.mkdir(parents=True, exist_ok=True)
     for item in src.iterdir():
         if item.is_file():
+            if item.name == "diagnostic.npz" and not include_diagnostics:
+                continue
             shutil.copy2(item, dst / item.name)
         elif item.is_dir():
             if item.name.endswith("_diagnostic") and not include_diagnostics:

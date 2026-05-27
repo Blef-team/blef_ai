@@ -1,10 +1,12 @@
 import argparse
 from cfr_ai.trainer import *
-from cfr_ai.encoding import encode_probabilities, clear_lows
+from cfr_ai.encoding import clear_lows
 from cfr_ai.lbr import lbr_exploitability
 import csv, os, psutil
 from datetime import datetime
 import time
+
+import numpy as np
 
 VERSION_CODE = 'TV-NR-SS-SD-MB'
 
@@ -31,6 +33,170 @@ def _snapshot_exploitability(hand_sizes, min_bet, depth, n_belief, n_lbr_hand):
             )
 
     return callback, exploitability_log
+
+
+def _save_trainer_outputs(cfr_trainer, hand_sizes, min_bet, setup_dir,
+                          save_diagnostic: bool = True) -> int:
+    """Convert the Python `Trainer.infoset_map` into the on-disk NPZ
+    format (strategy.npz + optional diagnostic.npz), matching what
+    `cfr_ai.training_numba` writes. Returns the count of meaningful
+    (non-check-100%) policies.
+
+    The Python trainer keys infosets by `make_key` strings like
+    `hs-lb-(h_m1-h_m2-)abs`. We parse those into the same composite int64
+    keys the JIT uses, so the resulting NPZ is bit-equivalent to one
+    produced by `cfr_ai.training_numba`.
+    """
+    from numba.typed import Dict as NbDict
+    from numba import types as nb_types
+    from cfr_ai.lbr_numba import FlatStrategy, _split_suffix
+    from cfr_ai.strategy_io import save_strategy, save_diagnostic as save_diag
+    from cfr_ai.trainer_numba import (
+        LAST_BET_SHIFT, H_M1_SHIFT, H_M2_SHIFT, ABS_ID_SHIFT,
+    )
+
+    os.makedirs(setup_dir, exist_ok=True)
+
+    # First pass: collect (composite_key, lower, upper, strategy, regrets,
+    # strategy_sum, first_touched, last_touched, times_touched), interning
+    # abstraction strings as we go.
+    abs_str_to_id: Dict[str, int] = {}
+
+    keys: List[int] = []
+    lowers: List[int] = []
+    uppers: List[int] = []
+    strategies: List[np.ndarray] = []
+    # Diagnostic fields (only populated if save_diagnostic).
+    regrets: List[np.ndarray] = []
+    strategy_sums: List[np.ndarray] = []
+    first_touched: List[int] = []
+    last_touched: List[int] = []
+    times_touched: List[int] = []
+
+    meaningful_policies = 0
+    for k, v in cfr_trainer.infoset_map.items():
+        policy = v.get_final_strategy()
+        cleaned = clear_lows(policy)
+        parts = k.split('-')
+        hand_size = int(parts[0])
+        last_bet = int(parts[1])
+        suffix = '-'.join(parts[2:])
+        h_m1_id, h_m2_id, abs_str = _split_suffix(suffix)
+        abs_id = abs_str_to_id.get(abs_str)
+        if abs_id is None:
+            abs_id = len(abs_str_to_id)
+            abs_str_to_id[abs_str] = abs_id
+
+        comp = (hand_size
+                | (last_bet << LAST_BET_SHIFT)
+                | (h_m1_id << H_M1_SHIFT)
+                | (h_m2_id << H_M2_SHIFT)
+                | (abs_id << ABS_ID_SHIFT))
+
+        if last_bet == 88 or last_bet < min_bet:
+            lo, hi = min_bet, 87
+        else:
+            lo, hi = last_bet + 1, 88
+        width = hi - lo + 1
+
+        # Drop check-100% rows from the deployed strategy (the JIT defaults
+        # to that on missing keys). Diagnostic always keeps them.
+        if cleaned[-1] < 1.0:
+            row_probs = np.zeros(89, dtype=np.float32)
+            row_probs[lo:hi + 1] = cleaned[:width].astype(np.float32)
+            keys.append(comp)
+            lowers.append(lo)
+            uppers.append(hi)
+            strategies.append(row_probs)
+            meaningful_policies += 1
+
+        if save_diagnostic:
+            row_regrets = np.zeros(89, dtype=np.float32)
+            row_regrets[lo:hi + 1] = (
+                np.asarray(v.regrets, dtype=np.float32)[:width]
+            )
+            row_ssum = np.zeros(89, dtype=np.float32)
+            row_ssum[lo:hi + 1] = (
+                np.asarray(v.strategy_sum, dtype=np.float32)[:width]
+            )
+            regrets.append(row_regrets)
+            strategy_sums.append(row_ssum)
+            first_touched.append(int(v.first_touched))
+            last_touched.append(int(v.last_touched))
+            times_touched.append(int(v.times_touched))
+            # Diagnostic uses the same composite key; we store a parallel
+            # `diag_keys` array. For rows whose strategy was dropped above,
+            # we still record the diag info (so the lists are 1:1 with the
+            # full infoset_map).
+
+    # Build a FlatStrategy for the deployment file.
+    n = len(keys)
+    keys_arr = np.array(keys, dtype=np.int64)
+    lower_arr = np.array(lowers, dtype=np.int16)
+    upper_arr = np.array(uppers, dtype=np.int16)
+    probs_arr = (np.stack(strategies)
+                 if strategies else np.zeros((0, 89), dtype=np.float32))
+    order = np.argsort(keys_arr, kind="stable")
+    keys_arr = keys_arr[order]
+    lower_arr = lower_arr[order]
+    upper_arr = upper_arr[order]
+    probs_arr = probs_arr[order]
+    key_to_row = NbDict.empty(key_type=nb_types.int64, value_type=nb_types.int64)
+    for i in range(n):
+        key_to_row[np.int64(keys_arr[i])] = np.int64(i)
+    fs = FlatStrategy(
+        key_to_row=key_to_row, strategy=probs_arr,
+        lower_action=lower_arr, upper_action=upper_arr,
+        abs_str_to_id=abs_str_to_id, min_bet=int(min_bet),
+    )
+    save_strategy(fs, setup_dir, compressed=True)
+
+    if save_diagnostic and times_touched:
+        # Diagnostic has ALL infosets in the trainer (including check-only).
+        # Build separate arrays in trainer iteration order, then sort.
+        diag_keys: List[int] = []
+        for k, _ in cfr_trainer.infoset_map.items():
+            parts = k.split('-')
+            hand_size = int(parts[0])
+            last_bet = int(parts[1])
+            suffix = '-'.join(parts[2:])
+            h_m1_id, h_m2_id, abs_str = _split_suffix(suffix)
+            abs_id = abs_str_to_id[abs_str]
+            comp = (hand_size
+                    | (last_bet << LAST_BET_SHIFT)
+                    | (h_m1_id << H_M1_SHIFT)
+                    | (h_m2_id << H_M2_SHIFT)
+                    | (abs_id << ABS_ID_SHIFT))
+            diag_keys.append(comp)
+        diag_keys_arr = np.array(diag_keys, dtype=np.int64)
+        diag_lower = np.array([
+            min_bet if (lb := int(k.split('-')[1])) == 88 or lb < min_bet else lb + 1
+            for k in cfr_trainer.infoset_map.keys()
+        ], dtype=np.int16)
+        diag_upper = np.array([
+            87 if (lb := int(k.split('-')[1])) == 88 or lb < min_bet else 88
+            for k in cfr_trainer.infoset_map.keys()
+        ], dtype=np.int16)
+        regrets_arr = np.stack(regrets)
+        ssum_arr = np.stack(strategy_sums)
+        first_arr = np.array(first_touched, dtype=np.int32)
+        last_arr = np.array(last_touched, dtype=np.int32)
+        times_arr = np.array(times_touched, dtype=np.int32)
+        order = np.argsort(diag_keys_arr, kind="stable")
+        save_diag(
+            setup_dir,
+            keys=diag_keys_arr[order],
+            lower=diag_lower[order],
+            upper=diag_upper[order],
+            regrets=regrets_arr[order],
+            strategy_sum=ssum_arr[order],
+            first_touched=first_arr[order],
+            last_touched=last_arr[order],
+            times_touched=times_arr[order],
+            compressed=True,
+        )
+
+    return meaningful_policies
 
 
 def main() -> None:
@@ -78,31 +244,13 @@ def main() -> None:
     training_duration = time.strftime('%H:%M', time.gmtime(duration_seconds))
 
     if args.save:
-        files = {}
-        writers = {}
-        meaningful_policies = 0
-        for hand_size in set(args.hand_sizes):
-            os.makedirs('cfr_ai/outputs/' + "_".join(str(x) for x in args.hand_sizes) + '/' + str(hand_size), exist_ok=True)
-            os.makedirs('cfr_ai/outputs/' + "_".join(str(x) for x in args.hand_sizes) + '/' + str(hand_size) + '_diagnostic/', exist_ok=True)
-            for last_bet in range(89):
-                key = str(hand_size) + '-' + str(last_bet)
-                files[key] = open('cfr_ai/outputs/' + "_".join(str(x) for x in args.hand_sizes) + '/' + str(hand_size) + '/' + str(last_bet) + '.csv', 'w', newline="")
-                writers[key] = csv.DictWriter(files[key], fieldnames=['k', 'v'])
-                header = writers[key].writeheader()
-                files[key + '-D'] = open('cfr_ai/outputs/' + "_".join(str(x) for x in args.hand_sizes) + '/' + str(hand_size) + '_diagnostic/' + str(last_bet) + '.csv', 'w', newline="")
-                writers[key + '-D'] = csv.DictWriter(files[key + '-D'], fieldnames=['k', 'first_touched', 'last_touched', 'times_touched', 'v'])
-                header = writers[key + '-D'].writeheader()
-        for k,v in cfr_trainer.infoset_map.items():
-            policy = v.get_final_strategy()
-            cleaned_policy = clear_lows(policy)
-            split_key = k.split('-')
-            if cleaned_policy[-1] < 1.0:
-                csv_row = writers[split_key[0] + '-' + split_key[1]].writerow({"k": '-'.join(split_key[2:]), "v": encode_probabilities(cleaned_policy)})
-                meaningful_policies += 1
-            csv_row = writers[split_key[0] + '-' + split_key[1] + '-D'].writerow({"k": '-'.join(split_key[2:]), "v": encode_probabilities(policy), "first_touched": v.first_touched, "last_touched": v.last_touched, "times_touched": v.times_touched})
-        for k,v in files.items():
-            v.close()
-        with open('cfr_ai/outputs/' + "_".join(str(x) for x in args.hand_sizes) + '/metadata.csv', 'w', newline="") as csvfile:
+        setup_dir = os.path.join(
+            'cfr_ai', 'outputs', "_".join(str(x) for x in args.hand_sizes))
+        meaningful_policies = _save_trainer_outputs(
+            cfr_trainer, args.hand_sizes, args.min_bet, setup_dir,
+            save_diagnostic=True,
+        )
+        with open(os.path.join(setup_dir, 'metadata.csv'), 'w', newline="") as csvfile:
             writer = csv.DictWriter(csvfile, fieldnames=['k', 'v'])
             csv_row = writer.writerow({"k": "Time finished", "v": datetime.now().strftime("%Y-%m-%d, %H:%M:%S")})
             csv_row = writer.writerow({"k": "Training duration", "v": training_duration})

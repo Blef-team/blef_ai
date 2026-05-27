@@ -54,6 +54,50 @@ class FlatStrategy:
 # Loader
 # ---------------------------------------------------------------------------
 
+def _split_suffix(suffix: str) -> Tuple[int, int, str]:
+    """Split a strategy-file key suffix into (h_m1_id, h_m2_id, abs_str).
+
+    Suffix structure as emitted by trainer/agent is one of:
+      - "abs"              -> 0 history codes
+      - "c1-abs"           -> 1 history code
+      - "c1-c2-abs"        -> 2 history codes
+    Where c1/c2 come from `_STR_TO_CODE_ID` (history-code strings).
+
+    Complication: the hand-abstraction string for rounds 6+ can contain
+    hyphens (e.g. negative numbers like "-9.0 -7.0"), so a naive
+    `suffix.split('-')` mis-attributes leading abs tokens as history
+    codes. The robust rule is:
+      1. If suffix has no '-', it's the abs.
+      2. If suffix starts with '-' (abs starts with a minus), 0 codes.
+      3. Else peel off up to 2 leading tokens that are valid non-empty
+         history codes; the remainder is the abs.
+
+    The empty string is in `_STR_TO_CODE_ID` (history.csv has empty
+    placeholder cells) but is never a real code in a key.
+    """
+    if "-" not in suffix:
+        return ABSENT_CODE, ABSENT_CODE, suffix
+    if suffix.startswith("-"):
+        return ABSENT_CODE, ABSENT_CODE, suffix
+
+    first_dash = suffix.index("-")
+    tok1 = suffix[:first_dash]
+    if not tok1 or tok1 not in _STR_TO_CODE_ID:
+        return ABSENT_CODE, ABSENT_CODE, suffix
+
+    rest = suffix[first_dash + 1:]
+    if "-" not in rest or rest.startswith("-"):
+        return _STR_TO_CODE_ID[tok1], ABSENT_CODE, rest
+
+    second_dash = rest.index("-")
+    tok2 = rest[:second_dash]
+    if not tok2 or tok2 not in _STR_TO_CODE_ID:
+        return _STR_TO_CODE_ID[tok1], ABSENT_CODE, rest
+
+    abs_str = rest[second_dash + 1:]
+    return _STR_TO_CODE_ID[tok1], _STR_TO_CODE_ID[tok2], abs_str
+
+
 def _parse_key_to_composite(
     key_str: str,
     hand_size: int,
@@ -61,29 +105,12 @@ def _parse_key_to_composite(
     abs_str_to_id: Dict[str, int],
 ) -> int:
     """Parse a strategy-file key suffix (everything after 'hs-lb-') into
-    a composite int64 key. Suffix can be:
-      - "abs"              → 0 history codes (`hs-lb-abs`)
-      - "c1-abs"           → 1 history code  (`hs-lb-c1-abs`)
-      - "c1-c2-abs"        → 2 history codes (`hs-lb-c1-c2-abs`)
-    where c1/c2 are entries from `_HISTORY_CODE_STRS` and `abs` is the
-    hand-abstraction string."""
-    parts = key_str.split("-")
-    abs_str = parts[-1]
+    a composite int64 key. See `_split_suffix` for the parse rule."""
+    h_m1_id, h_m2_id, abs_str = _split_suffix(key_str)
     abs_id = abs_str_to_id.get(abs_str)
     if abs_id is None:
         abs_id = len(abs_str_to_id)
         abs_str_to_id[abs_str] = abs_id
-
-    if len(parts) == 1:
-        h_m1_id = ABSENT_CODE
-        h_m2_id = ABSENT_CODE
-    elif len(parts) == 2:
-        h_m1_id = _STR_TO_CODE_ID[parts[0]]
-        h_m2_id = ABSENT_CODE
-    else:  # 3 parts: c1, c2, abs
-        h_m1_id = _STR_TO_CODE_ID[parts[0]]
-        h_m2_id = _STR_TO_CODE_ID[parts[1]]
-
     return (hand_size
             | (last_bet << LAST_BET_SHIFT)
             | (h_m1_id << H_M1_SHIFT)
@@ -95,12 +122,34 @@ def load_flat_strategy(
     hand_sizes: List[int],
     setup_dir: str = None,
 ) -> FlatStrategy:
-    """Load the CFR strategy for `hand_sizes` from disk and convert to
-    `FlatStrategy`. Strategy CSVs live in `setup_dir/{hand_size}/{last_bet}.csv`;
-    if `setup_dir` is None, defaults to `cfr_ai/outputs/<setup>`.
+    """Load the CFR strategy for `hand_sizes` from disk into a `FlatStrategy`.
 
-    Only non-checking entries are stored (matching the on-disk format);
-    missing-key lookups in the JIT default to check-100%."""
+    Default path is `cfr_ai/outputs/<setup>/strategy.npz`. The legacy
+    per-(hand_size, last_bet) CSV tree is no longer read here — use
+    `analysis/migrate_to_npz.py` if you have old CSVs to convert.
+
+    Only non-checking entries are stored on disk; missing-key lookups in
+    the JIT default to check-100%."""
+    from cfr_ai.strategy_io import load_strategy
+    if setup_dir is None:
+        setup_dir = os.path.join("cfr_ai", "outputs",
+                                 "_".join(str(x) for x in hand_sizes))
+    return load_strategy(setup_dir)
+
+
+def _load_flat_strategy_from_csv(
+    hand_sizes: List[int],
+    setup_dir: str = None,
+) -> FlatStrategy:
+    """Legacy CSV reader. Kept ONLY for `analysis/migrate_to_npz.py`.
+
+    Strategy CSVs live in `setup_dir/{hand_size}/{last_bet}.csv`;
+    if `setup_dir` is None, defaults to `cfr_ai/outputs/<setup>`. Only
+    non-checking entries are stored (matching the on-disk format); the
+    loader normalises probabilities and force-defaults all-zero rows to
+    check-100% so the JIT lookup can skip the runtime branch.
+
+    Do not call from new code. Use `cfr_ai.strategy_io.load_strategy`."""
     if setup_dir is None:
         setup_dir = os.path.join("cfr_ai", "outputs",
                                  "_".join(str(x) for x in hand_sizes))
@@ -119,7 +168,6 @@ def load_flat_strategy(
                         pass
 
     abs_str_to_id: Dict[str, int] = {}
-    # First pass: count rows so we can pre-size arrays.
     rows = []
     for hand_size in set(hand_sizes):
         size_dir = os.path.join(setup_dir, str(hand_size))
@@ -152,7 +200,6 @@ def load_flat_strategy(
             lo, hi = last_bet + 1, 88
         width = hi - lo + 1
 
-        # Trim or pad to width
         if len(arr) > width:
             arr = arr[:width]
         if len(arr) < width:
@@ -160,9 +207,6 @@ def load_flat_strategy(
             padded[:len(arr)] = arr
             arr = padded
 
-        # Normalise so per-lookup we can trust sum==1 and skip the divide.
-        # Force a check-100% default (last legal action) on the rare all-zero
-        # entry — saves the runtime branch in `_lookup_one_strategy`.
         s = float(arr.sum())
         if s > 0.0:
             arr = arr / s

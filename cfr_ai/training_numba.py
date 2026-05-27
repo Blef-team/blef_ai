@@ -33,7 +33,6 @@ import psutil
 
 import cfr_ai.game as game_mod
 from cfr_ai.trainer_numba import NumbaTrainer, _seed_numba, GROW_CHUNK
-from cfr_ai.encoding import encode_probabilities, clear_lows
 
 
 def _bump_priority():
@@ -51,44 +50,19 @@ def _bump_priority():
 def save_strategies(trainer: NumbaTrainer, out_root: str, hand_sizes,
                     iter_count, penalty, training_seconds, peak_ram_mb,
                     min_bet):
-    """Replicate training.py's per-(hand_size, last_bet) CSV dump on the
-    trainer's final-strategy dict. `out_root` is either `cfr_ai/` (for
-    production saves) or `cfr_ai/archive/<tag>/` (for archive snapshots)."""
+    """Save the trained strategy as `<out_root>/outputs/<setup>/strategy.npz`
+    (+ sidecar JSON) plus a human-readable `metadata.csv` with training
+    parameters. `out_root` is either `cfr_ai/` (production saves) or
+    `cfr_ai/archive/<tag>/` (snapshot saves)."""
+    from cfr_ai.strategy_io import save_strategy
+
     setup = "_".join(str(x) for x in hand_sizes)
     setup_dir = os.path.join(out_root, "outputs", setup)
     os.makedirs(setup_dir, exist_ok=True)
 
-    file_handles = {}
-    writers = {}
-    for hs in set(hand_sizes):
-        os.makedirs(os.path.join(setup_dir, str(hs)), exist_ok=True)
-        for lb in range(89):
-            key = (hs, lb)
-            path = os.path.join(setup_dir, str(hs), f"{lb}.csv")
-            fh = open(path, "w", newline="")
-            file_handles[key] = fh
-            w = csv.DictWriter(fh, fieldnames=["k", "v"])
-            w.writeheader()
-            writers[key] = w
-
-    strat = trainer.get_final_strategy_dict()
-    meaningful_policies = 0
-    for k, policy in strat.items():
-        cleaned = clear_lows(policy)
-        parts = k.split("-")
-        if len(parts) < 2:
-            continue
-        hs = int(parts[0])
-        lb = int(parts[1])
-        if cleaned[-1] < 1.0:
-            writers[(hs, lb)].writerow({
-                "k": "-".join(parts[2:]),
-                "v": encode_probabilities(cleaned),
-            })
-            meaningful_policies += 1
-
-    for fh in file_handles.values():
-        fh.close()
+    fs, meaningful_policies = trainer.get_final_flat_strategy(
+        drop_check_only=True, clear_lows_threshold=0.01)
+    save_strategy(fs, setup_dir, compressed=True)
 
     duration_hhmm = time.strftime('%H:%M', time.gmtime(training_seconds))
     md_path = os.path.join(setup_dir, "metadata.csv")

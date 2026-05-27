@@ -12,7 +12,6 @@ import inspect # New import to check function arguments
 from typing import List, Dict, Any, Tuple
 
 from cfr_ai.game import Game
-from cfr_ai.encoding import decode_probabilities
 
 Model = Dict[str, Any]
 Hand = Tuple[int]
@@ -30,7 +29,14 @@ def parse_metadata(model_folder_path: str, hand_sizes_sorted: List[int]) -> Dict
     metadata_path = os.path.join(model_folder_path, 'outputs', setup_name, 'metadata.csv')
 
     if os.path.exists(metadata_path):
-        with open(metadata_path, 'r', encoding='utf-8') as f:
+        # metadata.csv from older training runs is ISO-8859/Windows-1252
+        # (Polish characters etc.). Tolerate both encodings.
+        try:
+            f = open(metadata_path, 'r', encoding='utf-8')
+            f.read(); f.seek(0)
+        except UnicodeDecodeError:
+            f = open(metadata_path, 'r', encoding='latin-1')
+        with f:
             reader = csv.reader(f)
             for row in reader:
                 if not row: continue
@@ -89,66 +95,68 @@ def get_possible_actions_wrapper(module, history: List[int], min_bet: int):
     else:
         return func(history)
 
-def preload_all_strategies(model_folder: str, hand_sizes_sorted: List[int]) -> Dict[str, str]:
+def preload_all_strategies(model_folder: str, hand_sizes_sorted: List[int]) -> Dict[str, np.ndarray]:
     """
-    Reads all strategy files for a model into an in-memory dictionary.
-    Returns a dict mapping {info_set_key: encoded_strategy_string}.
+    Load all strategies for a model from `<model_folder>/outputs/<setup>/strategy.npz`
+    into an in-memory dictionary keyed by the legacy string key
+    (`hs-lb-(h_m1-h_m2-)abs`). Probabilities are pre-decoded `np.ndarray`
+    arrays. Returns an empty dict (with a stderr warning) if the strategy
+    file is missing — head_to_head treats this as "model checks at every
+    decision", consistent with the old CSV-fallback behaviour.
     """
-    strategies: Dict[str, str] = {}
+    from cfr_ai.strategy_io import load_strategy
+    from cfr_ai.trainer_numba import (
+        LAST_BET_SHIFT, H_M1_SHIFT, H_M2_SHIFT, ABS_ID_SHIFT, ABSENT_CODE,
+        _HISTORY_CODE_STRS,
+    )
+
     setup_name = "_".join(str(x) for x in hand_sizes_sorted)
-    outputs_path = os.path.join(model_folder, 'outputs', setup_name)
-    
-    if not os.path.isdir(outputs_path):
-        print(f"Warning: Output directory not found at '{outputs_path}'. Cannot preload strategies.", file=sys.stderr)
+    setup_dir = os.path.join(model_folder, 'outputs', setup_name)
+    npz_path = os.path.join(setup_dir, 'strategy.npz')
+    if not os.path.exists(npz_path):
+        print(
+            f"Warning: strategy.npz not found at '{npz_path}'. "
+            "Cannot preload strategies.",
+            file=sys.stderr,
+        )
         return {}
 
-    print(f"Pre-loading strategies from {outputs_path}...")
-    
-    for hand_size_str in os.listdir(outputs_path):
-        player_folder_path = os.path.join(outputs_path, hand_size_str)
-        if not os.path.isdir(player_folder_path) or '_diagnostic' in hand_size_str:
-            continue
-        
-        for csv_filename in os.listdir(player_folder_path):
-            if not csv_filename.endswith('.csv'): continue
-            last_bet_str = csv_filename[:-4]
-            with open(os.path.join(player_folder_path, csv_filename), 'r', encoding='utf-8') as f:
-                reader = csv.reader(f)
-                next(reader, None)  # skip header
-                for row in reader:
-                    if not row: continue
-                    strategies[f"{hand_size_str}-{last_bet_str}-{row[0]}"] = row[1]
+    print(f"Pre-loading strategies from {npz_path}...")
+    fs = load_strategy(setup_dir)
+    id_to_abs = {v: k for k, v in fs.abs_str_to_id.items()}
+    strategies: Dict[str, np.ndarray] = {}
+    for k_int, row in fs.key_to_row.items():
+        k = int(k_int)
+        row = int(row)
+        hand_size = k & 0xF
+        last_bet = (k >> LAST_BET_SHIFT) & 0xFF
+        h_m1_id = (k >> H_M1_SHIFT) & 0xFF
+        h_m2_id = (k >> H_M2_SHIFT) & 0xFF
+        abs_id = k >> ABS_ID_SHIFT
+        key_str = f"{hand_size}-{last_bet}-"
+        if h_m1_id != ABSENT_CODE:
+            key_str += _HISTORY_CODE_STRS[h_m1_id] + "-"
+            if h_m2_id != ABSENT_CODE:
+                key_str += _HISTORY_CODE_STRS[h_m2_id] + "-"
+        key_str += id_to_abs[abs_id]
+        lo = int(fs.lower_action[row])
+        hi = int(fs.upper_action[row])
+        strategies[key_str] = fs.strategy[row, lo:hi + 1].astype(np.float64)
     print(f"Loaded {len(strategies)} strategy entries from {model_folder}.")
     return strategies
 
-def load_strategy_from_files(model_folder: str, key: str, hand_sizes: List[int], num_possible_actions: int) -> np.ndarray:
-    """
-    Loads a single strategy from a CSV file.
-    """
-    split_key = key.split('-')
-    setup_name = "_".join(str(x) for x in sorted(hand_sizes))
-    strategy_file_path = os.path.join(model_folder, 'outputs', setup_name, split_key[0], f"{split_key[1]}.csv")
-    if os.path.exists(strategy_file_path):
-        with open(strategy_file_path, 'r', encoding='utf-8') as f:
-            reader = csv.reader(f)
-            search_key = '-'.join(split_key[2:])
-            for row in reader:
-                if row and row[0] == search_key:
-                    return decode_probabilities(row[1])
-    strategy = np.zeros(num_possible_actions)
-    strategy[-1] = 1.0
-    return strategy
 
 def get_strategy(current_model: Model, key: str, hand_sizes: List[int], possible_actions: List[int]) -> np.ndarray:
-    """Helper to get a strategy from pre-loaded dict or from file."""
-    strategy = None
+    """Look up a strategy in the pre-loaded NPZ dict. Falls back to
+    check-100% when the key isn't present (matches the original
+    fallback behaviour from the CSV days; missing infosets weren't
+    stored, so checking is the recorded action there)."""
     num_actions = len(possible_actions)
-    if current_model.get('strategies') is not None:  # Check if pre-loaded
-        encoded_strategy = current_model['strategies'].get(key)
-        if encoded_strategy:
-            strategy = decode_probabilities(encoded_strategy)
-    else:  # Fallback to file loading
-        strategy = load_strategy_from_files(current_model['folder'], key, hand_sizes, num_actions)
+    strategy = None
+    if current_model.get('strategies') is not None:
+        arr = current_model['strategies'].get(key)
+        if arr is not None:
+            strategy = np.asarray(arr, dtype=np.float64)
 
     if strategy is None:
         strategy = np.zeros(num_actions)
@@ -157,9 +165,9 @@ def get_strategy(current_model: Model, key: str, hand_sizes: List[int], possible
         padded = np.zeros(num_actions)
         padded[:len(strategy)] = strategy
         strategy = padded
-    if sum(strategy) == 0:
+    if strategy.sum() == 0:
         strategy[-1] = 1.0
-    return strategy / sum(strategy)
+    return strategy / strategy.sum()
 
 def get_h2h_expected_value(models: tuple, hands: tuple, history: List[int], active_player_idx: int, hand_sizes: List[int], existence_array: np.ndarray) -> float:
     """
@@ -263,7 +271,10 @@ def main() -> None:
     g2.add_argument("--model2", type=str, help="Archive tag (folder under cfr_ai/archive/) or 'current' for the working tree.")
     g2.add_argument("--model2-folder", type=str, help="Explicit path to the second model's folder (Model B).")
     parser.add_argument("--num-deals", type=int, default=1000, help="Number of random card deals to simulate.")
-    parser.add_argument("--preload-strategies", action="store_true", help="Pre-load strategies for faster, memory-intensive evaluation.")
+    # Strategies are always pre-loaded now (NPZ load is fast and there is
+    # no per-row fallback path). Flag retained for backwards compatibility
+    # of CLI invocations but is a no-op.
+    parser.add_argument("--preload-strategies", action="store_true", help="(deprecated; always on now) Pre-load strategies into memory.")
     parser.add_argument("--monte-carlo", action="store_true", help="Use fast Monte Carlo playouts instead of full tree traversal.")
     args = parser.parse_args()
 
@@ -290,9 +301,9 @@ def main() -> None:
             sys.exit(1)
     model_A, model_B = models_list[0], models_list[1]
 
-    if args.preload_strategies:
-        model_A['strategies'] = preload_all_strategies(model_A['folder'], hand_sizes)
-        model_B['strategies'] = preload_all_strategies(model_B['folder'], hand_sizes)
+    # Always preload now; the NPZ loader is fast and there's no per-row fallback.
+    model_A['strategies'] = preload_all_strategies(model_A['folder'], hand_sizes)
+    model_B['strategies'] = preload_all_strategies(model_B['folder'], hand_sizes)
 
     if args.monte_carlo:
         print(f"\nGenerating {args.num_deals} random deals (with replacement)...")
