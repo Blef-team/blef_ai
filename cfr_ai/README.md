@@ -316,15 +316,45 @@ Using the game values noted down for each setup in the `summary_of_all_runs.csv`
 
 ## Deployment
 
-The AI is meant to be deployed alongside the [game engine](https://github.com/Blef-team/blef_game_engine). The integration has two components:
-* the dispatcher lambda. The code in dispatcher/lambda_function.py needs to be copied over to the `blef-aiagent-cfr` lambda. This can be done through the UI or by zipping the function and executing `aws lambda update-function-code --function-name blef-aiagent-cfr --zip-file fileb://cfr_ai/dispatcher/lambda_function.zip`; and
-* a collection of agents, each serving a particular setup.
+The AI is deployed as a single Lambda function backed by a container image stored in Amazon ECR. The image bundles `cfr_ai/` (code) and all 66 `strategy.npz` + `strategy.abs.json` payloads.
 
-To create all necessary worker lambdas for the first time, use the `create_lambas` script in the deployment folder (needs configuring)
+`cfr_ai/agent.py:_get_strategy(hand_sizes)` loads the relevant `strategy.npz` lazily on first use per warm container, caches the resulting `FlatStrategy` in a module-level **bounded LRU**, then resolves every subsequent call by direct composite-key lookup. The cache is bounded because each loaded `FlatStrategy` for a big setup occupies ~300 MB of RAM (rows × fp32 probs + numba typed.Dict + ancillary arrays); without an LRU, a long-lived warm container that serves many distinct setups would OOM. Default cache size is 2 entries, safe for a 1024 MB Lambda; tune via the `CFR_STRATEGY_CACHE_SIZE` env var if the function is on a larger memory tier.
 
-To deploy an individual setup, you need to run the `deploy` script. For example, for the 1 vs 1 card setup, run `python -m cfr_ai.deployment.deploy --hand-sizes 1 1`
+Files involved:
+* `cfr_ai/lambda_function.py` — Lambda entry point. Parses the game event, calls `agent.determine_action`, invokes `blef-play` asynchronously.
+* `cfr_ai/deployment/Dockerfile.lambda` — `public.ecr.aws/lambda/python:3.12` base + the four pip deps (numpy, numba, llvmlite, tqdm) + `cfr_ai/` + `lambda_function.py`.
+* `cfr_ai/deployment/requirements.txt` — pinned versions for the Docker build.
+* `cfr_ai/scripts/stage_for_docker.py` — assembles the build context (excludes `analysis/`, `archive/`, `deployment/`, `__pycache__`, `diagnostic.npz`, tracking CSVs, visualisation PNGs, `_bench_formats/`). Cross-platform; no rsync needed.
+* `cfr_ai/scripts/deploy_lambda.sh` — orchestrates build → ECR login → ECR push → `update-function-code`. Idempotently creates the ECR repo. Skip the Lambda update with `SKIP_LAMBDA_UPDATE=1`.
+* `cfr_ai/scripts/create_lambda.sh` — first-deploy only; `aws lambda create-function` with the right architecture / memory / timeout. Subsequent updates use `deploy_lambda.sh`.
 
-To deploy all setups at once, run `python -m cfr_ai.deployment.deploy_all`
+### First-time setup
+
+```bash
+export ACCT=<account-id> REGION=<region> PROFILE=<aws-cli-profile>
+export ROLE_ARN=<execution-role-arn>
+# Build + push to ECR (creates the repo if missing):
+SKIP_LAMBDA_UPDATE=1 bash cfr_ai/scripts/deploy_lambda.sh
+# Create the function from the pushed image:
+bash cfr_ai/scripts/create_lambda.sh
+```
+
+The ECR repo needs a resource policy granting `lambda.amazonaws.com` permission to pull (`ecr:BatchGetImage`, `ecr:GetDownloadUrlForLayer`) for first-time function creation in the account. This is set once per repo by an admin via the ECR Console or `aws ecr set-repository-policy`.
+
+### Subsequent deploys
+
+```bash
+export ACCT=<account-id> REGION=<region> PROFILE=<aws-cli-profile>
+bash cfr_ai/scripts/deploy_lambda.sh
+```
+
+### Cold-start expectations
+
+A fresh container pays ~6s of cold-start cost on the largest setups: ~1.5s for the numba import + ~4.5s to load the biggest `strategy.npz` and build the numba `typed.Dict`. Subsequent calls on the warm container are sub-millisecond (cached `FlatStrategy`).
+
+### Architecture choice
+
+The image is built for `linux/arm64`. On an x86 host this means QEMU emulation during `docker build`, which slows the build but not the runtime.
 
 ## Performance
 

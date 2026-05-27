@@ -11,7 +11,8 @@ Public entry point: `determine_action(game_state)`.
 
 import os
 import random
-from typing import Dict, Tuple, Optional
+from collections import OrderedDict
+from typing import Tuple, Optional
 
 import numpy as np
 
@@ -25,8 +26,17 @@ from cfr_ai.trainer import (
 )
 
 
-# Module-level caches: warm Lambda containers reuse these across calls.
-_strategy_cache: Dict[Tuple[int, ...], object] = {}
+# Module-level LRU strategy cache, shared across calls on a warm Lambda
+# container. Size is bounded because each loaded `FlatStrategy` for a large
+# setup occupies ~300 MB of RAM (700K rows of fp32 probs + numba typed.Dict +
+# ancillary arrays) and a 1 GB Lambda can only hold a couple of them on top
+# of the ~250 MB used by numba / numpy / the rest of the runtime.
+#
+# Default 2 is the safe value for a 1024 MB Lambda; bump via the env var
+# CFR_STRATEGY_CACHE_SIZE if running on a larger memory tier (e.g. set to 5
+# for a 2048 MB Lambda, 10 for 4096 MB).
+_STRATEGY_CACHE_SIZE = int(os.environ.get("CFR_STRATEGY_CACHE_SIZE", "2"))
+_strategy_cache: "OrderedDict[Tuple[int, ...], object]" = OrderedDict()
 
 
 def _resolve_setup_dir(hand_sizes: Tuple[int, ...]) -> str:
@@ -47,11 +57,22 @@ def _resolve_setup_dir(hand_sizes: Tuple[int, ...]) -> str:
 
 
 def _get_strategy(hand_sizes: Tuple[int, ...]):
-    """Load (or fetch from cache) the FlatStrategy for `hand_sizes`."""
-    if hand_sizes not in _strategy_cache:
-        setup_dir = _resolve_setup_dir(hand_sizes)
-        _strategy_cache[hand_sizes] = load_strategy(setup_dir)
-    return _strategy_cache[hand_sizes]
+    """Load (or fetch from cache) the FlatStrategy for `hand_sizes`.
+
+    LRU: a hit moves the entry to the most-recent end; a miss loads from disk
+    and evicts the least-recently-used entry once the cache is over capacity.
+    Eviction drops the only reference to the evicted `FlatStrategy`, so its
+    numpy arrays and numba typed.Dict become garbage-collectable.
+    """
+    if hand_sizes in _strategy_cache:
+        _strategy_cache.move_to_end(hand_sizes)
+        return _strategy_cache[hand_sizes]
+    setup_dir = _resolve_setup_dir(hand_sizes)
+    fs = load_strategy(setup_dir)
+    _strategy_cache[hand_sizes] = fs
+    while len(_strategy_cache) > _STRATEGY_CACHE_SIZE:
+        _strategy_cache.popitem(last=False)
+    return fs
 
 
 def _compose_key(hand_size: int, last_bet: int,

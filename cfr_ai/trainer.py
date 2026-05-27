@@ -70,7 +70,7 @@ _HISTORY_CODE_ID, _HISTORY_CODE_STRS = _build_history_code_id_matrix()
 # JIT'd recursive traversal
 # ---------------------------------------------------------------------------
 
-@njit(cache=True)
+@njit(cache=False)
 def _traverse_jit(
     history_buf, hist_len, reach, active, traverser, prune_feast,
     existence, iter_i,
@@ -619,6 +619,6 @@ class Trainer:
         }
 
 
-@njit(cache=True)
+@njit(cache=False)
 def _seed_numba(seed):
     np.random.seed(seed)

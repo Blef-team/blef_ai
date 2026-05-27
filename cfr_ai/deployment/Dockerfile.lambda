@@ -1,0 +1,17 @@
+FROM public.ecr.aws/lambda/python:3.12
+# Python 3.12 (not 3.13): numba 0.60 + numpy 1.26 don't ship pre-built arm64
+# wheels for cp313, and the Lambda base image has no C compiler available to
+# build from source. 3.12 has wheels for both. Also matches the existing CFR
+# worker Lambdas' runtime.
+
+ENV CPUINFO_LOG_LEVEL=error
+
+COPY requirements.txt ${LAMBDA_TASK_ROOT}/requirements.txt
+RUN pip install --upgrade pip \
+    && pip install -r ${LAMBDA_TASK_ROOT}/requirements.txt --target "${LAMBDA_TASK_ROOT}" \
+    && rm -rf /root/.cache/pip
+
+COPY cfr_ai ${LAMBDA_TASK_ROOT}/cfr_ai
+COPY lambda_function.py ${LAMBDA_TASK_ROOT}/lambda_function.py
+
+CMD ["lambda_function.lambda_handler"]
