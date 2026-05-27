@@ -1,576 +1,773 @@
-"""Local Best Response (LBR) exploitability for the Blef CFR AI.
+"""LBR (Local Best Response) exploitability for the Blef CFR AI.
 
-LBR is a depth-bounded best response: at each LBR decision point, LBR considers
-every action and picks the one with highest expected value, evaluating the
-continuation by recursing LBR-vs-CFR up to `depth` more LBR decisions and then
-falling back to CFR-vs-CFR rollout. With depth -> infinity (in practice, a number
-larger than any possible round depth), LBR equals the exact best response, which
-gives us a verification handle against `exploitability.py`.
+The CFR strategy is loaded as a flat-array `FlatStrategy` keyed by a
+composite int64 (same encoding as `trainer.py`); the recursive value
+functions are JIT-compiled with numba. The Python wrapper handles disk
+I/O, LBR-hand enumeration, and belief sampling; the JIT handles the
+per-(LBR-hand, S1, S2) game-tree walk.
 
-Per-LBR-hand expected value is computed analytically by tracking a reach-probability
-vector over the opponent's concrete hands. The CFR strategy is looked up via the existing abstraction,
-but LBR itself is unrestricted.
+Composite key layout (same as `trainer.py`):
+    [abs_id : 36][h_m2 : 8][h_m1 : 8][last_bet : 8][hand_size : 4]
 """
 
-import argparse
 import csv
 import itertools
 import os
-import sys
 import time
+from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
 import numpy as np
+from numba import njit, types
+from numba.typed import Dict as NbDict
 from tqdm import tqdm
 
-from cfr_ai.game import Game, BlefCards
-from cfr_ai.information_set import (
-    make_key, get_hand_abstraction, get_possible_actions
+from cfr_ai.game import Game
+from cfr_ai.information_set import get_hand_abstraction, history_codes
+from cfr_ai.trainer import (
+    LAST_BET_SHIFT, H_M1_SHIFT, H_M2_SHIFT, ABS_ID_SHIFT, ABSENT_CODE,
+    MAX_DEPTH, _HISTORY_CODE_ID, _HISTORY_CODE_STRS,
 )
-CFRStrategy = Dict[str, np.ndarray]
-INF_DEPTH = 10**6
 
 
-def load_cfr_strategy(hand_sizes: List[int]) -> Tuple[CFRStrategy, int]:
-    """Load saved strategies from disk for a setup and renormalise each array
-    to sum to 1.
+# Inverse of _HISTORY_CODE_STRS: code-string -> uint8 id. Built once.
+_STR_TO_CODE_ID: Dict[str, int] = {s: i for i, s in enumerate(_HISTORY_CODE_STRS)}
 
-    Reads `cfr_ai/outputs/<setup>/strategy.npz` (the canonical format),
-    then converts to the legacy `Dict[str, np.ndarray]` form this LBR
-    reference implementation consumes. The numba LBR
-    (`lbr_numba.lbr_exploitability_numba`) skips this conversion and uses
-    the composite-int64 keyed FlatStrategy directly.
+
+@dataclass
+class FlatStrategy:
+    """Read-only CFR strategy in flat-array form. Only non-checking infosets
+    are stored; missing keys default to check-100% via `_default_strategy`."""
+    key_to_row: object  # numba.typed.Dict[int64, int64]
+    strategy: np.ndarray         # float32[n_rows, 89] — padded to width 89
+    lower_action: np.ndarray     # int16[n_rows]
+    upper_action: np.ndarray     # int16[n_rows]
+    abs_str_to_id: Dict[str, int]  # for matching new opp hands' abstractions
+    min_bet: int
+
+
+# ---------------------------------------------------------------------------
+# Loader
+# ---------------------------------------------------------------------------
+
+def _split_suffix(suffix: str) -> Tuple[int, int, str]:
+    """Split a strategy-file key suffix into (h_m1_id, h_m2_id, abs_str).
+
+    Suffix structure as emitted by trainer/agent is one of:
+      - "abs"              -> 0 history codes
+      - "c1-abs"           -> 1 history code
+      - "c1-c2-abs"        -> 2 history codes
+    Where c1/c2 come from `_STR_TO_CODE_ID` (history-code strings).
+
+    Complication: the hand-abstraction string for rounds 6+ can contain
+    hyphens (e.g. negative numbers like "-9.0 -7.0"), so a naive
+    `suffix.split('-')` mis-attributes leading abs tokens as history
+    codes. The robust rule is:
+      1. If suffix has no '-', it's the abs.
+      2. If suffix starts with '-' (abs starts with a minus), 0 codes.
+      3. Else peel off up to 2 leading tokens that are valid non-empty
+         history codes; the remainder is the abs.
+
+    The empty string is in `_STR_TO_CODE_ID` (history.csv has empty
+    placeholder cells) but is never a real code in a key.
     """
+    if "-" not in suffix:
+        return ABSENT_CODE, ABSENT_CODE, suffix
+    if suffix.startswith("-"):
+        return ABSENT_CODE, ABSENT_CODE, suffix
+
+    first_dash = suffix.index("-")
+    tok1 = suffix[:first_dash]
+    if not tok1 or tok1 not in _STR_TO_CODE_ID:
+        return ABSENT_CODE, ABSENT_CODE, suffix
+
+    rest = suffix[first_dash + 1:]
+    if "-" not in rest or rest.startswith("-"):
+        return _STR_TO_CODE_ID[tok1], ABSENT_CODE, rest
+
+    second_dash = rest.index("-")
+    tok2 = rest[:second_dash]
+    if not tok2 or tok2 not in _STR_TO_CODE_ID:
+        return _STR_TO_CODE_ID[tok1], ABSENT_CODE, rest
+
+    abs_str = rest[second_dash + 1:]
+    return _STR_TO_CODE_ID[tok1], _STR_TO_CODE_ID[tok2], abs_str
+
+
+def _parse_key_to_composite(
+    key_str: str,
+    hand_size: int,
+    last_bet: int,
+    abs_str_to_id: Dict[str, int],
+) -> int:
+    """Parse a strategy-file key suffix (everything after 'hs-lb-') into
+    a composite int64 key. See `_split_suffix` for the parse rule."""
+    h_m1_id, h_m2_id, abs_str = _split_suffix(key_str)
+    abs_id = abs_str_to_id.get(abs_str)
+    if abs_id is None:
+        abs_id = len(abs_str_to_id)
+        abs_str_to_id[abs_str] = abs_id
+    return (hand_size
+            | (last_bet << LAST_BET_SHIFT)
+            | (h_m1_id << H_M1_SHIFT)
+            | (h_m2_id << H_M2_SHIFT)
+            | (abs_id << ABS_ID_SHIFT))
+
+
+def load_flat_strategy(
+    hand_sizes: List[int],
+    setup_dir: str = None,
+) -> FlatStrategy:
+    """Load the CFR strategy for `hand_sizes` from disk into a `FlatStrategy`.
+    Default path is `cfr_ai/outputs/<setup>/strategy.npz`."""
     from cfr_ai.strategy_io import load_strategy
-    from cfr_ai.trainer_numba import (
-        LAST_BET_SHIFT, H_M1_SHIFT, H_M2_SHIFT, ABS_ID_SHIFT, ABSENT_CODE,
-        _HISTORY_CODE_STRS,
-    )
-
-    setup_dir = os.path.join("cfr_ai", "outputs",
-                             "_".join(str(x) for x in hand_sizes))
-    fs = load_strategy(setup_dir)
-    id_to_abs = {v: k for k, v in fs.abs_str_to_id.items()}
-
-    strategies: CFRStrategy = {}
-    for k_int, row in fs.key_to_row.items():
-        k = int(k_int)
-        row = int(row)
-        hand_size = k & 0xF
-        last_bet = (k >> LAST_BET_SHIFT) & 0xFF
-        h_m1_id = (k >> H_M1_SHIFT) & 0xFF
-        h_m2_id = (k >> H_M2_SHIFT) & 0xFF
-        abs_id = k >> ABS_ID_SHIFT
-
-        key_str = f"{hand_size}-{last_bet}-"
-        if h_m1_id != ABSENT_CODE:
-            key_str += _HISTORY_CODE_STRS[h_m1_id] + "-"
-            if h_m2_id != ABSENT_CODE:
-                key_str += _HISTORY_CODE_STRS[h_m2_id] + "-"
-        key_str += id_to_abs[abs_id]
-
-        lo = int(fs.lower_action[row])
-        hi = int(fs.upper_action[row])
-        arr = fs.strategy[row, lo:hi + 1].astype(np.float64)
-        s = arr.sum()
-        if s > 0:
-            arr = arr / s
-        strategies[key_str] = arr
-
-    return strategies, fs.min_bet
+    if setup_dir is None:
+        setup_dir = os.path.join("cfr_ai", "outputs",
+                                 "_".join(str(x) for x in hand_sizes))
+    return load_strategy(setup_dir)
 
 
-def _cfr_action_dist(
-    cfr_strategy: CFRStrategy,
+
+
+def intern_abstractions_for_hand(
     hand: List[int],
-    hand_abstractions: List[str],
-    history: List[int],
-    cfr_min_bet: int,
+    hand_sizes: List[int],
+    abs_str_to_id: Dict[str, int],
 ) -> np.ndarray:
-    """CFR's action distribution over `get_possible_actions(history, cfr_min_bet)`."""
-    n = len(get_possible_actions(history, cfr_min_bet))
-    key = make_key(hand, hand_abstractions, history, cfr_min_bet)
-    return _resolve_strategy(cfr_strategy.get(key), n)
-
-
-def _resolve_strategy(arr, n: int) -> np.ndarray:
-    """Coerce a loaded strategy array to length n, with check-100% default."""
-    if arr is None:
-        default = np.zeros(n)
-        default[-1] = 1.0
-        return default
-    if len(arr) < n:
-        padded = np.zeros(n)
-        padded[: len(arr)] = arr
-        return padded
-    if len(arr) > n:
-        arr = arr[:n]
-    if arr.sum() <= 0:
-        default = np.zeros(n)
-        default[-1] = 1.0
-        return default
-    return arr
-
-
-def _per_opp_strategies(
-    cfr_strategy: CFRStrategy,
-    opp_hands: List[List[int]],
-    opp_abstractions: List[List[str]],
-    history: List[int],
-    cfr_min_bet: int,
-    n_actions: int,
-) -> np.ndarray:
-    """Batched version: returns (N, n_actions) matrix of opp's per-hand CFR
-    distributions. Many opp hands share the same CFR strategy (since CFR keys
-    only by hand abstraction), so we group by abstraction and look up once per
-    group. Saves ~10-100x vs naive per-hand loop on deeper setups.
-    """
-    # Effective last_bet that make_key uses, recomputed once.
-    last_bet_eff = 88 if not history or history[-1] < cfr_min_bet else history[-1]
-    # Group opp indices by the part of make_key that varies across opp hands:
-    # just hand_abstractions[last_bet_eff]. The fixed parts (hand_size, last_bet,
-    # history codes) are the same for all opp hands at this node.
-    groups: Dict[str, List[int]] = {}
-    for i, abs_list in enumerate(opp_abstractions):
-        abs_key = abs_list[last_bet_eff]
-        if abs_key not in groups:
-            groups[abs_key] = []
-        groups[abs_key].append(i)
-    out = np.empty((len(opp_hands), n_actions), dtype=np.float64)
-    for abs_key, idxs in groups.items():
-        # One lookup per abstraction; broadcast to all opp hands sharing it.
-        i0 = idxs[0]
-        key = make_key(opp_hands[i0], opp_abstractions[i0], history, cfr_min_bet)
-        strategy = _resolve_strategy(cfr_strategy.get(key), n_actions)
-        out[idxs] = strategy
+    """Build the (89,) int64 array of abstraction ids for a given hand.
+    Unknown abstraction strings get assigned a new id — but we mark them
+    with a high sentinel so the JIT knows the corresponding composite key
+    can never match any stored row (i.e., it's a check-100% infoset)."""
+    strings = get_hand_abstraction(hand, hand_sizes)
+    out = np.empty(89, dtype=np.int64)
+    a2i = abs_str_to_id
+    for lb in range(89):
+        s = strings[lb]
+        i = a2i.get(s)
+        if i is None:
+            # New abstraction not in the trained strategy — assign a fresh
+            # high id. JIT lookups for this key will miss → default policy.
+            i = len(a2i)
+            a2i[s] = i
+        out[lb] = i
     return out
 
 
-def _cfr_vs_cfr_value(
-    history: List[int],
-    lbr_hand: List[int],
-    lbr_abstractions: List[str],
-    opp_hands: List[List[int]],
-    opp_abstractions: List[List[str]],
-    reach_probs: np.ndarray,
-    cfr_strategy: CFRStrategy,
+def intern_abstractions_for_hands(
+    hands: List[List[int]],
     hand_sizes: List[int],
-    cfr_min_bet: int,
-    lbr_is_active: bool,
-    existence_table: np.ndarray,
-) -> float:
-    """E[LBR's payoff | both sides play CFR from this state]."""
-    if Game.check_finish(history):
-        bet = history[-2]
-        wins = np.where(existence_table[:, bet], 1.0, -1.0)
-        sign = 1.0 if lbr_is_active else -1.0
-        return sign * np.dot(wins, reach_probs) / reach_probs.sum()
+    abs_str_to_id: Dict[str, int],
+) -> np.ndarray:
+    """Vectorised: build (N, 89) int64 array of abstraction ids."""
+    n = len(hands)
+    out = np.empty((n, 89), dtype=np.int64)
+    for i, h in enumerate(hands):
+        out[i] = intern_abstractions_for_hand(h, hand_sizes, abs_str_to_id)
+    return out
 
-    active_mask = reach_probs > 0
-    if not active_mask.all():
-        reach_probs = reach_probs[active_mask]
-        opp_hands = [h for i, h in enumerate(opp_hands) if active_mask[i]]
-        opp_abstractions = [a for i, a in enumerate(opp_abstractions) if active_mask[i]]
-        existence_table = existence_table[active_mask]
+
+# ---------------------------------------------------------------------------
+# JIT helpers
+# ---------------------------------------------------------------------------
+
+@njit(cache=False)
+def _composite_key(hand_size, last_bet, h_m1_id, h_m2_id, abs_id):
+    return (hand_size
+            | (last_bet << LAST_BET_SHIFT)
+            | (h_m1_id << H_M1_SHIFT)
+            | (h_m2_id << H_M2_SHIFT)
+            | (abs_id << ABS_ID_SHIFT))
+
+
+@njit(cache=False)
+def _history_to_key_parts(history_buf, hist_len, min_bet, history_code_id):
+    """Return (last_bet, h_m1_id, h_m2_id) for the current history."""
+    if hist_len == 0 or history_buf[hist_len - 1] < min_bet:
+        return 88, ABSENT_CODE, ABSENT_CODE
+    last_bet = history_buf[hist_len - 1]
+    if hist_len > 1 and history_buf[hist_len - 2] >= min_bet:
+        h_m1_id = history_code_id[last_bet, history_buf[hist_len - 2]]
+        if hist_len > 2 and history_buf[hist_len - 3] >= min_bet:
+            h_m2_id = history_code_id[last_bet, history_buf[hist_len - 3]]
+        else:
+            h_m2_id = ABSENT_CODE
+    else:
+        h_m1_id = ABSENT_CODE
+        h_m2_id = ABSENT_CODE
+    return last_bet, h_m1_id, h_m2_id
+
+
+@njit(cache=False)
+def _lookup_by_key(
+    key_to_row, strategy, lower_action, upper_action,
+    key, n_legal_actions, out,
+):
+    """Write the strategy for one infoset (by composite key) into
+    out[0:n_legal_actions]. Stored strategies are normalised at load time
+    (incl. the all-zero -> check-100% remap), so no per-lookup renormalise.
+    If the key is missing, writes the check-100% default."""
+    k64 = np.int64(key)
+    if k64 not in key_to_row:
+        for k in range(n_legal_actions - 1):
+            out[k] = 0.0
+        out[n_legal_actions - 1] = 1.0
+        return
+    row = key_to_row[k64]
+    lo = lower_action[row]
+    hi = upper_action[row]
+    stored_w = hi - lo + 1
+    w = stored_w if stored_w < n_legal_actions else n_legal_actions
+    for k in range(w):
+        out[k] = strategy[row, lo + k]
+    for k in range(w, n_legal_actions):
+        out[k] = 0.0
+
+
+@njit(cache=False)
+def _lookup_one_strategy(
+    key_to_row, strategy, lower_action, upper_action,
+    hand_size, last_bet, h_m1_id, h_m2_id, abs_id,
+    min_bet, n_legal_actions, out,
+):
+    """Compose the key and delegate to _lookup_by_key. Used at LBR-active
+    nodes where there's exactly one lookup per call (no base_key reuse)."""
+    key = _composite_key(hand_size, last_bet, h_m1_id, h_m2_id, abs_id)
+    _lookup_by_key(
+        key_to_row, strategy, lower_action, upper_action,
+        key, n_legal_actions, out,
+    )
+
+
+@njit(cache=False, inline='always')
+def _opp_turn_lookups(
+    pd, opp_abs_ids, reach, last_bet, n_opp, n_actions,
+    base_key,
+    key_to_row, strategy, lower_action, upper_action,
+):
+    """Compute pd[n, :n_actions] = reach[n] * strategy(opp_n) for each opp
+    n, grouped by abstraction at this `last_bet`.
+
+    Many opp hands share the same abstraction at this node, so they share
+    a composite key, so they share a stored strategy. We do ONE main-dict
+    lookup per group instead of N. Within a group, subsequent active opps
+    are scaled from the first active opp in the group:
+        pd[first_n] holds reach[first_n] * strat,
+        pd[n]      = pd[first_n] * (reach[n] / reach[first_n])
+                   = reach[n] * strat.
+
+    Zero-reach opps are zeroed and don't contribute to the grouping.
+    Returns total_reach = sum of positive reaches.
+    """
+    first_with_abs = NbDict.empty(key_type=types.int64, value_type=types.int64)
+    total_reach = 0.0
+    for n in range(n_opp):
+        r = reach[n]
+        if r <= 0.0:
+            for k in range(n_actions):
+                pd[n, k] = 0.0
+            continue
+        total_reach += r
+        abs_id = opp_abs_ids[n, last_bet]
+        a64 = np.int64(abs_id)
+        if a64 in first_with_abs:
+            first_n = first_with_abs[a64]
+            inv = r / reach[first_n]
+            for k in range(n_actions):
+                pd[n, k] = pd[first_n, k] * inv
+        else:
+            first_with_abs[a64] = np.int64(n)
+            key = base_key | (abs_id << ABS_ID_SHIFT)
+            _lookup_by_key(
+                key_to_row, strategy, lower_action, upper_action,
+                key, n_actions, pd[n, :n_actions],
+            )
+            for k in range(n_actions):
+                pd[n, k] *= r
+    return total_reach
+
+
+# ---------------------------------------------------------------------------
+# JIT recursion: CFR-vs-CFR rollout
+# ---------------------------------------------------------------------------
+
+@njit(cache=False)
+def _cfr_vs_cfr_value_jit(
+    history_buf, hist_len,
+    lbr_hand_size, lbr_abs_ids,
+    opp_hand_size, opp_abs_ids, reach, exist,
+    key_to_row, strategy, lower_action, upper_action,
+    history_code_id, cfr_min_bet, lbr_is_active,
+    per_dists_buf, marginal_buf, new_reach_buf,
+):
+    """E[LBR's payoff | both sides play CFR from this state]."""
+    n_opp = reach.shape[0]
+
+    if hist_len > 0 and history_buf[hist_len - 1] == 88:
+        bet = history_buf[hist_len - 2]
+        sign = 1.0 if lbr_is_active else -1.0
+        total = 0.0
+        denom = 0.0
+        for n in range(n_opp):
+            if reach[n] > 0.0:
+                v = 1.0 if exist[n, bet] else -1.0
+                total += v * reach[n]
+                denom += reach[n]
+        if denom <= 0.0:
+            return 0.0
+        return sign * total / denom
+
+    last_bet, h_m1_id, h_m2_id = _history_to_key_parts(
+        history_buf, hist_len, cfr_min_bet, history_code_id)
+
+    if last_bet == 88:
+        lo, hi = cfr_min_bet, 87
+    else:
+        lo, hi = last_bet + 1, 88
+    n_actions = hi - lo + 1
 
     if lbr_is_active:
-        possible_actions = get_possible_actions(history, cfr_min_bet)
-        lbr_dist = _cfr_action_dist(cfr_strategy, lbr_hand, lbr_abstractions, history, cfr_min_bet)
+        abs_id = lbr_abs_ids[last_bet]
+        lbr_dist = np.empty(n_actions, dtype=np.float64)
+        _lookup_one_strategy(
+            key_to_row, strategy, lower_action, upper_action,
+            lbr_hand_size, last_bet, h_m1_id, h_m2_id, abs_id,
+            cfr_min_bet, n_actions, lbr_dist,
+        )
         total = 0.0
-        for i, a in enumerate(possible_actions):
-            if lbr_dist[i] > 0:
-                # Stack-style mutation: avoid allocating a fresh list per child.
-                history.append(a)
-                v = _cfr_vs_cfr_value(
-                    history, lbr_hand, lbr_abstractions, opp_hands, opp_abstractions,
-                    reach_probs, cfr_strategy, hand_sizes, cfr_min_bet, False, existence_table,
+        for i in range(n_actions):
+            if lbr_dist[i] > 0.0:
+                history_buf[hist_len] = lo + i
+                v = _cfr_vs_cfr_value_jit(
+                    history_buf, hist_len + 1,
+                    lbr_hand_size, lbr_abs_ids,
+                    opp_hand_size, opp_abs_ids, reach, exist,
+                    key_to_row, strategy, lower_action, upper_action,
+                    history_code_id, cfr_min_bet, False,
+                    per_dists_buf, marginal_buf, new_reach_buf,
                 )
-                history.pop()
                 total += lbr_dist[i] * v
         return total
-    else:
-        possible_actions = get_possible_actions(history, cfr_min_bet)
-        n = len(possible_actions)
-        per_hand_dists = _per_opp_strategies(
-            cfr_strategy, opp_hands, opp_abstractions, history, cfr_min_bet, n,
+
+    # Opp turn: marginalise over opp's action, with strategy lookups
+    # grouped by abstraction-at-this-last_bet to amortise dict hits.
+    pd = per_dists_buf[hist_len]
+    base_key = (opp_hand_size
+                | (last_bet << LAST_BET_SHIFT)
+                | (h_m1_id << H_M1_SHIFT)
+                | (h_m2_id << H_M2_SHIFT))
+    total_reach = _opp_turn_lookups(
+        pd, opp_abs_ids, reach, last_bet, n_opp, n_actions, base_key,
+        key_to_row, strategy, lower_action, upper_action,
+    )
+
+    # Marginal into pre-allocated buffer (zeroed in-place to avoid alloc).
+    marginal = marginal_buf[hist_len]
+    for k in range(n_actions):
+        marginal[k] = 0.0
+    for n in range(n_opp):
+        for k in range(n_actions):
+            marginal[k] += pd[n, k]
+
+    total = 0.0
+    new_reach = new_reach_buf[hist_len]
+    for k in range(n_actions):
+        if marginal[k] <= 0.0:
+            continue
+        p_action = marginal[k] / total_reach
+        inv = total_reach / marginal[k]
+        for n in range(n_opp):
+            new_reach[n] = pd[n, k] * inv
+        history_buf[hist_len] = lo + k
+        v = _cfr_vs_cfr_value_jit(
+            history_buf, hist_len + 1,
+            lbr_hand_size, lbr_abs_ids,
+            opp_hand_size, opp_abs_ids, new_reach[:n_opp], exist,
+            key_to_row, strategy, lower_action, upper_action,
+            history_code_id, cfr_min_bet, True,
+            per_dists_buf, marginal_buf, new_reach_buf,
         )
-        joint = reach_probs[:, None] * per_hand_dists
-        marginal = joint.sum(axis=0)
-        total_reach = reach_probs.sum()
-        total = 0.0
-        for i, a in enumerate(possible_actions):
-            if marginal[i] > 0:
-                p_action = marginal[i] / total_reach
-                new_reach = joint[:, i] / marginal[i] * total_reach
-                history.append(a)
-                v = _cfr_vs_cfr_value(
-                    history, lbr_hand, lbr_abstractions, opp_hands, opp_abstractions,
-                    new_reach, cfr_strategy, hand_sizes, cfr_min_bet, True, existence_table,
-                )
-                history.pop()
-                total += p_action * v
-        return total
+        total += p_action * v
+    return total
 
 
-def _lbr_value(
-    history: List[int],
-    lbr_hand: List[int],
-    lbr_abstractions: List[str],
-    opp_hands: List[List[int]],
-    opp_abstractions: List[List[str]],
-    reach_probs: np.ndarray,
-    cfr_strategy: CFRStrategy,
-    hand_sizes: List[int],
-    cfr_min_bet: int,
-    lbr_is_active: bool,
-    existence_table: np.ndarray,
-    depth: int,
-) -> float:
-    """E[LBR's payoff | LBR plays depth-d lookahead, CFR plays its strategy]."""
-    if Game.check_finish(history):
-        bet = history[-2]
-        wins = np.where(existence_table[:, bet], 1.0, -1.0)
+# ---------------------------------------------------------------------------
+# JIT recursion: single-sample LBR (action selection pass of DS)
+# ---------------------------------------------------------------------------
+
+@njit(cache=False)
+def _lbr_value_jit(
+    history_buf, hist_len,
+    lbr_hand_size, lbr_abs_ids,
+    opp_hand_size, opp_abs_ids, reach, exist,
+    key_to_row, strategy, lower_action, upper_action,
+    history_code_id, cfr_min_bet, lbr_is_active, depth,
+    per_dists_buf, marginal_buf, new_reach_buf,
+):
+    n_opp = reach.shape[0]
+    if hist_len > 0 and history_buf[hist_len - 1] == 88:
+        bet = history_buf[hist_len - 2]
         sign = 1.0 if lbr_is_active else -1.0
-        return sign * np.dot(wins, reach_probs) / reach_probs.sum()
+        total = 0.0
+        denom = 0.0
+        for n in range(n_opp):
+            if reach[n] > 0.0:
+                v = 1.0 if exist[n, bet] else -1.0
+                total += v * reach[n]
+                denom += reach[n]
+        if denom <= 0.0:
+            return 0.0
+        return sign * total / denom
 
-    active_mask = reach_probs > 0
-    if not active_mask.all():
-        reach_probs = reach_probs[active_mask]
-        opp_hands = [h for i, h in enumerate(opp_hands) if active_mask[i]]
-        opp_abstractions = [a for i, a in enumerate(opp_abstractions) if active_mask[i]]
-        existence_table = existence_table[active_mask]
+    last_bet, h_m1_id, h_m2_id = _history_to_key_parts(
+        history_buf, hist_len, cfr_min_bet, history_code_id)
 
     if lbr_is_active:
-        # depth K means "LBR makes K optimised decisions"; K=0 means LBR plays CFR.
         if depth <= 0:
-            return _cfr_vs_cfr_value(
-                history, lbr_hand, lbr_abstractions, opp_hands, opp_abstractions,
-                reach_probs, cfr_strategy, hand_sizes, cfr_min_bet, True, existence_table,
+            return _cfr_vs_cfr_value_jit(
+                history_buf, hist_len,
+                lbr_hand_size, lbr_abs_ids,
+                opp_hand_size, opp_abs_ids, reach, exist,
+                key_to_row, strategy, lower_action, upper_action,
+                history_code_id, cfr_min_bet, True,
+                per_dists_buf, marginal_buf, new_reach_buf,
             )
-        # LBR is unrestricted (min_bet=0).
-        possible_actions = get_possible_actions(history, min_bet=0)
-        best = -np.inf
-        for a in possible_actions:
-            history.append(a)
-            v = _lbr_value(
-                history, lbr_hand, lbr_abstractions, opp_hands, opp_abstractions,
-                reach_probs, cfr_strategy, hand_sizes, cfr_min_bet, False,
-                existence_table, depth - 1,
+        # LBR is unrestricted: min_bet=0 for its own choices.
+        if last_bet == 88:
+            lo, hi = 0, 87
+        else:
+            lo, hi = last_bet + 1, 88
+        n_actions = hi - lo + 1
+        best = -1e18
+        for i in range(n_actions):
+            history_buf[hist_len] = lo + i
+            v = _lbr_value_jit(
+                history_buf, hist_len + 1,
+                lbr_hand_size, lbr_abs_ids,
+                opp_hand_size, opp_abs_ids, reach, exist,
+                key_to_row, strategy, lower_action, upper_action,
+                history_code_id, cfr_min_bet, False, depth - 1,
+                per_dists_buf, marginal_buf, new_reach_buf,
             )
-            history.pop()
             if v > best:
                 best = v
         return best
+
+    if last_bet == 88:
+        lo, hi = cfr_min_bet, 87
     else:
-        possible_actions = get_possible_actions(history, cfr_min_bet)
-        n = len(possible_actions)
-        per_hand_dists = _per_opp_strategies(
-            cfr_strategy, opp_hands, opp_abstractions, history, cfr_min_bet, n,
+        lo, hi = last_bet + 1, 88
+    n_actions = hi - lo + 1
+
+    # Opp turn: grouped lookups (see _opp_turn_lookups).
+    pd = per_dists_buf[hist_len]
+    base_key = (opp_hand_size
+                | (last_bet << LAST_BET_SHIFT)
+                | (h_m1_id << H_M1_SHIFT)
+                | (h_m2_id << H_M2_SHIFT))
+    total_reach = _opp_turn_lookups(
+        pd, opp_abs_ids, reach, last_bet, n_opp, n_actions, base_key,
+        key_to_row, strategy, lower_action, upper_action,
+    )
+
+    marginal = marginal_buf[hist_len]
+    for k in range(n_actions):
+        marginal[k] = 0.0
+    for n in range(n_opp):
+        for k in range(n_actions):
+            marginal[k] += pd[n, k]
+
+    total = 0.0
+    new_reach = new_reach_buf[hist_len]
+    for k in range(n_actions):
+        if marginal[k] <= 0.0:
+            continue
+        p_action = marginal[k] / total_reach
+        inv = total_reach / marginal[k]
+        for n in range(n_opp):
+            new_reach[n] = pd[n, k] * inv
+        history_buf[hist_len] = lo + k
+        v = _lbr_value_jit(
+            history_buf, hist_len + 1,
+            lbr_hand_size, lbr_abs_ids,
+            opp_hand_size, opp_abs_ids, new_reach[:n_opp], exist,
+            key_to_row, strategy, lower_action, upper_action,
+            history_code_id, cfr_min_bet, True, depth,
+            per_dists_buf, marginal_buf, new_reach_buf,
         )
-        joint = reach_probs[:, None] * per_hand_dists
-        marginal = joint.sum(axis=0)
-        total_reach = reach_probs.sum()
-        total = 0.0
-        for i, a in enumerate(possible_actions):
-            if marginal[i] > 0:
-                p_action = marginal[i] / total_reach
-                new_reach = joint[:, i] / marginal[i] * total_reach
-                history.append(a)
-                v = _lbr_value(
-                    history, lbr_hand, lbr_abstractions, opp_hands, opp_abstractions,
-                    new_reach, cfr_strategy, hand_sizes, cfr_min_bet, True,
-                    existence_table, depth,
-                )
-                history.pop()
-                total += p_action * v
-        return total
+        total += p_action * v
+    return total
 
 
-def _lbr_value_ds(
-    history, lbr_hand, lbr_abstractions,
-    opp_hands_S1, opp_abs_S1, reach_S1, exist_S1,
-    opp_hands_S2, opp_abs_S2, reach_S2, exist_S2,
-    cfr_strategy, hand_sizes, cfr_min_bet, lbr_is_active, depth,
+# ---------------------------------------------------------------------------
+# JIT recursion: double-sampled LBR
+# ---------------------------------------------------------------------------
+
+@njit(cache=False)
+def _lbr_value_ds_jit(
+    history_buf, hist_len,
+    lbr_hand_size, lbr_abs_ids,
+    opp_hand_size,
+    opp_abs_ids_S1, reach_S1, exist_S1,
+    opp_abs_ids_S2, reach_S2, exist_S2,
+    key_to_row, strategy, lower_action, upper_action,
+    history_code_id, cfr_min_bet, lbr_is_active, depth,
+    per_dists_buf_S1, per_dists_buf_S2,
+    marginal_buf_S1, marginal_buf_S2,
+    new_reach_buf_S1, new_reach_buf_S2,
 ):
-    """Double-sampled LBR value: S1 is used for LBR's argmax (action selection),
-    S2 (independent) is used for valuation. Removes the winner's-curse bias of
-    single-sample LBR. Returns LBR's value from LBR's perspective, under S2."""
-    if Game.check_finish(history):
-        bet = history[-2]
-        wins = np.where(exist_S2[:, bet], 1.0, -1.0)
+    n_S1 = reach_S1.shape[0]
+    n_S2 = reach_S2.shape[0]
+    if hist_len > 0 and history_buf[hist_len - 1] == 88:
+        bet = history_buf[hist_len - 2]
         sign = 1.0 if lbr_is_active else -1.0
-        return sign * np.dot(wins, reach_S2) / reach_S2.sum()
+        total = 0.0
+        denom = 0.0
+        for n in range(n_S2):
+            if reach_S2[n] > 0.0:
+                v = 1.0 if exist_S2[n, bet] else -1.0
+                total += v * reach_S2[n]
+                denom += reach_S2[n]
+        if denom <= 0.0:
+            return 0.0
+        return sign * total / denom
 
-    mask_S1 = reach_S1 > 0
-    if not mask_S1.all():
-        reach_S1 = reach_S1[mask_S1]
-        opp_hands_S1 = [h for i, h in enumerate(opp_hands_S1) if mask_S1[i]]
-        opp_abs_S1 = [a for i, a in enumerate(opp_abs_S1) if mask_S1[i]]
-        exist_S1 = exist_S1[mask_S1]
-    mask_S2 = reach_S2 > 0
-    if not mask_S2.all():
-        reach_S2 = reach_S2[mask_S2]
-        opp_hands_S2 = [h for i, h in enumerate(opp_hands_S2) if mask_S2[i]]
-        opp_abs_S2 = [a for i, a in enumerate(opp_abs_S2) if mask_S2[i]]
-        exist_S2 = exist_S2[mask_S2]
+    last_bet, h_m1_id, h_m2_id = _history_to_key_parts(
+        history_buf, hist_len, cfr_min_bet, history_code_id)
 
     if lbr_is_active:
         if depth <= 0:
-            # No more LBR decisions; CFR rollout valued under S2 only.
-            return _cfr_vs_cfr_value(
-                history, lbr_hand, lbr_abstractions, opp_hands_S2, opp_abs_S2, reach_S2,
-                cfr_strategy, hand_sizes, cfr_min_bet, True, exist_S2,
+            return _cfr_vs_cfr_value_jit(
+                history_buf, hist_len,
+                lbr_hand_size, lbr_abs_ids,
+                opp_hand_size, opp_abs_ids_S2, reach_S2, exist_S2,
+                key_to_row, strategy, lower_action, upper_action,
+                history_code_id, cfr_min_bet, True,
+                per_dists_buf_S2, marginal_buf_S2, new_reach_buf_S2,
             )
-        # Choose action using S1's belief via a standard single-sample LBR call.
-        possible_actions = get_possible_actions(history, min_bet=0)
-        best_a = None
-        best_v_S1 = -np.inf
-        for a in possible_actions:
-            history.append(a)
-            v_S1 = _lbr_value(
-                history, lbr_hand, lbr_abstractions,
-                opp_hands_S1, opp_abs_S1, reach_S1,
-                cfr_strategy, hand_sizes, cfr_min_bet, False, exist_S1, depth - 1,
-            )
-            history.pop()
-            if v_S1 > best_v_S1:
-                best_v_S1 = v_S1
-                best_a = a
-        # Evaluate chosen action under S2, propagating both for any further LBR turns.
-        history.append(best_a)
-        v = _lbr_value_ds(
-            history, lbr_hand, lbr_abstractions,
-            opp_hands_S1, opp_abs_S1, reach_S1, exist_S1,
-            opp_hands_S2, opp_abs_S2, reach_S2, exist_S2,
-            cfr_strategy, hand_sizes, cfr_min_bet, False, depth - 1,
-        )
-        history.pop()
-        return v
-    else:
-        possible_actions = get_possible_actions(history, cfr_min_bet)
-        n = len(possible_actions)
-        per_hand_dists_S1 = _per_opp_strategies(cfr_strategy, opp_hands_S1, opp_abs_S1, history, cfr_min_bet, n)
-        per_hand_dists_S2 = _per_opp_strategies(cfr_strategy, opp_hands_S2, opp_abs_S2, history, cfr_min_bet, n)
-        joint_S1 = reach_S1[:, None] * per_hand_dists_S1
-        marginal_S1 = joint_S1.sum(axis=0)
-        total_reach_S1 = reach_S1.sum()
-        joint_S2 = reach_S2[:, None] * per_hand_dists_S2
-        marginal_S2 = joint_S2.sum(axis=0)
-        total_reach_S2 = reach_S2.sum()
-        total = 0.0
-        for i, a in enumerate(possible_actions):
-            if marginal_S2[i] <= 0:
-                continue
-            p_action = marginal_S2[i] / total_reach_S2  # unbiased action weight via S2
-            new_reach_S2 = joint_S2[:, i] / marginal_S2[i] * total_reach_S2
-            if marginal_S1[i] > 0:
-                new_reach_S1 = joint_S1[:, i] / marginal_S1[i] * total_reach_S1
-            else:
-                # S1 didn't anticipate this opp action; keep belief unchanged as fallback.
-                new_reach_S1 = reach_S1
-            history.append(a)
-            v = _lbr_value_ds(
-                history, lbr_hand, lbr_abstractions,
-                opp_hands_S1, opp_abs_S1, new_reach_S1, exist_S1,
-                opp_hands_S2, opp_abs_S2, new_reach_S2, exist_S2,
-                cfr_strategy, hand_sizes, cfr_min_bet, True, depth,
-            )
-            history.pop()
-            total += p_action * v
-        return total
-
-
-def expected_value_lbr_at_position_ds(
-    lbr_player, starting_player, hand_sizes, cfr_strategy, cfr_min_bet, depth,
-    n_belief_samples, n_lbr_hand_samples=None, seed=42, show_progress=True,
-):
-    """Double-sampled LBR over LBR hands. Two independent belief vectors per
-    lbr_hand: S1 for action selection, S2 for valuation. Conservative lower bound
-    on LBR_true.
-
-    Returns (mean, std_err, n_lbr_hands_used). std_err uses FPC."""
-    if n_belief_samples is None:
-        raise ValueError("Double-sampled LBR requires n_belief_samples to be set")
-    rng = np.random.default_rng(seed)
-    lbr_hand_size = hand_sizes[lbr_player]
-    opp_hand_size = hand_sizes[1 - lbr_player]
-    all_lbr_hands = list(itertools.combinations(range(24), lbr_hand_size))
-    lbr_hand_population = len(all_lbr_hands)
-    if n_lbr_hand_samples is not None and n_lbr_hand_samples < len(all_lbr_hands):
-        idx = rng.choice(len(all_lbr_hands), size=n_lbr_hand_samples, replace=False)
-        all_lbr_hands = [all_lbr_hands[i] for i in idx]
-    per_hand_values: List[float] = []
-    iterator = tqdm(all_lbr_hands, desc=f"LBR-DS seat={lbr_player}, start={starting_player}") if show_progress else all_lbr_hands
-    for lbr_hand_t in iterator:
-        lbr_hand = list(lbr_hand_t)
-        lbr_abstractions = get_hand_abstraction(lbr_hand, hand_sizes)
-        remaining = [c for c in range(24) if c not in lbr_hand_t]
-
-        all_opp_hands = list(itertools.combinations(remaining, opp_hand_size))
-        pop = len(all_opp_hands)
-
-        def _sample_belief():
-            if n_belief_samples >= pop:
-                hands = [sorted(h) for h in all_opp_hands]
-            else:
-                idx = rng.choice(pop, size=n_belief_samples, replace=False)
-                hands = [sorted(all_opp_hands[i]) for i in idx]
-            abstractions = [get_hand_abstraction(h, hand_sizes) for h in hands]
-            existence = np.zeros((len(hands), 88), dtype=np.bool_)
-            for i, oh in enumerate(hands):
-                if lbr_player == 0:
-                    existence[i] = Game.precompute_set_existence([lbr_hand, oh])
-                else:
-                    existence[i] = Game.precompute_set_existence([oh, lbr_hand])
-            return hands, abstractions, existence
-
-        opp_hands_S1, opp_abs_S1, exist_S1 = _sample_belief()
-        opp_hands_S2, opp_abs_S2, exist_S2 = _sample_belief()
-        reach_S1 = np.ones(len(opp_hands_S1), dtype=np.float64)
-        reach_S2 = np.ones(len(opp_hands_S2), dtype=np.float64)
-        lbr_is_active = (lbr_player == starting_player)
-        v = _lbr_value_ds(
-            [], lbr_hand, lbr_abstractions,
-            opp_hands_S1, opp_abs_S1, reach_S1, exist_S1,
-            opp_hands_S2, opp_abs_S2, reach_S2, exist_S2,
-            cfr_strategy, hand_sizes, cfr_min_bet, lbr_is_active, depth,
-        )
-        per_hand_values.append(v)
-    arr = np.array(per_hand_values)
-    K = len(arr)
-    mean = float(arr.mean())
-    if K > 1:
-        sample_std = float(arr.std(ddof=1))
-        fpc = max(0.0, (lbr_hand_population - K) / (lbr_hand_population - 1))
-        std_err = sample_std / (K ** 0.5) * (fpc ** 0.5)
-    else:
-        std_err = 0.0
-    return mean, std_err, K
-
-
-def expected_value_lbr_at_position(
-    lbr_player: int,
-    starting_player: int,
-    hand_sizes: List[int],
-    cfr_strategy: CFRStrategy,
-    cfr_min_bet: int,
-    depth: int,
-    n_belief_samples: int = None,
-    n_lbr_hand_samples: int = None,
-    seed: int = 42,
-    show_progress: bool = True,
-) -> float:
-    """E_{deal} [ LBR's payoff | LBR plays seat lbr_player, starting_player fixed ].
-
-    When `n_belief_samples` is None, the opp-hand belief is enumerated exhaustively.
-    When set, the belief is approximated by sampling that many opp hands uniformly
-    *without* replacement. Variance shrinks as 1/sqrt(N), reduced further by the
-    finite-population correction (P-N)/(P-1) when N is a meaningful fraction of P.
-
-    When `n_lbr_hand_samples` is None, the LBR's hand is enumerated. When set, only
-    that many LBR hands are sampled uniformly without replacement.
-
-    Returns (mean, std_err, n_lbr_hands_used). std_err is the sample std of
-    per-lbr_hand values divided by sqrt(K), with FPC; 0 if K == population.
-    Note this only captures lbr_hand-sampling noise; opp-sampling noise within
-    each per-lbr_hand value is not propagated.
-    """
-    rng = np.random.default_rng(seed)
-    lbr_hand_size = hand_sizes[lbr_player]
-    opp_hand_size = hand_sizes[1 - lbr_player]
-    all_lbr_hands = list(itertools.combinations(range(24), lbr_hand_size))
-    lbr_hand_population = len(all_lbr_hands)
-    if n_lbr_hand_samples is not None and n_lbr_hand_samples < len(all_lbr_hands):
-        idx = rng.choice(len(all_lbr_hands), size=n_lbr_hand_samples, replace=False)
-        all_lbr_hands = [all_lbr_hands[i] for i in idx]
-    per_hand_values: List[float] = []
-    iterator = tqdm(all_lbr_hands, desc=f"LBR seat={lbr_player}, start={starting_player}") if show_progress else all_lbr_hands
-    for lbr_hand_t in iterator:
-        lbr_hand = list(lbr_hand_t)
-        lbr_abstractions = get_hand_abstraction(lbr_hand, hand_sizes)
-        remaining = [c for c in range(24) if c not in lbr_hand_t]
-        all_opp_hands = list(itertools.combinations(remaining, opp_hand_size))
-        if n_belief_samples is None or n_belief_samples >= len(all_opp_hands):
-            opp_hands = [sorted(h) for h in all_opp_hands]
+        if last_bet == 88:
+            lo, hi = 0, 87
         else:
-            idx = rng.choice(len(all_opp_hands), size=n_belief_samples, replace=False)
-            opp_hands = [sorted(all_opp_hands[i]) for i in idx]
-        opp_abstractions = [get_hand_abstraction(h, hand_sizes) for h in opp_hands]
-        existence_table = np.zeros((len(opp_hands), 88), dtype=np.bool_)
-        for i, oh in enumerate(opp_hands):
-            if lbr_player == 0:
-                existence_table[i] = Game.precompute_set_existence([lbr_hand, oh])
-            else:
-                existence_table[i] = Game.precompute_set_existence([oh, lbr_hand])
-        reach_probs = np.ones(len(opp_hands), dtype=np.float64)
-        lbr_is_active = (lbr_player == starting_player)
-        v_lbr = _lbr_value(
-            [], lbr_hand, lbr_abstractions, opp_hands, opp_abstractions, reach_probs,
-            cfr_strategy, hand_sizes, cfr_min_bet, lbr_is_active, existence_table, depth,
+            lo, hi = last_bet + 1, 88
+        n_actions = hi - lo + 1
+        best_a = lo
+        best_v = -1e18
+        for i in range(n_actions):
+            history_buf[hist_len] = lo + i
+            v = _lbr_value_jit(
+                history_buf, hist_len + 1,
+                lbr_hand_size, lbr_abs_ids,
+                opp_hand_size, opp_abs_ids_S1, reach_S1, exist_S1,
+                key_to_row, strategy, lower_action, upper_action,
+                history_code_id, cfr_min_bet, False, depth - 1,
+                per_dists_buf_S1, marginal_buf_S1, new_reach_buf_S1,
+            )
+            if v > best_v:
+                best_v = v
+                best_a = lo + i
+        history_buf[hist_len] = best_a
+        return _lbr_value_ds_jit(
+            history_buf, hist_len + 1,
+            lbr_hand_size, lbr_abs_ids,
+            opp_hand_size,
+            opp_abs_ids_S1, reach_S1, exist_S1,
+            opp_abs_ids_S2, reach_S2, exist_S2,
+            key_to_row, strategy, lower_action, upper_action,
+            history_code_id, cfr_min_bet, False, depth - 1,
+            per_dists_buf_S1, per_dists_buf_S2,
+            marginal_buf_S1, marginal_buf_S2,
+            new_reach_buf_S1, new_reach_buf_S2,
         )
-        per_hand_values.append(v_lbr)
-    arr = np.array(per_hand_values)
-    K = len(arr)
-    mean = float(arr.mean())
-    if K > 1:
-        # Sample std err of the mean, with finite-population correction.
-        sample_std = float(arr.std(ddof=1))
-        fpc = max(0.0, (lbr_hand_population - K) / (lbr_hand_population - 1))
-        std_err = sample_std / (K ** 0.5) * (fpc ** 0.5)
-    else:
-        std_err = 0.0
-    return mean, std_err, K
 
+    if last_bet == 88:
+        lo, hi = cfr_min_bet, 87
+    else:
+        lo, hi = last_bet + 1, 88
+    n_actions = hi - lo + 1
+
+    # Opp turn: grouped lookups, separately for S1 and S2.
+    pd_S1 = per_dists_buf_S1[hist_len]
+    pd_S2 = per_dists_buf_S2[hist_len]
+    base_key = (opp_hand_size
+                | (last_bet << LAST_BET_SHIFT)
+                | (h_m1_id << H_M1_SHIFT)
+                | (h_m2_id << H_M2_SHIFT))
+    total_S1 = _opp_turn_lookups(
+        pd_S1, opp_abs_ids_S1, reach_S1, last_bet, n_S1, n_actions, base_key,
+        key_to_row, strategy, lower_action, upper_action,
+    )
+    total_S2 = _opp_turn_lookups(
+        pd_S2, opp_abs_ids_S2, reach_S2, last_bet, n_S2, n_actions, base_key,
+        key_to_row, strategy, lower_action, upper_action,
+    )
+
+    marginal_S1 = marginal_buf_S1[hist_len]
+    marginal_S2 = marginal_buf_S2[hist_len]
+    for k in range(n_actions):
+        marginal_S1[k] = 0.0
+        marginal_S2[k] = 0.0
+    for n in range(n_S1):
+        for k in range(n_actions):
+            marginal_S1[k] += pd_S1[n, k]
+    for n in range(n_S2):
+        for k in range(n_actions):
+            marginal_S2[k] += pd_S2[n, k]
+
+    total = 0.0
+    new_S1 = new_reach_buf_S1[hist_len]
+    new_S2 = new_reach_buf_S2[hist_len]
+    for k in range(n_actions):
+        if marginal_S2[k] <= 0.0:
+            continue
+        p_action = marginal_S2[k] / total_S2
+        inv_S2 = total_S2 / marginal_S2[k]
+        for n in range(n_S2):
+            new_S2[n] = pd_S2[n, k] * inv_S2
+        if marginal_S1[k] > 0.0:
+            inv_S1 = total_S1 / marginal_S1[k]
+            for n in range(n_S1):
+                new_S1[n] = pd_S1[n, k] * inv_S1
+        else:
+            for n in range(n_S1):
+                new_S1[n] = reach_S1[n]
+        history_buf[hist_len] = lo + k
+        v = _lbr_value_ds_jit(
+            history_buf, hist_len + 1,
+            lbr_hand_size, lbr_abs_ids,
+            opp_hand_size,
+            opp_abs_ids_S1, new_S1[:n_S1], exist_S1,
+            opp_abs_ids_S2, new_S2[:n_S2], exist_S2,
+            key_to_row, strategy, lower_action, upper_action,
+            history_code_id, cfr_min_bet, True, depth,
+            per_dists_buf_S1, per_dists_buf_S2,
+            marginal_buf_S1, marginal_buf_S2,
+            new_reach_buf_S1, new_reach_buf_S2,
+        )
+        total += p_action * v
+    return total
+
+
+# ---------------------------------------------------------------------------
+# Python wrapper
+# ---------------------------------------------------------------------------
 
 def lbr_exploitability(
     hand_sizes: List[int],
     starting_player: int,
-    cfr_strategy: CFRStrategy,
-    cfr_min_bet: int,
+    flat_strategy: FlatStrategy,
     depth: int,
-    n_belief_samples: int = None,
-    n_lbr_hand_samples: int = None,
+    n_belief_samples: int = 300,
+    n_lbr_hand_samples: int = 500,
     seed: int = 42,
+    show_progress: bool = True,
 ) -> Dict[str, float]:
-    """Computes a conservative LOWER bound on LBR-K exploitability.
+    """JIT-backed drop-in for `lbr.lbr_exploitability`. Returns
+    {expl, se_worst, K_lbr_hand}."""
 
-    Returns {expl, se_worst, K_lbr_hand}:
-      - expl: double-sampled LBR estimate (≤ LBR_true in expectation)
-      - se_worst: upper end of the 95% CI for the std error (worst-case),
-                  combining lbr_hand sampling noise and opp belief noise
-      - K_lbr_hand: effective sample size used (min over the two seat calls)
+    def run_seat(lbr_player, seat_seed):
+        opp_player = 1 - lbr_player
+        lbr_hand_size = hand_sizes[lbr_player]
+        opp_hand_size = hand_sizes[opp_player]
 
-    When belief is enumerated (n_belief_samples is None or >= population for
-    every lbr_hand), DS reduces to the exact LBR-K value and se_worst = 0.
-    """
-    fn = expected_value_lbr_at_position_ds if n_belief_samples is not None else expected_value_lbr_at_position
-    v_sp, se_sp, K_sp = fn(
-        lbr_player=starting_player, starting_player=starting_player,
-        hand_sizes=hand_sizes, cfr_strategy=cfr_strategy, cfr_min_bet=cfr_min_bet,
-        depth=depth, n_belief_samples=n_belief_samples,
-        n_lbr_hand_samples=n_lbr_hand_samples, seed=seed,
-    )
-    v_other, se_other, K_other = fn(
-        lbr_player=1 - starting_player, starting_player=starting_player,
-        hand_sizes=hand_sizes, cfr_strategy=cfr_strategy, cfr_min_bet=cfr_min_bet,
-        depth=depth, n_belief_samples=n_belief_samples,
-        n_lbr_hand_samples=n_lbr_hand_samples, seed=seed + 1,
-    )
-    expl = (v_sp - (-v_other)) / 2.0
+        rng = np.random.default_rng(seat_seed)
+        all_lbr_hands = list(itertools.combinations(range(24), lbr_hand_size))
+        lbr_hand_population = len(all_lbr_hands)
+        if n_lbr_hand_samples is not None and n_lbr_hand_samples < lbr_hand_population:
+            idx = rng.choice(lbr_hand_population, size=n_lbr_hand_samples, replace=False)
+            all_lbr_hands = [all_lbr_hands[i] for i in idx]
+
+        pd_S1 = np.zeros((MAX_DEPTH, n_belief_samples, 89), dtype=np.float64)
+        pd_S2 = np.zeros((MAX_DEPTH, n_belief_samples, 89), dtype=np.float64)
+        # Pre-allocated marginal / new_reach buffers, slotted by depth so
+        # children at deeper hist_len don't clobber parent's values.
+        marg_S1 = np.zeros((MAX_DEPTH, 89), dtype=np.float64)
+        marg_S2 = np.zeros((MAX_DEPTH, 89), dtype=np.float64)
+        nr_S1 = np.zeros((MAX_DEPTH, n_belief_samples), dtype=np.float64)
+        nr_S2 = np.zeros((MAX_DEPTH, n_belief_samples), dtype=np.float64)
+        history_buf = np.zeros(MAX_DEPTH, dtype=np.int64)
+
+        per_hand_values: List[float] = []
+        iterator = tqdm(
+            all_lbr_hands, desc=f"LBR-NB seat={lbr_player}, start={starting_player}"
+        ) if show_progress else all_lbr_hands
+        for lbr_hand_t in iterator:
+            lbr_hand = list(lbr_hand_t)
+            lbr_abs_ids = intern_abstractions_for_hand(
+                lbr_hand, hand_sizes, flat_strategy.abs_str_to_id)
+            remaining = [c for c in range(24) if c not in lbr_hand_t]
+            all_opp_hands = list(itertools.combinations(remaining, opp_hand_size))
+            pop = len(all_opp_hands)
+
+            def sample_belief():
+                if n_belief_samples >= pop:
+                    hands = [sorted(h) for h in all_opp_hands]
+                else:
+                    idx = rng.choice(pop, size=n_belief_samples, replace=False)
+                    hands = [sorted(all_opp_hands[i]) for i in idx]
+                opp_abs = intern_abstractions_for_hands(
+                    hands, hand_sizes, flat_strategy.abs_str_to_id)
+                exist = np.zeros((len(hands), 88), dtype=np.bool_)
+                for i, oh in enumerate(hands):
+                    if lbr_player == 0:
+                        exist[i] = Game.precompute_set_existence([lbr_hand, oh])
+                    else:
+                        exist[i] = Game.precompute_set_existence([oh, lbr_hand])
+                return opp_abs, exist
+
+            opp_abs_S1, exist_S1 = sample_belief()
+            opp_abs_S2, exist_S2 = sample_belief()
+            reach_S1 = np.ones(opp_abs_S1.shape[0], dtype=np.float64)
+            reach_S2 = np.ones(opp_abs_S2.shape[0], dtype=np.float64)
+            lbr_is_active = (lbr_player == starting_player)
+
+            v = _lbr_value_ds_jit(
+                history_buf, 0,
+                lbr_hand_size, lbr_abs_ids,
+                opp_hand_size,
+                opp_abs_S1, reach_S1, exist_S1,
+                opp_abs_S2, reach_S2, exist_S2,
+                flat_strategy.key_to_row, flat_strategy.strategy,
+                flat_strategy.lower_action, flat_strategy.upper_action,
+                _HISTORY_CODE_ID, flat_strategy.min_bet,
+                lbr_is_active, depth,
+                pd_S1, pd_S2,
+                marg_S1, marg_S2,
+                nr_S1, nr_S2,
+            )
+            per_hand_values.append(v)
+
+        arr = np.array(per_hand_values)
+        K = len(arr)
+        mean = float(arr.mean())
+        if K > 1:
+            sample_std = float(arr.std(ddof=1))
+            fpc = max(0.0, (lbr_hand_population - K) / (lbr_hand_population - 1))
+            std_err = sample_std / (K ** 0.5) * (fpc ** 0.5)
+        else:
+            std_err = 0.0
+        return mean, std_err, K, lbr_hand_population
+
+    # Match production seed convention: starting_player uses `seed`, other uses `seed + 1`.
+    v_sp, se_sp, K_sp, _ = run_seat(starting_player, seed)
+    v_other, se_other, K_other, _ = run_seat(1 - starting_player, seed + 1)
+    mean = (v_sp + v_other) / 2.0
     se = (se_sp ** 2 + se_other ** 2) ** 0.5 / 2.0
-    # Effective K for the se's chi-squared CI: the larger of the two seat samples,
-    # since the side that's actually sampled dominates the variance contribution
-    # (the enumerated side contributes 0 to se).
     K = max(K_sp, K_other)
     rel = se_relative_ci_upper(K)
     se_worst = se * (1.0 + rel)
-    return {"expl": expl, "se_worst": se_worst, "K_lbr_hand": K}
+    return {
+        "expl": mean,
+        "se_worst": se_worst,
+        "K_lbr_hand": K,
+    }
 
+
+# ---------------------------------------------------------------------------
+# CLI — drop-in replacement for `python -m cfr_ai.lbr`
+# ---------------------------------------------------------------------------
 
 def se_relative_ci_upper(K: int, alpha: float = 0.05) -> float:
     """Approx 95% upper-CI relative width on the sample std dev given K samples.
-    se_true could be up to se_observed * (1 + r). Normal approx to chi-squared,
-    good for K >= 20."""
+    Normal approx to chi-squared; good for K >= 20."""
     if K <= 1:
         return 0.0
     z = 1.96 if alpha == 0.05 else 2.576
@@ -578,13 +775,12 @@ def se_relative_ci_upper(K: int, alpha: float = 0.05) -> float:
 
 
 SUMMARY_PATH = os.path.join("cfr_ai", "outputs", "lbr_summary.csv")
-# Fixed columns on the left; LBR-K columns grow to the right as new depths are run.
 SUMMARY_BASE_FIELDS = ["Setup", "Finished", "Sampling"]
 SUMMARY_TRAILING_FIELDS: List[str] = []
 
 
 def _depth_label(depth: int) -> str:
-    return "inf" if depth >= INF_DEPTH else str(depth)
+    return str(depth)
 
 
 def _depth_cols(label: str) -> Tuple[str, str]:
@@ -592,14 +788,10 @@ def _depth_cols(label: str) -> Tuple[str, str]:
 
 
 def _sort_depth_labels(labels):
-    """Sort numeric depths ascending, with 'inf' at the end."""
-    def key(d):
-        return (1, 0) if d == "inf" else (0, int(d))
-    return sorted(labels, key=key)
+    return sorted(labels, key=lambda d: int(d))
 
 
 def _sampling_label(n_belief: int, n_lbr_hand: int) -> str:
-    """Returns (lbr_cap, opp_cap). Populations smaller than the cap are enumerated."""
     lbr_str = str(n_lbr_hand) if n_lbr_hand is not None else "all"
     opp_str = str(n_belief) if n_belief is not None else "all"
     return f"({lbr_str}, {opp_str})"
@@ -607,8 +799,7 @@ def _sampling_label(n_belief: int, n_lbr_hand: int) -> str:
 
 def _update_summary(hand_sizes, depth, per_sp_results, sampling_labels):
     """Read existing rows, set this setup's LBR-<depth> columns (preserving any
-    other depth columns already present), sort by setup size, rewrite. Will
-    raise PermissionError if the file is locked (e.g. open in Excel)."""
+    other depth columns already present), sort by setup size, rewrite."""
     from datetime import datetime
     os.makedirs(os.path.dirname(SUMMARY_PATH), exist_ok=True)
     rows: Dict[str, Dict[str, str]] = {}
@@ -618,7 +809,6 @@ def _update_summary(hand_sizes, depth, per_sp_results, sampling_labels):
             reader = csv.DictReader(f)
             for r in reader:
                 rows[r["Setup"]] = dict(r)
-        # Discover what depths are already in the file.
         for row in rows.values():
             for k in row.keys():
                 if k.startswith("LBR-") and k.endswith(" expl"):
@@ -672,42 +862,35 @@ def _update_summary(hand_sizes, depth, per_sp_results, sampling_labels):
     print(f"\nWrote {setup_key} (LBR-{this_label}) to {SUMMARY_PATH}", flush=True)
 
 
-def main() -> None:
-    p = argparse.ArgumentParser(description="LBR-based exploitability for the Blef CFR AI.")
+def main():
+    """JIT LBR CLI."""
+    import argparse, time
+
+    p = argparse.ArgumentParser(
+        description="LBR-based exploitability for the Blef CFR AI.")
     p.add_argument("--hand-sizes", nargs=2, type=int, required=True)
-    p.add_argument(
-        "--depth", type=int, default=INF_DEPTH,
-        help="Number of LBR-optimised decisions per game. 0 = LBR plays CFR (sanity baseline). "
-             "1 = LBR-1 (classic Lisý-Bowling local best response). "
-             "Default is effectively infinity, which equals exact best response.",
-    )
-    p.add_argument(
-        "--starting-player", type=int, default=None, choices=[0, 1],
-        help="Fix starting player (0 or 1). If omitted, runs both (when hand sizes differ) or just 0 (when equal).",
-    )
-    p.add_argument(
-        "--n-belief-samples", type=int, default=None,
-        help="Sample opponent hands without replacement instead of enumerating. "
-             "Default: enumerate all (which is unbiased and recommended; only sample if "
-             "you genuinely need to cap compute).",
-    )
-    p.add_argument(
-        "--n-lbr-hand-samples", type=int, default=None,
-        help="Sample LBR hands without replacement instead of enumerating all C(24, lbr_size). "
-             "Unbiased; adds variance.",
-    )
+    p.add_argument("--setup-dir", type=str, default=None,
+                   help="Directory containing strategy.npz to evaluate. "
+                        "Defaults to cfr_ai/outputs/<setup>/.")
+    p.add_argument("--depth", type=int, default=1,
+                   help="Number of LBR-optimised decisions per game. "
+                        "1 = LBR-1 (default), 2 = LBR-2, etc.")
+    p.add_argument("--starting-player", type=int, default=None, choices=[0, 1])
+    p.add_argument("--n-belief-samples", type=int, default=300)
+    p.add_argument("--n-lbr-hand-samples", type=int, default=500)
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument(
-        "--update-summary", action="store_true",
-        help=f"Append/update this setup's row in {SUMMARY_PATH}.",
-    )
+    p.add_argument("--update-summary", action="store_true",
+                   help="Append/update this setup's row in outputs/lbr_summary.csv.")
     args = p.parse_args()
 
     hand_sizes = sorted(args.hand_sizes)
-    print(f"Loading CFR strategies for {hand_sizes}...")
+    print(f"Loading flat CFR strategy for {hand_sizes}"
+          f"{' from ' + args.setup_dir if args.setup_dir else ''}...",
+          flush=True)
     t0 = time.time()
-    cfr_strategy, cfr_min_bet = load_cfr_strategy(hand_sizes)
-    print(f"  loaded {len(cfr_strategy)} infosets in {time.time() - t0:.1f}s; min_bet={cfr_min_bet}")
+    fs = load_flat_strategy(hand_sizes, setup_dir=args.setup_dir)
+    print(f"  loaded {len(fs.key_to_row)} non-checking entries in "
+          f"{time.time() - t0:.1f}s; min_bet={fs.min_bet}", flush=True)
 
     if args.starting_player is not None:
         sps = [args.starting_player]
@@ -716,15 +899,14 @@ def main() -> None:
     else:
         sps = [0, 1]
 
-    depth_str = "inf (= BR)" if args.depth >= INF_DEPTH else str(args.depth)
-    print(f"Depth: {depth_str}")
+    print(f"Depth: {args.depth}", flush=True)
 
-    per_sp_results: Dict[int, Tuple[Dict[str, float], float]] = {}
-    sampling_labels: Dict[int, str] = {}
+    per_sp_results = {}
+    sampling_labels = {}
     for sp in sps:
         t0 = time.time()
         result = lbr_exploitability(
-            hand_sizes, sp, cfr_strategy, cfr_min_bet, args.depth,
+            hand_sizes, sp, fs, depth=args.depth,
             n_belief_samples=args.n_belief_samples,
             n_lbr_hand_samples=args.n_lbr_hand_samples,
             seed=args.seed,

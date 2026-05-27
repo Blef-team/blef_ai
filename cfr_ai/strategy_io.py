@@ -13,11 +13,13 @@ Layout written per setup directory `<dir>/`:
     metadata.csv          unchanged - small, human-readable, training-time
                           text (Iterations / Penalty / Time finished etc).
 
-The training pipeline writes `strategy.npz`. If `--diagnostic` is on,
-it ALSO writes `diagnostic.npz` (regret arrays + touch counters) for
-post-hoc analysis. The deployed agent only needs `strategy.npz`.
+The training pipeline writes both `strategy.npz` (deployment payload) and
+`diagnostic.npz` (regret arrays + touch counters) for post-hoc analysis.
+The deployed agent only needs `strategy.npz`; archive snapshots default
+to skipping `diagnostic.npz` (`archive_tool --include-diagnostics` to
+include it).
 
-The loader returns a `FlatStrategy` (defined in `lbr_numba.py`), which
+The loader returns a `FlatStrategy` (defined in `lbr.py`), which
 is the same in-memory type all downstream code (LBR, subgame, agent.py)
 consumes. So switching the storage format is a single-point change:
 nothing inside the JIT path or the training core changes.
@@ -26,7 +28,7 @@ nothing inside the JIT path or the training core changes.
 import json
 import os
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import numpy as np
 from numba import types
@@ -50,7 +52,7 @@ def save_strategy(
 ) -> str:
     """Write the deployment-ready strategy.npz + strategy.abs.json under
     `setup_dir`. Returns the path of the .npz."""
-    from cfr_ai.lbr_numba import FlatStrategy  # local to avoid circular imports
+    from cfr_ai.lbr import FlatStrategy  # local to avoid circular imports
     assert isinstance(flat_strategy, FlatStrategy)
     os.makedirs(setup_dir, exist_ok=True)
 
@@ -107,14 +109,14 @@ def save_diagnostic(
     regrets, or strategy_sum). Caller is responsible for sorting the
     arrays by key in canonical order.
 
-    Two callers exist:
-      - `analysis/migrate_diagnostic_to_npz.py` only has the averaged
-        `strategy` and the touch counters (the legacy CSV diagnostic
-        format never stored the raw regrets/strategy_sum).
-      - `cfr_ai/training.py` and `training_numba.py` save fresh runs
-        with `regrets` and `strategy_sum` (the raw arrays); `strategy`
-        can be derived from `strategy_sum` at load time so it isn't
+    Two write paths exist, with different optional fields:
+      - Fresh training runs (via `cfr_ai/training.py`) save the raw
+        `regrets` and `strategy_sum`; `strategy` (the averaged final)
+        can be derived from `strategy_sum` at load time, so it's not
         re-stored.
+      - Pre-NPZ runs migrated from the legacy CSV diagnostic format only
+        have the averaged `strategy` (the CSV never stored regrets); no
+        `regrets`/`strategy_sum` for those.
 
     The loader (`load_diagnostic`) returns whatever's present.
     """
@@ -156,7 +158,7 @@ def load_strategy(setup_dir: str):
 
     Raises `FileNotFoundError` if the npz isn't present (caller can
     handle the migration prompt)."""
-    from cfr_ai.lbr_numba import FlatStrategy
+    from cfr_ai.lbr import FlatStrategy
     npz_path = os.path.join(setup_dir, "strategy.npz")
     abs_path = os.path.join(setup_dir, "strategy.abs.json")
     if not os.path.exists(npz_path):
@@ -230,27 +232,22 @@ def load_diagnostic(setup_dir: str) -> Dict[str, np.ndarray]:
 # Sanity / unit
 # ---------------------------------------------------------------------------
 
-def _roundtrip_smoke(hand_sizes: List[int]) -> None:
-    """Load a strategy via the legacy CSV path, write NPZ, reload from
-    NPZ, and verify the lookup-by-key result is bit-equivalent on a
-    handful of keys. Used by `analysis/migrate_to_npz.py` for
-    spot-checking; not part of the production run-time path."""
-    from cfr_ai.lbr_numba import _load_flat_strategy_from_csv
+def _roundtrip_smoke(setup_dir: str) -> None:
+    """Round-trip a strategy directory through save_strategy/load_strategy
+    and confirm the lookup-by-key result is bit-equivalent on a handful of
+    keys. Quick sanity check for the I/O path."""
     import tempfile
-    ref = _load_flat_strategy_from_csv(hand_sizes)
+    ref = load_strategy(setup_dir)
     with tempfile.TemporaryDirectory() as td:
         save_strategy(ref, td, compressed=True)
         new = load_strategy(td)
     assert new.min_bet == ref.min_bet
     assert len(new.key_to_row) == len(ref.key_to_row)
-    # Check parallel arrays are identical row-by-row when looked up by key.
     for k_int, ref_row in list(ref.key_to_row.items())[:200]:
         k = np.int64(int(k_int))
         new_row = int(new.key_to_row[k])
         assert int(new.lower_action[new_row]) == int(ref.lower_action[int(ref_row)])
         assert int(new.upper_action[new_row]) == int(ref.upper_action[int(ref_row)])
-        # probs may be re-ordered by argsort but values at [lower:upper+1]
-        # must match elementwise.
         lo = int(ref.lower_action[int(ref_row)])
         hi = int(ref.upper_action[int(ref_row)])
         a = ref.strategy[int(ref_row), lo:hi + 1]
@@ -264,9 +261,10 @@ def _roundtrip_smoke(hand_sizes: List[int]) -> None:
 if __name__ == "__main__":
     import argparse
     ap = argparse.ArgumentParser(description="Smoke-test the strategy I/O.")
-    ap.add_argument("--hand-sizes", nargs=2, type=int, default=[1, 1])
+    ap.add_argument("--setup-dir", default="cfr_ai/outputs/1_1",
+                    help="Directory containing strategy.npz")
     args = ap.parse_args()
-    print(f"Round-trip test for setup {args.hand_sizes}...")
+    print(f"Round-trip test for {args.setup_dir}...")
     t0 = time.time()
-    _roundtrip_smoke(args.hand_sizes)
+    _roundtrip_smoke(args.setup_dir)
     print(f"  OK in {time.time() - t0:.2f}s")

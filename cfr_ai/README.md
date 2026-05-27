@@ -46,18 +46,6 @@ However, we are discounting the strategy sum contributions. Contributions from t
 * Contributions from the 30-40% range of iterations weigh 40% as much as those from the 90-100% range
 * Contributions from the 40-50% range of tierations weigh 50% as much as those from the 90-100% range
 
-### DCFR and CFR+ algorithm options
-
-`trainer.py` supports two algorithm variants beyond the default `es` (the one described in the sections above). They can be selected via the `--algorithm` flag in `training.py`.
-
-* `cfr_plus` — after each regret update, the cumulative regrets are clipped at 0. Strategy averaging weights iteration `t` by `(t + 1)` instead of using the staircase discount described above. Regret-based pruning is disabled (regrets cannot go below 0, so there's nothing to prune). This is the canonical [Tammelin 2014](https://arxiv.org/abs/1407.5042) CFR+, with the difference that we use MCCFR external sampling rather than full traversal.
-
-* `dcfr` — `cfr_plus` plus a per-iteration α-discount on positive regrets (default α=1.5), applied lazily on visit using a precomputed cumulative log-discount table. This is [Brown & Sandholm 2019](https://arxiv.org/abs/1809.04040) DCFR with β=0 (clip negatives at 0) and γ=1 (linear strategy averaging; we use γ=1 rather than the canonical γ=2 because the latter exceeds float32 precision on `strategy_sum` at 5M iterations).
-
-**Empirical finding (rounds 1-3, 5M iter):** DCFR is statistically indistinguishable from `es` at this iteration budget on (1,3) (LBR-1 1.93% vs ES 1.69%, overlap within sampling noise) and identical to within 0.5 thousandths of one percent on (2,2) (LBR-1 1.000% vs 1.006%, both exact; LBR-2 2.332% vs 2.300%, both exact). The interpretation is that **the hand+history abstraction is the exploitability floor on rounds 1-3**, and both algorithms saturate at that ceiling by 5M iter — no per-iteration regret-update improvement breaks through it.
-
-**Crucially, DCFR took 10-18× longer wall-clock** to reach that identical exploitability because of disabled pruning and adding the α-discount lookup. Therefore, `dcfr` is strictly worse than `es` on a resource-adjusted basis. The variant remains in the codebase as a starting point for any future research that wants to compose CFR+/DCFR-style updates with variance-reduction or a richer abstraction.
-
 ### Action thresholding
 
 In the final (outputted) strategy, actions with probabilities of less than 1% are reset to 0%. This is primarily to save storage space.
@@ -76,8 +64,8 @@ We are then instructing the agent who uses the CFR strategy to check with 100% p
 We have considered:
 * ICFR — not implemented due to the expected effort/benefit ratio;
 * variance-reduction techniques on opponent's sampled actions or cards — tried, no noticeable benefit;
-* DCFR / CFR+ regret-matching variants — implemented as algorithm options above; on rounds 1-3 they converge to the same exploitability as `es` but take 10-18× more wall-clock to do so, because they disable pruning and add per-iteration discount overhead. See the subsection for details; and
-* outcome-sampling MCCFR — implemented but **not** competitive with external sampling on Blef's structure. See `README_Appendix_B.md` for the full diagnosis.
+* DCFR / CFR+ regret-matching variants — tried; on rounds 1-3 they converged to the same exploitability as `es` (the hand+history abstraction was the floor) but took 10-18× longer wall-clock because pruning has to be disabled and the α-discount adds per-visit cost. Strictly worse than `es` on a resource-adjusted basis, so removed from the codebase; and
+* outcome-sampling MCCFR — implemented but **not** competitive with external sampling on Blef's structure. Removed from the codebase; see `README_Appendix_B.md` for the diagnosis.
 
 ## Resource limits and abstraction
 
@@ -218,10 +206,10 @@ That is why we have left the temporary solution as the only one available to use
 
 ## Usage
 
-Training is done per setup, where a setup is the ordered number of cards per player. The recommended entry point is `training_numba.py`, which uses the JIT-compiled trainer. To train the 1 card vs 1 card setup, run this from the project root:
+Training is done per setup, where a setup is the ordered number of cards per player. To train the 1 card vs 1 card setup, run this from the project root:
 
 ```
-python -m cfr_ai.training_numba --hand-sizes 1 1
+python -m cfr_ai.training --hand-sizes 1 1
 ```
 
 CLI flags:
@@ -237,20 +225,13 @@ CLI flags:
 * `--archive-tag X` — save into `cfr_ai/archive/X/outputs/<setup>/` (snapshot for `head_to_head.py`) instead of the production `cfr_ai/outputs/<setup>/`.
 * `--high-priority` — bump the process to a higher OS priority (Windows: `HIGH_PRIORITY_CLASS`; POSIX: `nice -5`). Useful for shared machines.
 
-The pure-Python `training.py` is retained as a reference / debug implementation and supports two extras the JIT path does not:
-
-* `--get-exploitability` — run LBR-K exploitability checks at evenly-spaced points during training and record them in `metadata.csv`. Tune with `--exploitability-points`, `--exploitability-depth`, `--exploitability-n-belief`, `--exploitability-n-lbr-hand`.
-* `--algorithm {es,cfr_plus,dcfr}` — pick the regret-update rule. DCFR is documented but, in our experiments, strictly worse than ES on a wall-clock basis (see `README_Appendix_B.md` and the DCFR notes in this file).
-
-If you need either of those, use `python -m cfr_ai.training` instead. Expect ~7-10× slower training; see the Performance section for the speedup table.
-
-You will see a `tqdm` progress bar during training and exploitability calculations.
+You will see a `tqdm` progress bar during training.
 
 ### Training outputs
 
 A training without the `--no-save` flag writes its strategy under `cfr_ai/outputs/<setup>/` — see [Strategy storage format](#strategy-storage-format) above for the file layout (`strategy.npz`, `strategy.abs.json`, `diagnostic.npz`, `metadata.csv`).
 
-The deployment file `strategy.npz` contains only non-checking infosets — at lookup time, a missing key is interpreted as "check 100%". The optional `diagnostic.npz` (always written by `cfr_ai/training.py`; written by `cfr_ai/training_numba.py` when the relevant flag is set) contains *every* infoset, including check-only ones, plus the iteration counters (`first_touched`, `last_touched`, `times_touched`) used by the analysis scripts in `analysis/`.
+The deployment file `strategy.npz` contains only non-checking infosets — at lookup time, a missing key is interpreted as "check 100%". The companion `diagnostic.npz` (always written by `cfr_ai/training.py` alongside `strategy.npz`) contains *every* infoset, including check-only ones, plus the raw regrets, raw `strategy_sum`, and the iteration counters (`first_touched`, `last_touched`, `times_touched`) used by the analysis scripts in `analysis/`.
 
 ## Evaluation & analytics
 
@@ -271,17 +252,17 @@ Along each setup's outputs, there's a training metadata file (`metadata.csv`), w
 * the game value of each player (e.g. if we're training the 2 cards vs 3 cards case, it's 1. the game value for the starting player when the 2-card player is starting and 2. the game value for the starting player when the 3-card player is starting); and
 * the log of utilities along the training run.
 
-### LBR-based exploitability (`lbr_numba.py`)
+### LBR-based exploitability (`lbr.py`)
 
-The exploitability calculation is decoupled from training. The recommended entry point is `lbr_numba.py` (JIT-compiled, 13-40× faster than the Python reference, see Performance). Both produce identical exploitability values within fp32 noise and write the same `outputs/lbr_summary.csv`.
+The exploitability calculation is decoupled from training:
 
 ```
-python -m cfr_ai.lbr_numba --hand-sizes 3 3 --depth 2 --update-summary
+python -m cfr_ai.lbr --hand-sizes 3 3 --depth 2 --update-summary
 ```
 
 Key flags:
 
-* `--depth K` — LBR-K (number of LBR-optimised decisions per game before falling back to CFR rollout). K=1 is the classic [Lisý-Bowling local best response](https://arxiv.org/abs/1612.07547). The JIT path supports finite K only; for exact best response on small setups use `cfr_ai.lbr` instead.
+* `--depth K` — LBR-K (number of LBR-optimised decisions per game before falling back to CFR rollout). K=1 is the classic [Lisý-Bowling local best response](https://arxiv.org/abs/1612.07547). The JIT path supports finite K only (no exact best response).
 * `--n-belief-samples N` (default: 300) — sample N opponent hands without replacement instead of enumerating the whole posterior. Default works on all setups.
 * `--n-lbr-hand-samples K` (default: 500) — sample K LBR hands without replacement instead of enumerating all C(24, h) of them. Unbiased; adds variance.
 * `--starting-player {0,1}` — fix the starting player; default runs both seats for asymmetric setups.
@@ -289,9 +270,7 @@ Key flags:
 
 When opponent hands are enumerated, the result is the exact LBR-K value. When they are sampled, we use a **double-sampling** scheme: an independent belief sample S2 is used to value the action that another sample S1 chose. This produces a conservative *lower bound* on LBR-K — sometimes the chosen action is suboptimal, but its EV is computed without winner's-curse bias. The standard error reported in the summary combines lbr_hand sampling variance and opp belief sampling variance, with a chi-squared upper bound on the std err itself.
 
-LBR-1 captures roughly 85% of full BR on our verified shallow setups; LBR-2 captures ~99% but takes 4× longer per setup, and quickly becomes infeasible past round 3 even with the JIT speedup.
-
-The pure-Python `lbr.py` is retained as a reference / debug implementation and adds one capability the JIT path does not: `--depth INF_DEPTH` (exact best response). Use it for spot-checks on small setups.
+LBR-1 captures roughly 85% of full BR on our verified shallow setups; LBR-2 captures ~99% but takes 4× longer per setup, and quickly becomes infeasible past round 3.
 
 ### `lbr_summary.csv`
 
@@ -303,7 +282,7 @@ The pure-Python `lbr.py` is retained as a reference / debug implementation and a
 * **LBR-K duration** — seconds per starting player.
 * **Finished** — date the most recent calculation for this row ran (so we know which rows are stale).
 
-Each invocation of `lbr.py --update-summary --depth K` writes/updates the `LBR-K` columns for the chosen setup; running a sequence of depths populates `LBR-1 / LBR-2 / ...` side by side on the same row.
+Each invocation of `python -m cfr_ai.lbr --update-summary --depth K` writes/updates the `LBR-K` columns for the chosen setup; running a sequence of depths populates `LBR-1 / LBR-2 / ...` side by side on the same row.
 
 ### Utility logging
 
@@ -349,28 +328,23 @@ To deploy all setups at once, run `python -m cfr_ai.deployment.deploy_all`
 
 ## Performance
 
-The hot paths — training (`trainer_numba.py`) and exploitability (`lbr_numba.py`) — are JIT-compiled with [numba](https://numba.pydata.org/). They run alongside the original pure-Python reference implementations (`trainer.py`, `lbr.py`), which remain canonical for correctness and are used for occasional spot-checks. The numba versions are bit-equivalent within fp32 noise.
+Training (`trainer.py`) and exploitability (`lbr.py`) are JIT-compiled with [numba](https://numba.pydata.org/). They use a composite int64 infoset key `[abs_id | h_m2 | h_m1 | last_bet | hand_size]` (replacing per-call string concatenation), store regrets and strategies in flat 2D numpy arrays indexed by row, and recurse inside a single `@njit` function. The Python orchestration around the JIT-ed core is kept minimal (deal cards, build per-iter abstraction-id lookup, drive the iteration loop). Memory is held in fp32 by default.
 
-End-to-end measurements (vs the pure-Python reference, single core):
+A previous implementation used a dict of `InformationSet` objects. The table below shows the speedups achieved when we moved to JIT:
 
-| Workload | Setup | Reference | Numba | Speedup |
-|----------|-------|----------:|------:|--------:|
-| Training 5M iter | (1,2) | ~63 min† | **6.4 min** (measured) | **~10×** |
+| Workload | Setup | Old Python | Current JIT | Speedup |
+|----------|-------|-----------:|------------:|--------:|
+| Training 5M iter | (1,2) | ~63 min† | 6.4 min | **~10×** |
+| Training 5M iter | (3,7) | 10h 3min | 1h 46 min | **~6x** |
 | LBR-1 | (1,3) | 14.7 s | 0.6 s | **24×** |
 | LBR-2 | (1,3) | 152 s | 3.8 s | **40×** |
 | LBR-2 | (3,3) | 519 s | 34 s | **15×** |
 
-†(1,2) reference is extrapolated from the measured 5M-iter steady-state rate (~1,320 it/s). All numba rows are direct wall-clock measurements.
+†(1,2) old-Python time is extrapolated from the measured 5M-iter steady-state rate (~1,320 it/s). All JIT rows are direct wall-clock measurements.
 
-Larger setups have not been measured directly post-cleanup; the only big-setup data point we have is **(3,7) 5M iter in 3h 19m, but that was pre-cleanup and on a contended machine with 5 competing Python processes**. A clean-machine, post-cleanup run on (3,7) would likely land in the 1.5-2.5h range based on per-iter-rate scaling, but that's a projection, not a measurement. The relative speedup vs production may also differ from (1,2) because the JIT-dominated portion of the per-iter cost grows with tree depth, while the Python-side overhead is roughly constant — so the cleanups' relative gain shrinks on bigger setups even as the absolute time saved grows.
+However, an earlier round of numba experimentation showed that using a dict of `InformationSet` and JIT-ing the inner math regresses performance, as each per-node `info_set.regrets`/`info_set.strategy_sum` access crossed the JIT-Python boundary. The current implementation flattens the entire trainer state into typed numpy arrays + a `numba.typed.Dict[int64, int64]` index, so the JIT-ed recursion never touches Python objects.
 
-The numba paths use a composite int64 infoset key `[abs_id | h_m2 | h_m1 | last_bet | hand_size]` to replace the per-call string concatenation, store regrets and strategies in flat 2D numpy arrays indexed by row, and recurse inside a single `@njit` function. The Python orchestration around the JIT-ed core is kept minimal (deal cards, build per-iter abstraction-id lookup, drive the iteration loop). Memory is held in fp32 by default; storage is ~50 % of the reference trainer's on production-scale setups.
-
-`precompute_set_existence` is called once per training iteration to evaluate the truth of all 88 possible bets against the dealt hands. It builds value-count and (value, suit)-presence tables in one pass over the deal, then resolves every bet via Python int comparisons. The whole call costs ~15 µs regardless of hand size — small enough that the per-iteration cost is dominated by the recursion rather than by this function.
-
-### Historical note
-
-An earlier round of numba experimentation regressed performance because it left the dict-of-`InformationSet`-objects structure in place and just JIT-ed the inner math. Numba can't usefully accelerate Python object attribute access, so each per-node `info_set.regrets`/`info_set.strategy_sum` access crossed the JIT-Python boundary. The current implementation flattens the entire trainer state into typed numpy arrays + a `numba.typed.Dict[int64, int64]` index, so the JIT-ed recursion never touches Python objects.
+`precompute_set_existence` is called once per training iteration to evaluate the truth of all 88 possible bets against the dealt hands. It has been optimised to build value-count and (value, suit)-presence tables in one pass over the deal, then resolve every bet via Python int comparisons. The whole call costs ~15 µs regardless of hand size — small fraction of the per-iteration cost.
 
 ## Other notes
 

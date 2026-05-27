@@ -19,8 +19,8 @@ from cfr_ai.information_set import (
     make_key, get_possible_actions, get_hand_abstraction,
 )
 from cfr_ai.strategy_io import load_strategy
-from cfr_ai.lbr_numba import _split_suffix
-from cfr_ai.trainer_numba import (
+from cfr_ai.lbr import _split_suffix
+from cfr_ai.trainer import (
     LAST_BET_SHIFT, H_M1_SHIFT, H_M2_SHIFT, ABS_ID_SHIFT,
 )
 

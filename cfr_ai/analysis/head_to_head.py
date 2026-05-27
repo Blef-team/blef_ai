@@ -105,7 +105,7 @@ def preload_all_strategies(model_folder: str, hand_sizes_sorted: List[int]) -> D
     decision", consistent with the old CSV-fallback behaviour.
     """
     from cfr_ai.strategy_io import load_strategy
-    from cfr_ai.trainer_numba import (
+    from cfr_ai.trainer import (
         LAST_BET_SHIFT, H_M1_SHIFT, H_M2_SHIFT, ABS_ID_SHIFT, ABSENT_CODE,
         _HISTORY_CODE_STRS,
     )

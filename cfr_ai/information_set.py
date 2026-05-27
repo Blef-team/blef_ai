@@ -119,29 +119,3 @@ def make_key(hand: List[int], hand_abstractions: List[str], history: List[int], 
     return key
 
 
-class InformationSet():
-    def __init__(self, history: List[int], iter: int, min_bet: int):
-        self.possible_actions = get_possible_actions(history, min_bet)
-        self.regrets = np.zeros(len(self.possible_actions))
-        self.strategy_sum = np.zeros(len(self.possible_actions), dtype=np.float32)
-        self.times_touched = 0
-        self.first_touched = iter
-        self.last_touched = 0
-        self.temporary_value = 0.0
-
-    def get_strategy(self, reach_probability: float) -> np.array:
-        if any(self.regrets > 0):
-            strategy = np.maximum(0, self.regrets)
-            strategy /= sum(strategy)
-        else:
-            strategy = np.zeros(len(self.regrets))
-            strategy[-1] = 1.0
-
-        self.strategy_sum += reach_probability * strategy
-        return strategy
-
-    def get_final_strategy(self) -> np.ndarray:
-        if any(self.strategy_sum):
-            return self.strategy_sum / sum(self.strategy_sum)
-        else:
-            return np.array([0.0] * (len(self.strategy_sum) - 1) + [1.0])

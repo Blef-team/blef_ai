@@ -1,17 +1,17 @@
 """Snapshot trained CFR strategies into a versioned archive for later head-to-head comparison.
 
 Each archive is a self-contained model folder consumable by
-``cfr_ai/analysis/head_to_head.py`` -- it bundles the strategy CSVs from
-``cfr_ai/outputs/<setup>/`` together with the ``information_set.py`` and
-``history.csv`` snapshots needed to interpret them.
+``cfr_ai/analysis/head_to_head.py`` -- it bundles the strategy NPZ files
+from ``cfr_ai/outputs/<setup>/`` together with the ``information_set.py``
+and ``history.csv`` snapshots needed to interpret them.
 
 Usage from the project root:
 
-    python -m cfr_ai.archive_tool --tag v0_baseline
-    python -m cfr_ai.archive_tool --tag v1_dcfr --setups 1_1 1_2 2_2 --note "DCFR retrain"
+    python -m cfr_ai.archive_tool --tag v0
+    python -m cfr_ai.archive_tool --tag v1_subset --setups 1_1 1_2 2_2 --note "Round-1 subset"
 
-``*_diagnostic/`` folders inside ``outputs/`` are skipped by default (large; not
-needed for play). Pass ``--include-diagnostics`` to copy them too.
+``diagnostic.npz`` (per-setup) is skipped by default (large; not needed for
+play). Pass ``--include-diagnostics`` to copy it too.
 """
 from __future__ import annotations
 

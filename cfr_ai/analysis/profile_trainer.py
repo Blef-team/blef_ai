@@ -1,4 +1,4 @@
-"""Profile harness for trainer_numba.py.
+"""Profile harness for trainer.py.
 
 Splits per-iter wall time into:
   - deal_cards
@@ -25,11 +25,11 @@ import numpy as np
 import psutil
 
 import cfr_ai.game as game_mod
-from cfr_ai.trainer_numba import NumbaTrainer, _seed_numba, _traverse_jit, _HISTORY_CODE_ID
+from cfr_ai.trainer import Trainer, _seed_numba, _traverse_jit, _HISTORY_CODE_ID
 
 
-class TimedTrainer(NumbaTrainer):
-    """NumbaTrainer that records cumulative time in each per-iter phase."""
+class TimedTrainer(Trainer):
+    """Trainer that records cumulative time in each per-iter phase."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -93,8 +93,8 @@ class TimedTrainer(NumbaTrainer):
 def warm_jit(dtype):
     _seed_numba(0)
     game_mod.rng = np.random.default_rng(0)
-    w = NumbaTrainer([1, 1], 0, [-20, -22], 0.0, 0,
-                     algorithm='es', initial_capacity=2000,
+    w = Trainer([1, 1], 0, [-20, -22], 0.0, 0,
+                     initial_capacity=2000,
                      numba_seed=0, regret_dtype=dtype)
     w.train(50)
 
@@ -120,7 +120,7 @@ def main():
     game_mod.rng = np.random.default_rng(42)
     _seed_numba(42)
     t = TimedTrainer(args.hand_sizes, 0, [-20, -22], 0.0, 0,
-                     algorithm='es', initial_capacity=args.capacity,
+                     initial_capacity=args.capacity,
                      numba_seed=42, regret_dtype=dt)
     t0 = time.perf_counter()
     t.train(args.iter)
@@ -141,8 +141,8 @@ def main():
         random.seed(42)
         game_mod.rng = np.random.default_rng(42)
         _seed_numba(42)
-        prof_t = NumbaTrainer(args.hand_sizes, 0, [-20, -22], 0.0, 0,
-                              algorithm='es', initial_capacity=args.capacity,
+        prof_t = Trainer(args.hand_sizes, 0, [-20, -22], 0.0, 0,
+                              initial_capacity=args.capacity,
                               numba_seed=42, regret_dtype=dt)
         pr = cProfile.Profile()
         pr.enable()
