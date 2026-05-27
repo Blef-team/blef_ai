@@ -262,37 +262,52 @@ python -m cfr_ai.lbr --hand-sizes 3 3 --depth 2 --update-summary
 
 Key flags:
 
-* `--depth K` — LBR-K (number of LBR-optimised decisions per game before falling back to CFR rollout). K=1 is the classic [Lisý-Bowling local best response](https://arxiv.org/abs/1612.07547). The JIT path supports finite K only (no exact best response).
+* `--depth K` — LBR-K (number of LBR-optimised decisions per game before falling back to CFR-vs-CFR rollout). K=1 is the classic [Lisý-Bowling local best response](https://arxiv.org/abs/1612.07547). Default is `INF_DEPTH = 10^6` (effectively infinity), which means LBR plays optimally all the way to terminal — equivalent to **exact best response** when combined with `--n-belief-samples` and `--n-lbr-hand-samples` large enough to enumerate (CLI labels this as `inf (= BR)`). The JIT recursion structurally supports any K; the practical limit is the combinatorial blow-up of ~88^K per LBR-active node, so anything past K=2-3 is infeasible on round-4+ setups.
 * `--n-belief-samples N` (default: 300) — sample N opponent hands without replacement instead of enumerating the whole posterior. Default works on all setups.
 * `--n-lbr-hand-samples K` (default: 500) — sample K LBR hands without replacement instead of enumerating all C(24, h) of them. Unbiased; adds variance.
 * `--starting-player {0,1}` — fix the starting player; default runs both seats for asymmetric setups.
-* `--update-summary` — append/update this setup's row in `outputs/lbr_summary.csv`.
+* `--update-summary` — append/update this setup's LBR cells in `outputs/summary_of_all_runs.csv` (unified training + LBR summary). LBR rows are auto-cleared on a subsequent training run for that setup, so a populated LBR cell always corresponds to the current trained policy.
 
 When opponent hands are enumerated, the result is the exact LBR-K value. When they are sampled, we use a **double-sampling** scheme: an independent belief sample S2 is used to value the action that another sample S1 chose. This produces a conservative *lower bound* on LBR-K — sometimes the chosen action is suboptimal, but its EV is computed without winner's-curse bias. The standard error reported in the summary combines lbr_hand sampling variance and opp belief sampling variance, with a chi-squared upper bound on the std err itself.
 
 LBR-1 captures roughly 85% of full BR on our verified shallow setups; LBR-2 captures ~99% but takes 4× longer per setup, and quickly becomes infeasible past round 3.
 
-### `lbr_summary.csv`
+### `summary_of_all_runs.csv`
 
-`outputs/lbr_summary.csv` collects LBR exploitability across setups. Columns:
+`outputs/summary_of_all_runs.csv` is the unified per-setup summary. One row per setup; training and LBR write disjoint column sets, each writer fully owning its cols.
 
-* **Setup** — e.g. `"3,3"`.
+Training cols (written by `training.py` on save):
+* **Setup**, **Finished**, **Iterations**, **Penalty**, **Min bet**, **Pruning threshold**, **Minimum regret**, **Duration**, **Nodes touched**, **Explored infosets**, **Non-checking infosets**, **RAM (MB)**, **P0 value**, **P1 value**, **Version**.
+
+LBR cols (written by `lbr.py --update-summary`):
+* **LBR-K expl** / **LBR-K duration** — one pair per depth K evaluated. Point estimate (and `± std_err_worst_case` if sampled). Asymmetric setups join two starting-player results with `|`. Expl reported as percentage of game value, duration as seconds.
 * **Sampling** — the caps used as `(lbr, opp)`, e.g. `(300, 500)`. Populations smaller than the cap are enumerated; otherwise sampled without replacement.
-* **LBR-K expl** (one pair of columns per depth K that's been run) — point estimate (and `± std_err_worst_case` if sampled). One value for symmetric setups, two `sp=0 | sp=1` for asymmetric. Reported as a percentage of game value.
-* **LBR-K duration** — seconds per starting player.
-* **Finished** — date the most recent calculation for this row ran (so we know which rows are stale).
 
-Each invocation of `python -m cfr_ai.lbr --update-summary --depth K` writes/updates the `LBR-K` columns for the chosen setup; running a sequence of depths populates `LBR-1 / LBR-2 / ...` side by side on the same row.
+A training save **blanks that row's LBR cols**, so a populated LBR cell always corresponds to the current trained policy. The LBR depth-pair columns grow rightward as more depths get computed.
+
+When LBR runs on a setup with no training row (e.g. an LBR'd archive snapshot), the row is created with empty training cols.
 
 ### Utility logging
 
 To get an approximate idea of whether we are running enough iterations, we are logging utility at equal intervals across the training run. If there is no substantial trend beyond the first 30% of iterations, then the exploitability coming from insufficient iterations is likely to be low (however, exploitability coming from the abstraction may still be high).
 
-There is an `analysis/training_analytics.py` script that makes:
-* a summary table showing key data for each setup trained;
-* charts of utility over time for each setup.
+### Periodic exploitability (optional)
 
-To use it, run `python -m cfr_ai.analysis.training_analytics`.
+Pass `--get-exploitability` to `cfr_ai.training` to compute LBR-K at several evenly-spaced points during training. Each measurement is appended to the setup's `metadata.csv` under a `--- Exploitability Log ---` block as e.g. `LBR-1 expl sp=0 at Iter 4000000, +0.083%`. The utility log gives a stability signal; this gives an actual exploitability trajectory — far more reliable for deciding "how many iterations does this setup need". Flags:
+
+* `--exploitability-points N` (default 5) — number of snapshots, evenly spaced across the run.
+* `--exploitability-depth K` (default 1) — LBR-K used at each snapshot. K=1 is fast and a good convergence proxy.
+* `--exploitability-n-belief 300`, `--exploitability-n-lbr-hand 500` — sampling caps (matching the production LBR defaults).
+
+Cost is modest: a few LBR-1 calls per training run. Off by default to keep the production training command fast.
+
+`analysis/training_analytics.py` is an admin tool for **rebuilding** the unified summary from the per-setup `metadata.csv` files (preserving existing LBR cols when the training timestamp matches) and **regenerating** the per-setup utility chart PNGs. Day-to-day, `training.py` and `lbr.py` maintain the summary incrementally — this script is for migrations or recovering from a corrupted summary file.
+
+```
+python -m cfr_ai.analysis.training_analytics             # rebuild CSV + regenerate charts
+python -m cfr_ai.analysis.training_analytics --no-charts # only rebuild CSV
+python -m cfr_ai.analysis.training_analytics --only-charts # only regenerate charts
+```
 
 ### Head-to-head comparison
 

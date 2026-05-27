@@ -356,10 +356,22 @@ class Trainer:
 
     # -- training loop -----------------------------------------------------
 
-    def train(self, num_iterations: int) -> Tuple[float, float, Dict[str, Any]]:
+    def train(
+        self,
+        num_iterations: int,
+        snapshot_callback=None,
+        snapshot_every_log_points: int = 1,
+    ) -> Tuple[float, float, Dict[str, Any]]:
+        """Run `num_iterations` of MCCFR. `snapshot_callback`, if given, is
+        called with `(iter_num, FlatStrategy)` at every `snapshot_every_log_points`
+        utility-log point — caller uses it to take periodic measurements
+        (e.g. LBR-1 exploitability) on the live averaged strategy without
+        pausing training otherwise. The FlatStrategy passed in is a freshly
+        materialised copy; modifying it does not affect training state."""
         utils = np.zeros(2, dtype=np.float64)
         last_utils = np.zeros(2, dtype=np.float64)
         utility_log: Dict[str, Any] = {}
+        log_point_counter = 0
 
         hand_sizes_arr = np.asarray(self.hand_sizes, dtype=np.int64)
 
@@ -450,6 +462,13 @@ class Trainer:
                 last_utils = utils.copy()
                 last_log_time = now
                 last_log_iter = i + 1
+                log_point_counter += 1
+
+                if (snapshot_callback is not None
+                        and log_point_counter % snapshot_every_log_points == 0):
+                    snap, _ = self.get_final_flat_strategy(
+                        drop_check_only=True, clear_lows_threshold=0.01)
+                    snapshot_callback(i + 1, snap)
 
         return (
             float(utils[0]) * 2 / num_iterations,

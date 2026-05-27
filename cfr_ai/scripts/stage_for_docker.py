@@ -41,10 +41,6 @@ EXCLUDE_FILE_NAMES = {
     "README_Appendix_A.md",
     "README_Appendix_B.md",
     # Tracking CSVs and visualisations not needed at runtime:
-    "bench_5M_results.csv",
-    "lbr_summary.csv",
-    "lbr_summary_old.csv",
-    "strategy_format_bench.csv",
     "subgame_h2h.csv",
     "subgame_sweep.csv",
     "summary_of_all_runs.csv",

@@ -102,7 +102,7 @@ def main() -> None:
         setup = r["Setup"].strip().strip('"').strip()
         setup_us = setup.replace(",", "_")
         try:
-            prod_ram = float(r["Memory (MB)"].strip())
+            prod_ram = float(r["RAM (MB)"].strip())
         except Exception:
             skipped.append(setup); continue
         prod_h = parse_hhmm(r["Duration"])

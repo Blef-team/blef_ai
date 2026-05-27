@@ -10,7 +10,6 @@ Composite key layout (same as `trainer.py`):
     [abs_id : 36][h_m2 : 8][h_m1 : 8][last_bet : 8][hand_size : 4]
 """
 
-import csv
 import itertools
 import os
 import time
@@ -32,6 +31,14 @@ from cfr_ai.trainer import (
 
 # Inverse of _HISTORY_CODE_STRS: code-string -> uint8 id. Built once.
 _STR_TO_CODE_ID: Dict[str, int] = {s: i for i, s in enumerate(_HISTORY_CODE_STRS)}
+
+
+# Sentinel for "as deep as you can recurse" — past this many LBR-active
+# decisions LBR equals exact best response (game depth is far smaller). The
+# JIT recursion handles this fine; the only practical limit on depth is the
+# 88^depth combinatorial explosion at each LBR-active node, which makes
+# anything past ~3 infeasible on round-4+ setups.
+INF_DEPTH = 10**6
 
 
 @dataclass
@@ -774,92 +781,53 @@ def se_relative_ci_upper(K: int, alpha: float = 0.05) -> float:
     return z / (2 * (K - 1)) ** 0.5
 
 
-SUMMARY_PATH = os.path.join("cfr_ai", "outputs", "lbr_summary.csv")
-SUMMARY_BASE_FIELDS = ["Setup", "Finished", "Sampling"]
-SUMMARY_TRAILING_FIELDS: List[str] = []
-
-
-def _depth_label(depth: int) -> str:
-    return str(depth)
-
-
-def _depth_cols(label: str) -> Tuple[str, str]:
-    return f"LBR-{label} expl", f"LBR-{label} duration"
-
-
-def _sort_depth_labels(labels):
-    return sorted(labels, key=lambda d: int(d))
-
-
 def _sampling_label(n_belief: int, n_lbr_hand: int) -> str:
     lbr_str = str(n_lbr_hand) if n_lbr_hand is not None else "all"
     opp_str = str(n_belief) if n_belief is not None else "all"
     return f"({lbr_str}, {opp_str})"
 
 
+def _expl_cell(r) -> str:
+    """Format a per-sp result as the "+X.XXX% [± Y.YYYpp]" cell content."""
+    if r["se_worst"] == 0:
+        return f"{r['expl']*100:+.3f}%"
+    return f"{r['expl']*100:+.3f}% ± {r['se_worst']*100:.3f}pp"
+
+
+def _depth_label(depth: int) -> str:
+    """Display/column-label form: 'inf' for the BR sentinel, str(depth) else."""
+    return "inf" if depth >= INF_DEPTH else str(depth)
+
+
 def _update_summary(hand_sizes, depth, per_sp_results, sampling_labels):
-    """Read existing rows, set this setup's LBR-<depth> columns (preserving any
-    other depth columns already present), sort by setup size, rewrite."""
-    from datetime import datetime
-    os.makedirs(os.path.dirname(SUMMARY_PATH), exist_ok=True)
-    rows: Dict[str, Dict[str, str]] = {}
-    existing_labels = set()
-    if os.path.exists(SUMMARY_PATH):
-        with open(SUMMARY_PATH, "r", newline="") as f:
-            reader = csv.DictReader(f)
-            for r in reader:
-                rows[r["Setup"]] = dict(r)
-        for row in rows.values():
-            for k in row.keys():
-                if k.startswith("LBR-") and k.endswith(" expl"):
-                    existing_labels.add(k[len("LBR-"):-len(" expl")])
+    """Write this setup's LBR-<depth> columns into the unified summary CSV
+    AND into the setup's metadata.csv (preserves training cols + other depth
+    rows already there).
 
-    this_label = _depth_label(depth)
-    all_labels = _sort_depth_labels(existing_labels | {this_label})
-    depth_cols: List[str] = []
-    for label in all_labels:
-        e, d = _depth_cols(label)
-        depth_cols.extend([e, d])
-    fields = SUMMARY_BASE_FIELDS + depth_cols + SUMMARY_TRAILING_FIELDS
+    `per_sp_results` is `{starting_player: (result_dict, duration_s)}`. When
+    both starting players are run, the cell value joins them with " | ".
+    """
+    from cfr_ai import summary as summary_mod
 
-    setup_key = ",".join(str(x) for x in hand_sizes)
     sps_sorted = sorted(per_sp_results.keys())
+    expl_str = " | ".join(_expl_cell(per_sp_results[sp][0]) for sp in sps_sorted)
+    duration_str = " | ".join(f"{per_sp_results[sp][1]:.0f}" for sp in sps_sorted)
+    sampling = sampling_labels[sps_sorted[0]]
+    depth_label = _depth_label(depth)
 
-    def _expl_str(r):
-        if r["se_worst"] == 0:
-            return f"{r['expl']*100:+.3f}%"
-        return f"{r['expl']*100:+.3f}% ± {r['se_worst']*100:.3f}pp"
+    summary_mod.update_lbr_row(hand_sizes, depth_label,
+                               expl_str, duration_str, sampling)
 
-    def _join_str(values, fn):
-        return " | ".join(fn(values[sp]) for sp in sps_sorted)
+    setup_dir = os.path.join(
+        "cfr_ai", "outputs", "_".join(str(x) for x in sorted(hand_sizes)))
+    summary_mod.update_metadata_lbr(setup_dir, depth_label,
+                                    expl_str, duration_str, sampling)
 
-    row = rows.get(setup_key, {})
-    row["Setup"] = setup_key
-    row["Sampling"] = sampling_labels[sps_sorted[0]]
-    e_col, d_col = _depth_cols(this_label)
-    row[e_col] = _join_str(
-        {sp: per_sp_results[sp][0] for sp in sps_sorted}, _expl_str,
+    print(
+        f"\nWrote {summary_mod.setup_key(hand_sizes)} (LBR-{depth_label}) "
+        f"to {summary_mod.SUMMARY_PATH} and {setup_dir}/metadata.csv",
+        flush=True,
     )
-    row[d_col] = _join_str(
-        {sp: per_sp_results[sp][1] for sp in sps_sorted},
-        lambda v: f"{v:.0f}",
-    )
-    row["Finished"] = datetime.now().strftime("%Y-%m-%d")
-    rows[setup_key] = row
-
-    def _sort_key(s):
-        try:
-            xs = [int(x) for x in s.split(",")]
-            return (sum(xs), xs)
-        except Exception:
-            return (10**9, [])
-
-    with open(SUMMARY_PATH, "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
-        w.writeheader()
-        for key in sorted(rows.keys(), key=_sort_key):
-            w.writerow({k: rows[key].get(k, "") for k in fields})
-    print(f"\nWrote {setup_key} (LBR-{this_label}) to {SUMMARY_PATH}", flush=True)
 
 
 def main():
@@ -872,15 +840,21 @@ def main():
     p.add_argument("--setup-dir", type=str, default=None,
                    help="Directory containing strategy.npz to evaluate. "
                         "Defaults to cfr_ai/outputs/<setup>/.")
-    p.add_argument("--depth", type=int, default=1,
-                   help="Number of LBR-optimised decisions per game. "
-                        "1 = LBR-1 (default), 2 = LBR-2, etc.")
+    p.add_argument("--depth", type=int, default=INF_DEPTH,
+                   help="Number of LBR-optimised decisions per game before "
+                        "falling back to CFR-vs-CFR rollout. Default is "
+                        "effectively infinity (INF_DEPTH = 10^6), which means "
+                        "LBR plays optimally to terminal = exact best response. "
+                        "Combinatorial cost is ~88^depth at each LBR-active "
+                        "node, so practical for round 1-2 setups; pass "
+                        "--depth 1 (the classic Lisý-Bowling LBR-1) or 2 for "
+                        "anything larger.")
     p.add_argument("--starting-player", type=int, default=None, choices=[0, 1])
     p.add_argument("--n-belief-samples", type=int, default=300)
     p.add_argument("--n-lbr-hand-samples", type=int, default=500)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--update-summary", action="store_true",
-                   help="Append/update this setup's row in outputs/lbr_summary.csv.")
+                   help="Append/update this setup's LBR cells in outputs/summary_of_all_runs.csv.")
     args = p.parse_args()
 
     hand_sizes = sorted(args.hand_sizes)
@@ -899,7 +873,8 @@ def main():
     else:
         sps = [0, 1]
 
-    print(f"Depth: {args.depth}", flush=True)
+    depth_display = "inf (= BR)" if args.depth >= INF_DEPTH else str(args.depth)
+    print(f"Depth: {depth_display}", flush=True)
 
     per_sp_results = {}
     sampling_labels = {}
