@@ -70,6 +70,38 @@ class DynamicProbabilitiesTest(unittest.TestCase):
         brute = self._brute_pair_probability(deck_size, hand, others, value=7)
         self.assertAlmostEqual(computed, brute, places=10)
 
+    def test_two_pairs_with_excess_rank_does_not_short_circuit(self):
+        # Regression: with three 0s and one 1 already visible, the prob of
+        # two pairs (1, 0) needs one more rank-1 card. Pre-fix, needed1=1 and
+        # needed2=-1 cancelled to 0 and triggered the early-return at 1.0.
+        deck_size = 24
+        hand = [(0, 0), (0, 1), (0, 2), (1, 0)]
+        others = [1]
+        probs = self._get_probs(deck_size, hand, others)
+        rules = GameRules(deck_size)
+        two_pairs_action = rules.boundaries["Pair"] + 0  # Two pairs of (1, 0)
+
+        computed = probs[two_pairs_action]
+        brute = self._brute_two_pairs_probability(deck_size, hand, others, val1=1, val2=0)
+        self.assertAlmostEqual(computed, brute, places=10)
+        self.assertLess(computed, 1.0)
+
+    def test_full_house_with_excess_triple_rank_does_not_short_circuit(self):
+        # Regression: with four 0s and one 1 already visible, the prob of a
+        # full house (three 0s, pair of 1s) needs one more rank-1 card. Pre-fix,
+        # needed3=-1 and needed2=1 cancelled to 0 and triggered the early-return at 1.0.
+        deck_size = 24
+        hand = [(0, 0), (0, 1), (0, 2), (0, 3), (1, 0)]
+        others = [1]
+        probs = self._get_probs(deck_size, hand, others)
+        rules = GameRules(deck_size)
+        full_house_action = rules.boundaries["Three of a kind"] + 0  # Full house (0, 1)
+
+        computed = probs[full_house_action]
+        brute = self._brute_full_house_probability(deck_size, hand, others, val3=0, val2=1)
+        self.assertAlmostEqual(computed, brute, places=10)
+        self.assertLess(computed, 1.0)
+
     def test_flush_probability_matches_bruteforce(self):
         for deck_size in (24, 32):
             hand = [(0, 0)]
@@ -100,6 +132,36 @@ class DynamicProbabilitiesTest(unittest.TestCase):
             all_cards = known + list(combo)
             count = sum(1 for v, _ in all_cards if v == value)
             if count >= 2:
+                successes += 1
+        return successes / total if total else 0.0
+
+    def _brute_two_pairs_probability(self, deck_size: int, hand: List[Card], others: List[int], val1: int, val2: int) -> float:
+        known = list(hand)
+        remaining = self._remaining_deck(deck_size, known)
+        draws = sum(others)
+        successes = 0
+        total = 0
+        for combo in combinations(remaining, draws):
+            total += 1
+            all_cards = known + list(combo)
+            count1 = sum(1 for v, _ in all_cards if v == val1)
+            count2 = sum(1 for v, _ in all_cards if v == val2)
+            if count1 >= 2 and count2 >= 2:
+                successes += 1
+        return successes / total if total else 0.0
+
+    def _brute_full_house_probability(self, deck_size: int, hand: List[Card], others: List[int], val3: int, val2: int) -> float:
+        known = list(hand)
+        remaining = self._remaining_deck(deck_size, known)
+        draws = sum(others)
+        successes = 0
+        total = 0
+        for combo in combinations(remaining, draws):
+            total += 1
+            all_cards = known + list(combo)
+            count3 = sum(1 for v, _ in all_cards if v == val3)
+            count2 = sum(1 for v, _ in all_cards if v == val2)
+            if count3 >= 3 and count2 >= 2:
                 successes += 1
         return successes / total if total else 0.0
 

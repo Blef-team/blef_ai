@@ -273,8 +273,8 @@ def _calculate_prob_with_context(action_id: int, ctx: ProbContext, unknown_cards
             return 0.0
         needed1 = 2 - value_counts[val1]
         needed2 = 2 - value_counts[val2]
-        
-        if needed1 + needed2 <= jokers_in_play: return 1.0
+
+        if max(0, needed1) + max(0, needed2) <= jokers_in_play: return 1.0
         
         cards1_in_deck = max(0, 4 - value_counts[val1])
         cards2_in_deck = max(0, 4 - value_counts[val2])
@@ -316,8 +316,8 @@ def _calculate_prob_with_context(action_id: int, ctx: ProbContext, unknown_cards
             return 0.0
         needed3 = 3 - value_counts[val3]
         needed2 = 2 - value_counts[val2]
-        
-        if needed3 + needed2 <= jokers_in_play: return 1.0
+
+        if max(0, needed3) + max(0, needed2) <= jokers_in_play: return 1.0
         
         cards3_in_deck = max(0, 4 - value_counts[val3])
         cards2_in_deck = max(0, 4 - value_counts[val2])
