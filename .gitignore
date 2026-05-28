@@ -135,8 +135,22 @@ dmypy.json
 # AI strategy output
 cfr_ai/outputs
 
-# local CFR strategy archive, including auto-created README index
-cfr_ai/archive/
+# local CFR strategy archive — strategy snapshots are large model files
+# we keep on disk only. The archive's index README and any shelved code
+# experiments (subdirectories with their own README) ARE tracked so the
+# decisions and rationale live in git history.
+#
+# Note: we ignore /* (contents), not the directory itself — otherwise git
+# wouldn't descend in and the !-negations below would be unreachable.
+cfr_ai/archive/*
+!cfr_ai/archive/README.md
+!cfr_ai/archive/subgame/
+cfr_ai/archive/subgame/*
+!cfr_ai/archive/subgame/README.md
+!cfr_ai/archive/subgame/subgame.py
+!cfr_ai/archive/subgame/analysis/
+cfr_ai/archive/subgame/analysis/*
+!cfr_ai/archive/subgame/analysis/*.py
 
 # local working notes — distilled content lives in README + appendices
 cfr_ai/SESSION_NOTES.md
