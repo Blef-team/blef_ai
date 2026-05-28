@@ -23,14 +23,11 @@ from tqdm import tqdm
 
 from cfr_ai.game import Game
 from cfr_ai.information_set import get_hand_abstraction, history_codes
-from cfr_ai.trainer import (
+from cfr_ai.keys import (
     LAST_BET_SHIFT, H_M1_SHIFT, H_M2_SHIFT, ABS_ID_SHIFT, ABSENT_CODE,
-    MAX_DEPTH, _HISTORY_CODE_ID, _HISTORY_CODE_STRS,
+    MAX_DEPTH, _HISTORY_CODE_ID, _HISTORY_CODE_STRS, _STR_TO_CODE_ID,
+    _split_suffix,
 )
-
-
-# Inverse of _HISTORY_CODE_STRS: code-string -> uint8 id. Built once.
-_STR_TO_CODE_ID: Dict[str, int] = {s: i for i, s in enumerate(_HISTORY_CODE_STRS)}
 
 
 # Sentinel for "as deep as you can recurse" — past this many LBR-active
@@ -56,49 +53,8 @@ class FlatStrategy:
 # ---------------------------------------------------------------------------
 # Loader
 # ---------------------------------------------------------------------------
-
-def _split_suffix(suffix: str) -> Tuple[int, int, str]:
-    """Split a strategy-file key suffix into (h_m1_id, h_m2_id, abs_str).
-
-    Suffix structure as emitted by trainer/agent is one of:
-      - "abs"              -> 0 history codes
-      - "c1-abs"           -> 1 history code
-      - "c1-c2-abs"        -> 2 history codes
-    Where c1/c2 come from `_STR_TO_CODE_ID` (history-code strings).
-
-    Complication: the hand-abstraction string for rounds 6+ can contain
-    hyphens (e.g. negative numbers like "-9.0 -7.0"), so a naive
-    `suffix.split('-')` mis-attributes leading abs tokens as history
-    codes. The robust rule is:
-      1. If suffix has no '-', it's the abs.
-      2. If suffix starts with '-' (abs starts with a minus), 0 codes.
-      3. Else peel off up to 2 leading tokens that are valid non-empty
-         history codes; the remainder is the abs.
-
-    The empty string is in `_STR_TO_CODE_ID` (history.csv has empty
-    placeholder cells) but is never a real code in a key.
-    """
-    if "-" not in suffix:
-        return ABSENT_CODE, ABSENT_CODE, suffix
-    if suffix.startswith("-"):
-        return ABSENT_CODE, ABSENT_CODE, suffix
-
-    first_dash = suffix.index("-")
-    tok1 = suffix[:first_dash]
-    if not tok1 or tok1 not in _STR_TO_CODE_ID:
-        return ABSENT_CODE, ABSENT_CODE, suffix
-
-    rest = suffix[first_dash + 1:]
-    if "-" not in rest or rest.startswith("-"):
-        return _STR_TO_CODE_ID[tok1], ABSENT_CODE, rest
-
-    second_dash = rest.index("-")
-    tok2 = rest[:second_dash]
-    if not tok2 or tok2 not in _STR_TO_CODE_ID:
-        return _STR_TO_CODE_ID[tok1], ABSENT_CODE, rest
-
-    abs_str = rest[second_dash + 1:]
-    return _STR_TO_CODE_ID[tok1], _STR_TO_CODE_ID[tok2], abs_str
+# `_split_suffix` moved to `cfr_ai/keys.py` so the deployed agent can use it
+# without pulling numba via this module's @njit decorators.
 
 
 def _parse_key_to_composite(

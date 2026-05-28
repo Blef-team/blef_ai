@@ -30,40 +30,19 @@ from cfr_ai.game import Game
 from cfr_ai.information_set import get_hand_abstraction, history_codes
 
 
-# ---------------------------------------------------------------------------
-# Composite-key bit layout
-# ---------------------------------------------------------------------------
+# Composite-key bit layout + history-code matrix live in `cfr_ai/keys.py`
+# so the deployed agent can import them without pulling numba/llvmlite.
+# Re-export here for backwards-compat callers; new code should import
+# from cfr_ai.keys directly.
+from cfr_ai.keys import (
+    LAST_BET_SHIFT, H_M1_SHIFT, H_M2_SHIFT, ABS_ID_SHIFT,
+    ABSENT_CODE, MAX_DEPTH,
+    _HISTORY_CODE_ID, _HISTORY_CODE_STRS,
+)
 
-LAST_BET_SHIFT = 4
-H_M1_SHIFT = 12
-H_M2_SHIFT = 20
-ABS_ID_SHIFT = 28
-
-ABSENT_CODE = 255
-
-# Max history depth (each player adds at most one bet > previous; +slack).
-MAX_DEPTH = 92
 
 # How many rows to add when the flat arrays fill up. 64k rows × ~720 B = ~50 MB.
 GROW_CHUNK = 64_000
-
-
-# ---------------------------------------------------------------------------
-# Global history-code-id matrix, built once
-# ---------------------------------------------------------------------------
-
-def _build_history_code_id_matrix() -> Tuple[np.ndarray, List[str]]:
-    unique = sorted(set(history_codes.flatten().tolist()))
-    str_to_id = {s: i for i, s in enumerate(unique)}
-    assert len(unique) < 255, "Too many unique history codes for uint8"
-    code_id = np.zeros((88, 88), dtype=np.int64)
-    for a in range(88):
-        for b in range(88):
-            code_id[a, b] = str_to_id[history_codes[a, b]]
-    return code_id, unique
-
-
-_HISTORY_CODE_ID, _HISTORY_CODE_STRS = _build_history_code_id_matrix()
 
 
 # ---------------------------------------------------------------------------

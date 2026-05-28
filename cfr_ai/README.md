@@ -180,13 +180,25 @@ With 16 cards on the table, the great straight has 96% chance of existing (88%, 
 
 ### Strategy storage format
 
-Strategies are stored as compressed numpy archives (`strategy.npz` per setup) keyed by a composite int64 (encoding hand size, last bet, two history-code ids and an abstraction id). The deployed agent loads the whole file once per setup (~1-4 s even for the largest setups) and serves lookups via the JIT-friendly numba `typed.Dict[int64, int64]` built at load time.
+Every infoset is keyed by a composite int64 encoding hand size, last bet, two history-code ids, and an abstraction id. Only non-checking infosets are written — a missing key at lookup time is interpreted as "check 100%".
+
+Two on-disk layouts are supported, both produced from the same training run and both loaded by `strategy_io.load_strategy_for_agent`:
+
+1. **Compressed `strategy.npz`** — what `training.py` writes; the resting format under `cfr_ai/outputs/<setup>/`. A single compressed numpy archive containing `keys` (int64, sorted), `lower`/`upper` action bounds (int16), a padded float32 `[N, 89]` probability table, and `min_bet`. Read eagerly into RAM. Convenient for local development.
+2. **Sparse mmap layout** — what `scripts/stage_for_docker.py` produces for the Lambda image. The per-setup directory contains:
+   * `strategy_meta.npz` (compressed) — `keys`, `lower`, `upper`, `min_bet`, and `probs_offset` (length-`N+1` prefix sum into the sparse arrays).
+   * `probs_sparse_indices.npy` (uint8, uncompressed) — non-zero positions within each row's legal-action slice.
+   * `probs_sparse_values.npy` (uint16, uncompressed) — non-zero probability values, quantised with scale `1/65535`.
+
+   The `.npy` files are `mmap`'d at load time. Strategies are typically 5-10% dense after `clear_lows`, so peak resident memory per loaded strategy is ~10-50 MB regardless of `N`.
+
+The agent loader returns a `FlatStrategyAgent` regardless of which layout is on disk: lookup is always `np.searchsorted` on the sorted keys, and `get_strategy(row)` reconstructs the dense legal-action slice from whichever representation was loaded. The loader does not import numba.
 
 Files written per setup under `cfr_ai/outputs/<setup>/`:
 
-* `strategy.npz` — keys, lower/upper action bounds, padded float32 probability table. Only non-checking infosets are stored; the JIT lookup defaults to "check 100%" on missing keys.
-* `strategy.abs.json` — abstraction-string → id table, also covering any diagnostic-only abstractions so they remain interpretable.
-* `diagnostic.npz` (optional) — touch counters + the raw (uncleaned) averaged strategy for every infoset, including check-only ones. Used by analysis scripts, not by the deployed agent.
+* `strategy.npz` — the compressed layout described above.
+* `strategy.abs.json` — abstraction-string → id table, also covering diagnostic-only abstractions so they remain interpretable.
+* `diagnostic.npz` (optional) — touch counters + raw `regrets` + raw `strategy_sum` for every infoset, including check-only ones. Used by `analysis/` scripts, not by the deployed agent.
 * `metadata.csv` — human-readable training params (iterations, penalty, duration, game values, utility log).
 
 ## History abstraction and convergence
@@ -331,15 +343,19 @@ Using the game values noted down for each setup in the `summary_of_all_runs.csv`
 
 ## Deployment
 
-The AI is deployed as a single Lambda function backed by a container image stored in Amazon ECR. The image bundles `cfr_ai/` (code) and all 66 `strategy.npz` + `strategy.abs.json` payloads.
+The AI is deployed as a single Lambda function backed by a container image stored in Amazon ECR. The image bundles `cfr_ai/` (code) and the 66 per-setup strategy payloads in the sparse-mmap layout described in [Strategy storage format](#strategy-storage-format).
 
-`cfr_ai/agent.py:_get_strategy(hand_sizes)` loads the relevant `strategy.npz` lazily on first use per warm container, caches the resulting `FlatStrategy` in a module-level **bounded LRU**, then resolves every subsequent call by direct composite-key lookup. The cache is bounded because each loaded `FlatStrategy` for a big setup occupies ~300 MB of RAM (rows × fp32 probs + numba typed.Dict + ancillary arrays); without an LRU, a long-lived warm container that serves many distinct setups would OOM. Default cache size is 2 entries, safe for a 1024 MB Lambda; tune via the `CFR_STRATEGY_CACHE_SIZE` env var if the function is on a larger memory tier.
+`cfr_ai/agent.py:_get_strategy(hand_sizes)` loads the relevant strategy lazily on first use per warm container, caches it as a `FlatStrategyAgent` (defined in `strategy_io.py`), then resolves every subsequent call by `np.searchsorted` on the sorted-keys array. No numba on the agent path.
+
+`cfr_ai/scripts/stage_for_docker.py` converts each setup's local compressed `strategy.npz` into the sparse-mmap layout at Docker-build time only — the source tree stays compact.
+
+**Cache policy**: size = 1. Game state progresses linearly through (hand_size_a, hand_size_b) configurations as cards are won/lost; the previous setup is unlikely to be useful again before the next one displaces it. `agent.py` evicts the current strategy BEFORE loading the new one, so peak memory through a setup transition is exactly one loaded strategy plus the base runtime.
 
 Files involved:
 * `cfr_ai/lambda_function.py` — Lambda entry point. Parses the game event, calls `agent.determine_action`, invokes `blef-play` asynchronously.
-* `cfr_ai/deployment/Dockerfile.lambda` — `public.ecr.aws/lambda/python:3.12` base + the four pip deps (numpy, numba, llvmlite, tqdm) + `cfr_ai/` + `lambda_function.py`.
-* `cfr_ai/deployment/requirements.txt` — pinned versions for the Docker build.
-* `cfr_ai/scripts/stage_for_docker.py` — assembles the build context (excludes `analysis/`, `archive/`, `deployment/`, `__pycache__`, `diagnostic.npz`, tracking CSVs, visualisation PNGs, `_bench_formats/`). Cross-platform; no rsync needed.
+* `cfr_ai/deployment/Dockerfile.lambda` — `public.ecr.aws/lambda/python:3.12` base + `cfr_ai/` + `lambda_function.py`.
+* `cfr_ai/deployment/requirements.txt` — `numpy` only.
+* `cfr_ai/scripts/stage_for_docker.py` — assembles the build context (excludes `analysis/`, `archive/`, `deployment/`, `__pycache__`, `diagnostic.npz`, tracking CSVs, visualisation PNGs, `_bench_formats/`) and converts strategies to the sparse-mmap layout. Cross-platform; no rsync needed.
 * `cfr_ai/scripts/deploy_lambda.sh` — orchestrates build → ECR login → ECR push → `update-function-code`. Idempotently creates the ECR repo. Skip the Lambda update with `SKIP_LAMBDA_UPDATE=1`.
 * `cfr_ai/scripts/create_lambda.sh` — first-deploy only; `aws lambda create-function` with the right architecture / memory / timeout. Subsequent updates use `deploy_lambda.sh`.
 
@@ -363,9 +379,9 @@ export ACCT=<account-id> REGION=<region> PROFILE=<aws-cli-profile>
 bash cfr_ai/scripts/deploy_lambda.sh
 ```
 
-### Cold-start expectations
+### Runtime characteristics
 
-A fresh container pays ~6s of cold-start cost on the largest setups: ~1.5s for the numba import + ~4.5s to load the biggest `strategy.npz` and build the numba `typed.Dict`. Subsequent calls on the warm container are sub-millisecond (cached `FlatStrategy`).
+Lambda is sized at **256 MB**. Cold start total wall: ~2.5-3.5s (~0.8-1.3s Init Duration + ~1.5-2.5s first decision). Warm decision: ~30-50ms. Peak resident memory: ~115-170 MB on the biggest (7,8) setup, comfortably under the 256 MB cap.
 
 ### Architecture choice
 

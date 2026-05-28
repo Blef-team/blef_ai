@@ -1,17 +1,23 @@
 """Deployed-agent entry point: sample an action from the trained CFR
 strategy for the active game state.
 
-The agent loads the entire per-setup `strategy.npz` once per setup
-(cached on the warm Lambda container) and serves lookups via the
-composite int64 key. The legacy per-(hand_size, last_bet) CSV layout
-has been retired in favour of NPZ; see `cfr_ai/strategy_io.py`.
+Loader: `strategy_io.load_strategy_for_agent` — uses `np.searchsorted` on
+a sorted-keys array instead of building a `numba.typed.Dict`. ~70× faster
+cold load on the biggest setups (50ms vs 3-5s) and avoids importing numba
+entirely, which drops ~130 MB from the deployed image.
+
+Cache policy: size = 1. Game state progresses linearly through
+(hand_size_a, hand_size_b) configurations as cards are won/lost; the
+previous setup is very unlikely to come back before the next one
+displaces it. Evict-before-load keeps peak memory at exactly one loaded
+strategy (~260-340 MB) + base runtime, so the Lambda fits comfortably in
+512 MB.
 
 Public entry point: `determine_action(game_state)`.
 """
 
 import os
 import random
-from collections import OrderedDict
 from typing import Tuple, Optional
 
 import numpy as np
@@ -19,59 +25,59 @@ import numpy as np
 from cfr_ai.information_set import (
     make_key, get_possible_actions, get_hand_abstraction,
 )
-from cfr_ai.strategy_io import load_strategy
-from cfr_ai.lbr import _split_suffix
-from cfr_ai.trainer import (
+from cfr_ai.strategy_io import load_strategy_for_agent
+from cfr_ai.keys import (
     LAST_BET_SHIFT, H_M1_SHIFT, H_M2_SHIFT, ABS_ID_SHIFT,
+    _split_suffix,
 )
 
 
-# Module-level LRU strategy cache, shared across calls on a warm Lambda
-# container. Size is bounded because each loaded `FlatStrategy` for a large
-# setup occupies ~300 MB of RAM (700K rows of fp32 probs + numba typed.Dict +
-# ancillary arrays) and a 1 GB Lambda can only hold a couple of them on top
-# of the ~250 MB used by numba / numpy / the rest of the runtime.
-#
-# Default 2 is the safe value for a 1024 MB Lambda; bump via the env var
-# CFR_STRATEGY_CACHE_SIZE if running on a larger memory tier (e.g. set to 5
-# for a 2048 MB Lambda, 10 for 4096 MB).
-_STRATEGY_CACHE_SIZE = int(os.environ.get("CFR_STRATEGY_CACHE_SIZE", "2"))
-_strategy_cache: "OrderedDict[Tuple[int, ...], object]" = OrderedDict()
+# Module-level strategy cache, shared across calls on a warm Lambda
+# container. Capacity is hard-coded at 1 (override only if you know what
+# you're doing — bigger cache means bigger Lambda memory tier).
+_STRATEGY_CACHE_SIZE = int(os.environ.get("CFR_STRATEGY_CACHE_SIZE", "1"))
+_current_setup: Optional[Tuple[int, ...]] = None
+_current_strategy = None
 
 
 def _resolve_setup_dir(hand_sizes: Tuple[int, ...]) -> str:
     """Find the strategy directory for `hand_sizes`. Looks first in the
     Lambda working dir (deployed layout) and then in cfr_ai/outputs/
-    (dev/test layout)."""
+    (dev/test layout). Accepts EITHER the deployed sparse-mmap layout
+    (`strategy_meta.npz` + `probs_sparse_*.npy`) OR the legacy
+    compressed single-file layout (`strategy.npz`)."""
     setup = "_".join(str(x) for x in hand_sizes)
     candidates = [
         setup,
         os.path.join("cfr_ai", "outputs", setup),
     ]
     for c in candidates:
-        if os.path.exists(os.path.join(c, "strategy.npz")):
+        if (os.path.exists(os.path.join(c, "strategy_meta.npz"))
+                or os.path.exists(os.path.join(c, "strategy.npz"))):
             return c
     raise FileNotFoundError(
-        f"No strategy.npz found for setup {hand_sizes!r}. Tried: {candidates}"
+        f"No strategy_meta.npz or strategy.npz found for setup {hand_sizes!r}. "
+        f"Tried: {candidates}"
     )
 
 
 def _get_strategy(hand_sizes: Tuple[int, ...]):
-    """Load (or fetch from cache) the FlatStrategy for `hand_sizes`.
+    """Load (or fetch from cache) the strategy for `hand_sizes`.
 
-    LRU: a hit moves the entry to the most-recent end; a miss loads from disk
-    and evicts the least-recently-used entry once the cache is over capacity.
-    Eviction drops the only reference to the evicted `FlatStrategy`, so its
-    numpy arrays and numba typed.Dict become garbage-collectable.
+    Cache holds at most ONE strategy. On a miss: drop the current strategy
+    BEFORE loading the new one, so peak RAM is one strategy + base runtime
+    (not two strategies in flight as you transition setups).
     """
-    if hand_sizes in _strategy_cache:
-        _strategy_cache.move_to_end(hand_sizes)
-        return _strategy_cache[hand_sizes]
+    global _current_setup, _current_strategy
+    if hand_sizes == _current_setup and _current_strategy is not None:
+        return _current_strategy
+    # Drop the old one first so the loader peak ~= 1 strategy in flight.
+    _current_strategy = None
+    _current_setup = None
     setup_dir = _resolve_setup_dir(hand_sizes)
-    fs = load_strategy(setup_dir)
-    _strategy_cache[hand_sizes] = fs
-    while len(_strategy_cache) > _STRATEGY_CACHE_SIZE:
-        _strategy_cache.popitem(last=False)
+    fs = load_strategy_for_agent(setup_dir)
+    _current_strategy = fs
+    _current_setup = hand_sizes
     return fs
 
 
@@ -121,8 +127,8 @@ def determine_action(game_state):
             return 87
         return 88
     comp_key = _compose_key(hand_size, last_bet, h_m1_id, h_m2_id, abs_id)
-    k64 = np.int64(comp_key)
-    if k64 not in fs.key_to_row:
+    row = fs.lookup(comp_key)
+    if row is None:
         if len(history) == 0:
             print(
                 "No policy found though the round has just begun. "
@@ -130,10 +136,7 @@ def determine_action(game_state):
             )
             return 87
         return 88
-    row = int(fs.key_to_row[k64])
-    lo = int(fs.lower_action[row])
-    hi = int(fs.upper_action[row])
-    probs = fs.strategy[row, lo:hi + 1]
+    probs = fs.get_strategy(row)
     # Probabilities are stored normalised at save time; we still defend
     # against the all-zero edge case (shouldn't happen post-load-time-norm).
     total = float(probs.sum())

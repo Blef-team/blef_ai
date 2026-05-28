@@ -99,19 +99,44 @@ def main() -> int:
     shutil.copy2(cfr_src / "deployment" / "Dockerfile.lambda", dest / "Dockerfile")
     shutil.copy2(cfr_src / "deployment" / "requirements.txt", dest / "requirements.txt")
 
+    # Convert each setup's compressed strategy.npz into the mmap-friendly
+    # split layout (uncompressed probs_flat.npy + small strategy_meta.npz +
+    # sidecar abs.json). The agent's load_strategy_for_agent prefers this
+    # layout and mmap's the probs file → ~50 MB peak resident regardless
+    # of strategy size.
+    print("[stage] converting strategies to mmap-friendly layout...", flush=True)
+    from cfr_ai.strategy_io import write_mmap_layout
+    outputs = dest / "cfr_ai" / "outputs"
+    n_converted = 0
+    for setup_dir in sorted(outputs.iterdir()):
+        if not setup_dir.is_dir():
+            continue
+        if not (setup_dir / "strategy.npz").exists():
+            continue
+        # Write the mmap layout into the SAME setup_dir, then drop the
+        # original compressed file (we don't ship it — the agent will
+        # only ever read the split layout).
+        write_mmap_layout(str(setup_dir), str(setup_dir))
+        (setup_dir / "strategy.npz").unlink()
+        n_converted += 1
+    print(f"[stage] converted {n_converted} setups to mmap layout", flush=True)
+
     # Quick sanity report.
-    n_npz = sum(1 for _ in (dest / "cfr_ai" / "outputs").rglob("strategy.npz"))
+    n_idx = sum(1 for _ in (dest / "cfr_ai" / "outputs").rglob("probs_sparse_indices.npy"))
+    n_val = sum(1 for _ in (dest / "cfr_ai" / "outputs").rglob("probs_sparse_values.npy"))
+    n_meta = sum(1 for _ in (dest / "cfr_ai" / "outputs").rglob("strategy_meta.npz"))
     n_abs = sum(1 for _ in (dest / "cfr_ai" / "outputs").rglob("strategy.abs.json"))
     total_bytes = sum(p.stat().st_size for p in dest.rglob("*") if p.is_file())
     print(
-        f"[stage] staged: {n_npz} strategy.npz, {n_abs} strategy.abs.json, "
+        f"[stage] staged: {n_idx} probs_sparse_indices.npy + {n_val} probs_sparse_values.npy, "
+        f"{n_meta} strategy_meta.npz, {n_abs} strategy.abs.json, "
         f"total {total_bytes / 1e6:.1f} MB",
         flush=True,
     )
-    if n_npz != 66 or n_abs != 66:
+    if n_idx != 66 or n_val != 66 or n_meta != 66:
         print(
-            f"[warn] expected 66 strategies, got {n_npz} npz / {n_abs} abs.json. "
-            "Continuing, but the image will be incomplete.",
+            f"[warn] expected 66 strategies, got {n_idx} indices / {n_val} values / "
+            f"{n_meta} meta. Continuing, but the image will be incomplete.",
             file=sys.stderr,
         )
     return 0

@@ -86,7 +86,7 @@ trap cleanup EXIT
 # script works from git-bash on Windows without needing rsync installed.
 echo "[stage] Staging files into ${TEMP_DIR}"
 PYTHON_BIN="${PYTHON_BIN:-python}"
-"${PYTHON_BIN}" "${CFR_DIR}/scripts/stage_for_docker.py" "${TEMP_DIR}" --root "${ROOT_DIR}"
+( cd "${ROOT_DIR}" && "${PYTHON_BIN}" -m cfr_ai.scripts.stage_for_docker "${TEMP_DIR}" --root "${ROOT_DIR}" )
 
 # Sanity: report staged size.
 echo "[stage] Staged payload size:"
