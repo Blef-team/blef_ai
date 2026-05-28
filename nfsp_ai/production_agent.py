@@ -9,6 +9,7 @@ alongside optional card/history embedding artifacts.  It exposes a single helper
 from __future__ import annotations
 
 import glob
+import logging
 import os
 import re
 from dataclasses import replace
@@ -18,6 +19,7 @@ from typing import Optional, Tuple
 import numpy as np
 import torch
 
+from nfsp_ai import personalities
 from nfsp_ai.agent import NFSPAgent, NFSPConfig
 from nfsp_ai.nfsp_run_local import (
     _deck_spec_from_game,
@@ -29,6 +31,8 @@ from nfsp_ai.nfsp_run_local import (
     HistoryEmbeddingRuntime,
 )
 from shared.game_utils import GameRules
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Defaults (override via environment variables in Lambda / CLI wrappers)
@@ -415,6 +419,13 @@ class NFSPProductionAgent:
         if not cp:
             raise ValueError("Game state missing 'cp_nickname'")
 
+        # Personality routing. Delegated sources (heuristic / CFR engines) need
+        # no NFSP checkpoint and run on the original (un-canonicalized) state.
+        pers_name = personalities.resolve_personality(game_state)
+        if pers_name is not None and personalities.is_delegated(pers_name):
+            return int(personalities._delegate(
+                personalities.PERSONALITIES[pers_name].source, game_state))
+
         rules = game_state.get("rules", {}) or {}
         deck_size = int(rules.get("deck_size", 24))
         players = game_state.get("players", []) or []
@@ -470,6 +481,18 @@ class NFSPProductionAgent:
 
         obs_tensor = torch.from_numpy(np.asarray(obs_vec, dtype=np.float32)).to(self.device)
         mask_tensor = mask.to(device=self.device, dtype=torch.float32)
+
+        # NFSP-backed personality: sculpt the chosen head's logits. Any failure
+        # falls back to the unmodified baseline policy so a bad config can never
+        # take a bot offline.
+        if pers_name is not None:
+            try:
+                return int(personalities.personality_action(
+                    agent, obs_tensor, mask_tensor, game_state, spec, pub_prior, pers_name))
+            except Exception:
+                logger.exception(
+                    "personality_action failed for '%s'; using baseline policy", pers_name)
+
         action = agent.select_action(
             obs_tensor,
             mask_tensor,

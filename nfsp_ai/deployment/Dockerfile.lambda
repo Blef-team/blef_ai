@@ -10,6 +10,7 @@ RUN pip install --upgrade pip \
 COPY nfsp_ai ${LAMBDA_TASK_ROOT}/nfsp_ai
 COPY shared ${LAMBDA_TASK_ROOT}/shared
 COPY conservative_ai ${LAMBDA_TASK_ROOT}/conservative_ai
+COPY conservative_crawling_ai ${LAMBDA_TASK_ROOT}/conservative_crawling_ai
 COPY agent.py ${LAMBDA_TASK_ROOT}/agent.py
 COPY lambda_function.py ${LAMBDA_TASK_ROOT}/lambda_function.py
 COPY artifacts ${LAMBDA_TASK_ROOT}/artifacts
