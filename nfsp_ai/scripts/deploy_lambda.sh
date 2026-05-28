@@ -58,6 +58,7 @@ cp "${NFSP_DIR}/production_agent.py" "${TEMP_DIR}/agent.py"
 cp "${ROOT_DIR}/deployment/lambda_function.py" "${TEMP_DIR}/lambda_function.py"
 rsync -a "${ROOT_DIR}/artifacts/" "${TEMP_DIR}/artifacts/"
 rsync -a --exclude '__pycache__' "${ROOT_DIR}/conservative_ai" "${TEMP_DIR}/"
+rsync -a --exclude '__pycache__' "${ROOT_DIR}/conservative_crawling_ai" "${TEMP_DIR}/"
 
 cp "${NFSP_DIR}/deployment/requirements.txt" "${TEMP_DIR}/requirements.txt"
 cp "${NFSP_DIR}/deployment/Dockerfile.lambda" "${TEMP_DIR}/Dockerfile"
@@ -80,9 +81,15 @@ echo "[push] Pushing ${ECR}"
 docker push "${ECR}"
 
 FUNCTION="${FUNCTION:-blef-aiagent-nfsp}"
-echo "[lambda] Updating Lambda function ${FUNCTION} to image ${ECR}"
-aws lambda update-function-code \
-  --function-name "${FUNCTION}" \
-  --image-uri "${ECR}"
-
-echo "[done] Deployment complete."
+# The function swap is gated behind SWAP=1 so build+push can be done without
+# touching production. Swap explicitly (SWAP=1) once the new image is verified.
+if [[ "${SWAP:-0}" == "1" ]]; then
+  echo "[lambda] Updating Lambda function ${FUNCTION} to image ${ECR}"
+  aws lambda update-function-code \
+    --function-name "${FUNCTION}" \
+    --image-uri "${ECR}"
+  echo "[done] Build, push and SWAP complete."
+else
+  echo "[skip] SWAP!=1 — pushed image ${ECR} but did NOT update ${FUNCTION}."
+  echo "       To swap:  aws lambda update-function-code --function-name ${FUNCTION} --image-uri ${ECR} --region ${REGION}"
+fi

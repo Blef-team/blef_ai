@@ -1894,11 +1894,27 @@ class NFSPAgent:
 
     # -------- Inference (usually average policy) --------
     @torch.no_grad()
+    def policy_logits(self, obs_vec: torch.Tensor, action_mask: torch.Tensor, *, head: str = "pi", tau: float = 1.0) -> torch.Tensor:
+        """Masked logits ``[1, A]`` from the chosen head at temperature ``tau``.
+
+        ``head`` selects ``"pi"`` (average policy — the Nash approximation used
+        in production) or ``"q"`` (best-response head — sharper, greedier).
+        ``tau`` is a softmax temperature applied to the head's own logits before
+        masking (``tau<1`` sharpens, ``tau>1`` flattens). Illegal actions are
+        set to ``-inf``. This is the shared core of :meth:`select_action`; the
+        defaults reproduce the legacy average-policy behaviour exactly.
+        """
+        net = self.pi if head == "pi" else self.q
+        logits = net(obs_vec.unsqueeze(0).to(self.device))
+        if tau is not None and float(tau) != 1.0:
+            logits = logits / float(tau)
+        mask = action_mask.unsqueeze(0).to(self.device)
+        return masked_softmax_logits(logits, mask)
+
+    @torch.no_grad()
     def select_action(self, obs_vec: torch.Tensor, action_mask: torch.Tensor, use_average_policy: bool = True, greedy: bool = False) -> int:
         if use_average_policy:
-            logits = self.pi(obs_vec.unsqueeze(0).to(self.device))
-            mask = action_mask.unsqueeze(0).to(self.device)
-            mlog = masked_softmax_logits(logits, mask)
+            mlog = self.policy_logits(obs_vec, action_mask, head="pi", tau=1.0)
             if greedy:
                 return int(mlog.argmax(dim=-1).item())
             dist = torch.distributions.Categorical(logits=mlog)
