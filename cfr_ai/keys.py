@@ -71,33 +71,21 @@ def _split_suffix(suffix: str) -> Tuple[int, int, str]:
     Complication: the hand-abstraction string for rounds 6+ can contain
     hyphens (e.g. negative numbers like "-9.0 -7.0"), so a naive
     `suffix.split('-')` mis-attributes leading abs tokens as history
-    codes. The robust rule is:
-      1. If suffix has no '-', it's the abs.
-      2. If suffix starts with '-' (abs starts with a minus), 0 codes.
-      3. Else peel off up to 2 leading tokens that are valid non-empty
-         history codes; the remainder is the abs.
+    codes. The robust rule: peel off up to 2 leading tokens that are
+    valid non-empty history codes; the remainder is the abs. A leading
+    '-' means the abs starts with a minus, so no codes to peel.
 
     The empty string is in `_STR_TO_CODE_ID` (history.csv has empty
     placeholder cells) but is never a real code in a key.
     """
-    if "-" not in suffix:
-        return ABSENT_CODE, ABSENT_CODE, suffix
-    if suffix.startswith("-"):
-        return ABSENT_CODE, ABSENT_CODE, suffix
-
-    first_dash = suffix.index("-")
-    tok1 = suffix[:first_dash]
-    if not tok1 or tok1 not in _STR_TO_CODE_ID:
-        return ABSENT_CODE, ABSENT_CODE, suffix
-
-    rest = suffix[first_dash + 1:]
-    if "-" not in rest or rest.startswith("-"):
-        return _STR_TO_CODE_ID[tok1], ABSENT_CODE, rest
-
-    second_dash = rest.index("-")
-    tok2 = rest[:second_dash]
-    if not tok2 or tok2 not in _STR_TO_CODE_ID:
-        return _STR_TO_CODE_ID[tok1], ABSENT_CODE, rest
-
-    abs_str = rest[second_dash + 1:]
-    return _STR_TO_CODE_ID[tok1], _STR_TO_CODE_ID[tok2], abs_str
+    ids = [ABSENT_CODE, ABSENT_CODE]
+    remainder = suffix
+    for i in range(2):
+        if "-" not in remainder or remainder.startswith("-"):
+            break
+        head, rest = remainder.split("-", 1)
+        if not head or head not in _STR_TO_CODE_ID:
+            break
+        ids[i] = _STR_TO_CODE_ID[head]
+        remainder = rest
+    return ids[0], ids[1], remainder

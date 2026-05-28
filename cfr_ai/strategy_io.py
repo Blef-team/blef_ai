@@ -2,44 +2,33 @@
 
 Two load entry points:
 
-* `load_strategy(setup_dir)` — full-fidelity loader for training, LBR,
-  and the (future) subgame solver. Builds a numba `typed.Dict[int64,int64]`
-  for O(1) per-lookup cost. Pays ~3s/M-rows at load time. The returned
-  `FlatStrategy` (defined in `lbr.py`) is the type expected by the JIT
-  recursion in `lbr.py`.
+* `load_strategy(setup_dir)` — full-fidelity loader for training and LBR.
+  Builds a numba `typed.Dict[int64, int64]` for O(1) per-lookup cost.
+  The returned `FlatStrategy` (defined in `lbr.py`) is the type expected
+  by the JIT recursion in `lbr.py`.
 
 * `load_strategy_for_agent(setup_dir)` — minimal-overhead loader for the
   deployed agent's one-lookup-per-request pattern. Keys stay as a sorted
-  numpy array; `np.searchsorted` handles the binary-search lookup. **Does
-  not import numba**, so the Lambda runtime can drop the numba dependency
-  entirely (~130 MB image savings, ~14s → ~1-2s cold start). Returns a
-  `FlatStrategyAgent` defined locally in this module.
-
-
-
-One source of truth for saving and loading trained CFR strategies. NPZ
-(compressed) for the flat data plus a sidecar JSON for the abstraction
-string -> id table. Replaces the legacy per-(hand_size, last_bet) CSV
-tree, which was 5-7x bigger on disk and 15-30x slower to load.
+  numpy array; `np.searchsorted` handles the binary-search lookup. Does
+  not import numba, so the Lambda runtime drops the numba dependency
+  entirely. Returns a `FlatStrategyAgent` defined locally in this module.
+  Two on-disk layouts are supported: the compressed `strategy.npz` that
+  training writes by default, and the sparse-mmap layout that
+  `write_mmap_layout` produces for the Lambda image.
 
 Layout written per setup directory `<dir>/`:
     strategy.npz          arrays: keys (int64 sorted), lower (int16),
-                                  upper (int16), probs (float32[N,89]).
+                                  upper (int16), probs (float32[N, 89]).
                           scalars: min_bet.
     strategy.abs.json     {abs_str: id} mapping for runtime interning.
-    metadata.csv          unchanged - small, human-readable, training-time
-                          text (Iterations / Penalty / Time finished etc).
+    metadata.csv          small, human-readable, training-time text
+                          (Iterations / Penalty / Time finished etc).
 
 The training pipeline writes both `strategy.npz` (deployment payload) and
 `diagnostic.npz` (regret arrays + touch counters) for post-hoc analysis.
-The deployed agent only needs `strategy.npz`; archive snapshots default
-to skipping `diagnostic.npz` (`archive_tool --include-diagnostics` to
-include it).
-
-The loader returns a `FlatStrategy` (defined in `lbr.py`), which
-is the same in-memory type all downstream code (LBR, subgame, agent.py)
-consumes. So switching the storage format is a single-point change:
-nothing inside the JIT path or the training core changes.
+The deployed agent only needs `strategy.npz` (or the sparse-mmap
+artifacts derived from it); archive snapshots default to skipping
+`diagnostic.npz` (`archive_tool --include-diagnostics` to include it).
 """
 
 import json
@@ -232,6 +221,17 @@ class FlatStrategyAgent:
         return self._padded_probs[row, lo:hi + 1]
 
 
+def _check_version(data, label: str) -> None:
+    """Validate the schema version stamped in `data` (a loaded npz)."""
+    if "version" not in data:
+        return
+    v = int(data["version"])
+    if v != STRATEGY_NPZ_VERSION:
+        raise ValueError(
+            f"{label} version {v} != supported {STRATEGY_NPZ_VERSION}"
+        )
+
+
 def _read_npz_arrays(setup_dir: str):
     """Open the strategy.npz + abs.json sidecar, validate version, return
     the loose ingredients. Shared by both loader entry points."""
@@ -241,12 +241,7 @@ def _read_npz_arrays(setup_dir: str):
         raise FileNotFoundError(f"strategy.npz not found at {npz_path}")
 
     data = np.load(npz_path)
-    if "version" in data:
-        v = int(data["version"])
-        if v != STRATEGY_NPZ_VERSION:
-            raise ValueError(
-                f"strategy.npz version {v} != supported {STRATEGY_NPZ_VERSION}"
-            )
+    _check_version(data, "strategy.npz")
     arrays = dict(
         keys=data["keys"],
         lower=data["lower"],
@@ -303,12 +298,7 @@ def load_strategy_for_agent(setup_dir: str) -> FlatStrategyAgent:
 def _load_mmap(setup_dir: str) -> FlatStrategyAgent:
     """Mmap sparse_indices + sparse_values + eager-load the small meta arrays."""
     meta = np.load(os.path.join(setup_dir, "strategy_meta.npz"))
-    if "version" in meta:
-        v = int(meta["version"])
-        if v != STRATEGY_NPZ_VERSION:
-            raise ValueError(
-                f"strategy_meta.npz version {v} != supported {STRATEGY_NPZ_VERSION}"
-            )
+    _check_version(meta, "strategy_meta.npz")
     sparse_indices = np.load(
         os.path.join(setup_dir, "probs_sparse_indices.npy"), mmap_mode="r")
     sparse_values = np.load(
@@ -348,37 +338,32 @@ def write_mmap_layout(setup_dir_src: str, setup_dir_dst: str) -> None:
     keys = a["keys"]; lower = a["lower"]; upper = a["upper"]; probs = a["probs"]
     n = keys.shape[0]
 
-    # Sparse pass 1: count non-zero per row (post-norm-and-scale).
-    # We re-normalise each row in case there's any fp32 drift, scale by
-    # 65535, round to int16, and store only the non-zero (index, value)
+    # Single pass: re-normalise each row (defends against fp32 drift), scale
+    # by 65535, round to uint16, and stash only the non-zero (index, value)
     # pairs. Strategies are typically 5-10% dense after `clear_lows`, so
     # this drops ~90% of the storage volume vs. the dense int16 layout.
+    parts_idx: List[np.ndarray] = []
+    parts_val: List[np.ndarray] = []
     nz_per_row = np.zeros(n, dtype=np.int64)
-    row_dense = []  # cache the post-quant slices to avoid recomputing in pass 2
     for i in range(n):
-        lo = int(lower[i]); hi = int(upper[i])
+        lo, hi = int(lower[i]), int(upper[i])
         row_slice = probs[i, lo:hi + 1]
         row_sum = float(row_slice.sum())
         if row_sum > 0:
             scaled = np.clip(np.round(row_slice / row_sum * 65535.0), 0, 65535).astype(np.uint16)
         else:
             scaled = np.zeros(hi - lo + 1, dtype=np.uint16)
-        row_dense.append(scaled)
-        nz_per_row[i] = int((scaled != 0).sum())
+        nz = np.flatnonzero(scaled)
+        parts_idx.append(nz.astype(np.uint8))
+        parts_val.append(scaled[nz])
+        nz_per_row[i] = nz.size
 
+    sparse_indices = (np.concatenate(parts_idx) if parts_idx
+                      else np.empty(0, dtype=np.uint8))
+    sparse_values = (np.concatenate(parts_val) if parts_val
+                     else np.empty(0, dtype=np.uint16))
     probs_offset = np.zeros(n + 1, dtype=np.int64)
     np.cumsum(nz_per_row, out=probs_offset[1:])
-    total_nz = int(probs_offset[-1])
-
-    # Sparse pass 2: populate the flat sparse arrays.
-    sparse_indices = np.empty(total_nz, dtype=np.uint8)
-    sparse_values = np.empty(total_nz, dtype=np.uint16)
-    for i in range(n):
-        scaled = row_dense[i]
-        nz_pos = np.flatnonzero(scaled)
-        s = int(probs_offset[i]); e = int(probs_offset[i + 1])
-        sparse_indices[s:e] = nz_pos.astype(np.uint8)
-        sparse_values[s:e] = scaled[nz_pos]
 
     os.makedirs(setup_dir_dst, exist_ok=True)
     np.savez_compressed(

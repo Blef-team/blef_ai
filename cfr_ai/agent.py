@@ -90,6 +90,19 @@ def _compose_key(hand_size: int, last_bet: int,
             | (abs_id << ABS_ID_SHIFT))
 
 
+def _no_policy_fallback(history_len: int) -> int:
+    """Action to take when the trained policy has nothing for this infoset.
+    At the start of a round we punt to action 87 (great straight flush spades);
+    mid-round we check (88)."""
+    if history_len == 0:
+        print(
+            "No policy found though the round has just begun. "
+            "Betting great straight flush spades (hopefully that was intended)"
+        )
+        return 87
+    return 88
+
+
 def determine_action(game_state):
     agent_nickname = game_state["cp_nickname"]
     players = game_state.get("players", [])
@@ -118,39 +131,23 @@ def determine_action(game_state):
     h_m1_id, h_m2_id, abs_str = _split_suffix(suffix)
     abs_id = fs.abs_str_to_id.get(abs_str)
     if abs_id is None:
-        # Unknown abstraction in the trained policy. Fall back.
-        if len(history) == 0:
-            print(
-                "No policy found though the round has just begun. "
-                "Betting great straight flush spades (hopefully that was intended)"
-            )
-            return 87
-        return 88
+        return _no_policy_fallback(len(history))
     comp_key = _compose_key(hand_size, last_bet, h_m1_id, h_m2_id, abs_id)
     row = fs.lookup(comp_key)
     if row is None:
-        if len(history) == 0:
-            print(
-                "No policy found though the round has just begun. "
-                "Betting great straight flush spades (hopefully that was intended)"
-            )
-            return 87
-        return 88
-    probs = fs.get_strategy(row)
-    # Probabilities are stored normalised at save time; we still defend
-    # against the all-zero edge case (shouldn't happen post-load-time-norm).
-    total = float(probs.sum())
+        return _no_policy_fallback(len(history))
+
+    # Slice/pad the stored strategy into a right-sized array up front:
+    # `relevant_actions` may be wider than `probs` if the agent's min_bet
+    # differs from the training-time min_bet. Single normalisation handles
+    # both the equal-width and mismatched-width cases; if everything ends
+    # up zero (shouldn't happen post-load-time-norm), fall back to a check.
+    probs = fs.get_strategy(row).astype(float)
+    n = min(len(probs), len(relevant_actions))
+    weights = np.zeros(len(relevant_actions))
+    weights[:n] = probs[:n]
+    total = float(weights.sum())
     if total <= 0:
         return 88
-    weights = (probs / total).astype(float).tolist()
-    # `relevant_actions` may be wider than `probs` if min_bet differs
-    # from the agent's training-time min_bet — pad / trim defensively.
-    if len(weights) != len(relevant_actions):
-        out = [0.0] * len(relevant_actions)
-        n = min(len(weights), len(relevant_actions))
-        out[:n] = weights[:n]
-        if sum(out) <= 0:
-            out[-1] = 1.0
-        s = sum(out)
-        weights = [x / s for x in out]
+    weights = (weights / total).tolist()
     return random.choices(relevant_actions, weights=weights, k=1)[0]

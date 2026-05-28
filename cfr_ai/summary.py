@@ -229,15 +229,7 @@ def update_metadata_lbr(setup_dir: str, depth_label: str,
     if not os.path.exists(md_path):
         return
 
-    rows: List[List[str]] = []
-    for encoding in ("utf-8", "latin-1"):
-        try:
-            with open(md_path, "r", newline="", encoding=encoding) as f:
-                rows = list(csv.reader(f))
-            break
-        except UnicodeDecodeError:
-            continue
-
+    rows = _read_csv_rows(md_path)
     cutoff = len(rows)
     for i, row in enumerate(rows):
         if row and _LBR_SECTION_RE.match(row[0]):
@@ -286,30 +278,32 @@ def update_metadata_lbr(setup_dir: str, depth_label: str,
 # Bulk rebuild (used by analysis/training_analytics.py and the one-shot migrator)
 # ---------------------------------------------------------------------------
 
+def _read_csv_rows(path: str) -> List[List[str]]:
+    """Read all CSV rows from `path`, falling back to latin-1 for legacy
+    metadata files that embedded the `±` character via cp1252."""
+    for encoding in ("utf-8", "latin-1"):
+        try:
+            with open(path, "r", newline="", encoding=encoding) as f:
+                return list(csv.reader(f))
+        except UnicodeDecodeError:
+            continue
+    raise RuntimeError(f"could not decode {path} as utf-8 or latin-1")
+
+
 def parse_metadata_csv(path: str) -> Dict[str, str]:
     """Parse a per-setup `metadata.csv` (key/value rows) into a flat dict.
     Utility-log rows (`P0 Utility at Iter N`) and the `--- Utility Log ---`
     separator are kept verbatim so callers that want them can pick them out.
-
-    Some legacy files embedded the `±` character in exploitability lines and
-    were written as latin-1 (cp1252). Fall back to latin-1 on a UnicodeError.
     """
-    def _read(encoding: str) -> Dict[str, str]:
-        data: Dict[str, str] = {}
-        with open(path, "r", newline="", encoding=encoding) as f:
-            reader = csv.reader(f)
-            for row in reader:
-                if not row or len(row) < 2:
-                    continue
-                k, v = row[0], row[1]
-                if k == "k" and v == "v":  # header row, skip
-                    continue
-                data[k.strip()] = v.strip()
-        return data
-    try:
-        return _read("utf-8")
-    except UnicodeDecodeError:
-        return _read("latin-1")
+    data: Dict[str, str] = {}
+    for row in _read_csv_rows(path):
+        if not row or len(row) < 2:
+            continue
+        k, v = row[0], row[1]
+        if k == "k" and v == "v":  # header row, skip
+            continue
+        data[k.strip()] = v.strip()
+    return data
 
 
 def metadata_to_training_cols(meta: Dict[str, str]) -> Dict[str, str]:
