@@ -39,18 +39,39 @@ _STRATEGY_CACHE_SIZE = int(os.environ.get("CFR_STRATEGY_CACHE_SIZE", "1"))
 _current_setup: Optional[Tuple[int, ...]] = None
 _current_strategy = None
 
+# Optional override of the strategy source directory. None => production
+# behaviour (Lambda working dir, then cfr_ai/outputs/). Evaluation tools set
+# this to a specific model version's outputs dir (e.g. cfr_ai/archive/<tag>/
+# outputs or cfr_ai/experiments/<tag>/outputs) so the same agent code can
+# serve any trained CFR version. See `set_outputs_base`.
+_OUTPUTS_BASE: Optional[str] = None
+
+
+def set_outputs_base(path: Optional[str]) -> None:
+    """Point the agent at a specific model version's outputs dir (the dir
+    that contains <setup>/strategy.npz). Pass None to restore the default
+    production resolution. Invalidates the strategy cache."""
+    global _OUTPUTS_BASE, _current_setup, _current_strategy
+    _OUTPUTS_BASE = path
+    _current_setup = None
+    _current_strategy = None
+
 
 def _resolve_setup_dir(hand_sizes: Tuple[int, ...]) -> str:
-    """Find the strategy directory for `hand_sizes`. Looks first in the
-    Lambda working dir (deployed layout) and then in cfr_ai/outputs/
-    (dev/test layout). Accepts EITHER the deployed sparse-mmap layout
-    (`strategy_meta.npz` + `probs_sparse_*.npy`) OR the legacy
-    compressed single-file layout (`strategy.npz`)."""
+    """Find the strategy directory for `hand_sizes`. If an outputs base has
+    been set (evaluation), look only there; otherwise use the production
+    resolution: the Lambda working dir (deployed layout) then cfr_ai/outputs/
+    (dev/test). Accepts EITHER the deployed sparse-mmap layout
+    (`strategy_meta.npz` + `probs_sparse_*.npy`) OR the legacy compressed
+    single-file layout (`strategy.npz`)."""
     setup = "_".join(str(x) for x in hand_sizes)
-    candidates = [
-        setup,
-        os.path.join("cfr_ai", "outputs", setup),
-    ]
+    if _OUTPUTS_BASE is not None:
+        candidates = [os.path.join(_OUTPUTS_BASE, setup)]
+    else:
+        candidates = [
+            setup,
+            os.path.join("cfr_ai", "outputs", setup),
+        ]
     for c in candidates:
         if (os.path.exists(os.path.join(c, "strategy_meta.npz"))
                 or os.path.exists(os.path.join(c, "strategy.npz"))):

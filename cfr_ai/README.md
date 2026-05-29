@@ -292,7 +292,7 @@ Training cols (written by `training.py` on save):
 * **Setup**, **Finished**, **Iterations**, **Penalty**, **Min bet**, **Pruning threshold**, **Minimum regret**, **Duration**, **Nodes touched**, **Explored infosets**, **Non-checking infosets**, **RAM (MB)**, **P0 value**, **P1 value**, **Version**.
 
 LBR cols (written by `lbr.py --update-summary`):
-* **LBR-K expl** / **LBR-K duration** — one pair per depth K evaluated. Point estimate (and `± std_err_worst_case` if sampled). Asymmetric setups join two starting-player results with `|`. Expl reported as percentage of game value, duration as seconds.
+* **LBR-K expl** / **LBR-K duration** — one pair per depth K evaluated. Point estimate (and `+/- std_err_worst_case` if sampled; ASCII `+/-`, not `±`, so the CSV stays mojibake-free in Excel/cp1252 tools). Asymmetric setups join two starting-player results with `|`. Expl reported as percentage of game value, duration as seconds.
 * **Sampling** — the caps used as `(lbr, opp)`, e.g. `(300, 500)`. Populations smaller than the cap are enumerated; otherwise sampled without replacement.
 
 A training save **blanks that row's LBR cols**, so a populated LBR cell always corresponds to the current trained policy. The LBR depth-pair columns grow rightward as more depths get computed.
@@ -326,6 +326,34 @@ python -m cfr_ai.analysis.training_analytics --only-charts # only regenerate cha
 There is a `analysis/head_to_head.py` script that can be used to compare two versions of strategies for a single setup by making them play against each other. Using the Monte Carlo sampling, it takes in the order of 10 minutes to run 10,000 games for most setups. It is the best tool for evaluating modifications to the core algorithm.
 
 The script accepts either explicit folder paths (`--model1-folder`, `--model2-folder`) or archive-tag shortcuts (`--model1 <tag>`, `--model2 <tag>`) that resolve to `cfr_ai/archive/<tag>/`. The tag `current` (or `.`) refers to the working `cfr_ai/` tree.
+
+### CFR-vs-NFSP benchmark (`analysis/cfr_vs_nfsp.py`)
+
+Benchmarks a CFR model version against the deployed NFSP agent (the 1v1
+deck-24 specialist), broken down by **(starting-player hand size,
+non-starting-player hand size)** with alternating agent roles — so each
+cell's win-rate reflects agent skill at that configuration, not the
+first-mover advantage. Use it to see *where* a CFR version beats NFSP, not
+just the aggregate. Both agents play through the real Blef engine via the
+same `determine_action(game_state)` interface.
+
+```
+python -m cfr_ai.analysis.cfr_vs_nfsp --cfr current                 # auto: setups this version has trained
+python -m cfr_ai.analysis.cfr_vs_nfsp --cfr current --setups all    # full 11x11 matrix (+ --heatmap for a PNG)
+python -m cfr_ai.analysis.cfr_vs_nfsp --cfr-folder cfr_ai/experiments/prune-10 --setups "5,7 6,6"
+```
+
+CFR version selection mirrors `head_to_head.py` (`--cfr <tag>` →
+`cfr_ai/archive/<tag>/outputs`, `--cfr-folder <path>` → `<path>/outputs`,
+`current` → working tree). NFSP is the fixed opponent, playing its average
+policy (`--nfsp-greedy` for argmax). Multiprocess (`--workers`); each worker
+holds one CFR strategy, so keep `--workers` modest when RAM-bound.
+
+Prerequisites (not in git): **PyTorch**, and the NFSP artifacts under
+`nfsp_ai/artifacts/` (`nfsp_inference_24_1v1.pt` + the deck-24
+card/history embeddings) — extracted from the `blef-nfsp-lambda` ECR image.
+Result CSVs / heatmaps are written to `cfr_ai/analysis/cfr_vs_nfsp_<label>.*`
+and are gitignored.
 
 ### Strategy archive
 
