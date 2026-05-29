@@ -76,11 +76,13 @@ class TimedTrainer(Trainer):
                 self.regrets, self.strategy_sum,
                 self.lower_action, self.upper_action,
                 self.last_touched, self.temporary_value,
+                self.first_touched, self.times_touched,
                 self.key_to_row, self.state, int(self.capacity),
                 abs_ids, hand_sizes_arr, _HISTORY_CODE_ID,
                 int(self.min_bet), float(self.pruning_threshold),
                 float(self.min_regret), float(self.penalty),
                 self._strategy_buf, self._cf_buf,
+                bool(self.use_temp_value),
             )
             t5 = time.perf_counter(); self.timings["jit_traverse"] += t5 - t4
 
@@ -107,6 +109,8 @@ def main():
     ap.add_argument("--dtype", choices=["fp32", "fp64"], default="fp32")
     ap.add_argument("--cprofile", action="store_true",
                     help="Run a cProfile pass on the train loop")
+    ap.add_argument("--no-temporary-value", action="store_true",
+                    help="Profile with the same-iteration value cache disabled.")
     args = ap.parse_args()
 
     dt = np.float32 if args.dtype == "fp32" else np.float64
@@ -121,7 +125,8 @@ def main():
     _seed_numba(42)
     t = TimedTrainer(args.hand_sizes, 0, [-20, -22], 0.0, 0,
                      initial_capacity=args.capacity,
-                     numba_seed=42, regret_dtype=dt)
+                     numba_seed=42, regret_dtype=dt,
+                     use_temp_value=not args.no_temporary_value)
     t0 = time.perf_counter()
     t.train(args.iter)
     total = time.perf_counter() - t0
