@@ -5,7 +5,7 @@ retrain. Keeps the plan, the per-sweep results, and the conclusions in one
 place (deliberately out of the main README, which only needs the final
 adopted settings, not the full experiment tables).
 
-## Status (updated 2026-05-29)
+## Status (updated 2026-05-30)
 
 * **Phase 1 retrain**: complete. All 66 setups retrained V2, validated
   against v0 archive (game values within noise, structural metrics within
@@ -22,13 +22,21 @@ adopted settings, not the full experiment tables).
   LBR-1/2/3. **3M arm skipped** (5M isn't saturated, so fewer iters would
   only hurt). Production stays 5M for now; 10M banked as a "throw-compute"
   lever for when cheaper ideas are exhausted.
-* **Sweep 3 (penalty)**: **COMPLETE — see results below.** H2H *slightly
-  favours removal* (penalty-0 mean +0.0074 vs baseline, 5/6 setups positive;
-  penalty-0.05 +0.0039), and training times show a speedup or at least no
-  degradation — so the bet-penalty isn't clearly earning its keep on the two
-  axes it was built for (speed + `temporary_value` soundness). Effects are
-  small / near-noise and the speed read is contention-confounded; penalty=0 is
-  a candidate to drop, not a prod change yet.
+* **Sweep 3 (penalty) + exp3b probe**: **COMPLETE — verdict settled: DROP the
+  penalty, KEEP temporary_value.** Sweep 3 H2H favoured penalty removal (mean
+  +0.0074 vs baseline, duration-neutral); the exp3b probe confirmed it on the
+  inside view — penalty-0 is **~2.5 pp less exploitable** (LBR-1: 1,8 sp1
+  5.40→3.03%, 2,7 sp0 6.26→3.81%) at no training-time cost. The no-temp-value
+  arm showed temp_value **earns its keep**: 6.2–8.8× fewer node visits (4,5 /
+  5,11) plus a small, consistent H2H *gain* — net-positive memoization, not a
+  free hack to drop. (Its theoretical unsoundness self-resolves once action
+  abstraction removes the transpositions it caches.) See exp3b section below.
+* **Abstraction speedup**: `get_hand_abstraction` rewritten pure-Python,
+  **byte-identical** (verified ~100k hands), **5.7× faster**. The profiler
+  showed it was 68–81% of round-6+ training time → ~**2.3× faster retrains**
+  (~halves the ~106-CPUh full retrain). Committed (6b21a8a). Next lever:
+  action abstraction (fewer bet-contexts) + JIT on integer codes — folded into
+  the abstraction redesign.
 * **CFR-vs-NFSP evaluation**: tooling built & validated; analysis **PAUSED**
   — opponent too weak (see section below).
 * **Lambda deployment**: refactored to sparse-mmap + uint16. Lambda at
@@ -244,6 +252,161 @@ penalty-0.05 **104 min** → penalty-0 ~12% faster.
    confirmations if wanted: a controlled single-core speed run at matched
    concurrency, and/or an exploitability check (LBR on the smallest penalty>0
    setup, or vs NFSP once that eval is unpaused).
+
+## exp3b — penalty + temporary_value probe (Results & Conclusions, 2026-05-30)
+
+Follow-up to Sweep 3 (`run_exp3b.sh`, two parallel groups):
+- **Probe** (penalty-0, normal temp_value): trained 1,8 & 2,7 — their asymmetry
+  collapses the LBR enumeration, so LBR-1 is cheap (1,8 ~4.5 min, 2,7 ~1 h), and
+  both are prod-penalty-0.1 so this tests the full 0.1→0 removal on the inside
+  view (H2H + LBR-1 vs baseline).
+- **No-temp-value** (penalty-0 + `--no-temporary-value`): the 6 penalty>0
+  cross-section setups, isolating `temporary_value` (same seed/penalty as the
+  Sweep-3 penalty-0 models — only the cache differs).
+
+**Verdict: DROP the penalty, KEEP temporary_value.**
+
+### Penalty → drop (less exploitable, no time cost)
+
+LBR-1 (penalty-0 vs baseline; lower = less exploitable):
+
+| setup | seat | penalty-0 | baseline | Δ |
+|---|---|--:|--:|--:|
+| 1,8 | sp0 | 5.06% | 5.11% | ~0 |
+| 1,8 | sp1 | **3.03%** | 5.40% | **−2.37 pp (~3σ)** |
+| 2,7 | sp0 | **3.81%** | 6.26% | **−2.46 pp** |
+| 2,7 | sp1 | **2.78%** | 4.54% | **−1.76 pp** |
+
+Every seat with a real change is *less* exploitable under penalty-0, never
+worse; H2H ≈ even. **Duration-neutral**: 1,8 96 min vs baseline 94; 2,7 108 vs
+108 — despite penalty-0 touching ~1.5× more nodes (no bet-tax → longer lines),
+wall is unchanged because abs_ids dominates the clock, not node count. The
+bet-penalty was *distorting* the strategy for no speed gain.
+
+### temporary_value → keep (earns its keep on speed + quality)
+
+No-temp-value vs Sweep-3 penalty-0 (clean isolation):
+
+| setup | nodes notv / tv | ratio | infosets | H2H notv | H2H temp-on |
+|---|---|--:|---|---|---|
+| 4,5 | 11.79B / 1.91B | **6.2×** | ≈ (+1%) | +0.0026 / +0.0000 | +0.0074 / +0.0113 |
+| 5,11 | 12.99B / 1.47B | **8.8×** | ≈ (+1%) | −0.0099 / +0.0012 | +0.0083 / +0.0119 |
+
+- **Speed:** the cache avoids **85–89% of node visits** — memoization that stops
+  transposed sub-trees being re-traversed (multiplier compounds down the tree).
+  Infosets unchanged → pure recompute, not extra exploration.
+- **Quality:** removing it made H2H *worse* on both (~0.005–0.018/seat, all same
+  direction) → temp_value is a small net *positive*.
+- **Mechanism (open, doesn't matter):** the regret update is *not* reach-weighted
+  (`regret += cf − node_value`), so an infoset reached K times via transpositions
+  in one iteration gets K updates (no-temp-value) vs 1 (temp_value). Whether that
+  K is a correct reach-summation (→ no-temp-value faithful) or a structural
+  artifact (→ temp_value removes spurious weighting) is genuinely ambiguous; data
+  leans temp_value-helps but ~1–2σ / could be variance. **Unresolved, and it need
+  not be: action abstraction kills the transpositions, so temp_value becomes a
+  near-no-op and any residual influence vanishes.** Keep it; the redesign retires
+  the concern for free.
+
+Caveats: probe LBR is on small/asymmetric setups; the no-temp-value setups can't
+be LBR'd at sum ≥ 9; midgame no-temp-value (5,7/6,6/3,9/9,11) were **killed at 25–40%** on 2026-05-30
+(at ~86–124 it/s they'd have needed ~12 h more, for confirmatory H2H only —
+verdict already settled by 4,5/5,11 + the 1,8/2,7 LBR). The no-temp-value wall
+cost (1.7–2.4×) is *smaller*
+than its 6–9× node cost because abs_ids dominates today — but it will *grow*
+once the abstraction speedup shifts the bottleneck to the traversal.
+
+## Abstraction: the dominant cost, a 5.7× speedup, and the redesign (2026-05-30)
+
+**Profiling.** Per-iteration time = a Python prelude (deal, existence,
+`_build_abs_ids_for_iter`) + the JIT traversal. `precompute_set_existence` is
+already fast (~1.5%); the dominant cost on round-6+ setups is **abstraction
+interning** (`get_hand_abstraction`), recomputed every iteration: **68–81% of
+training time**. It's **round-gated** — ~25 µs/call for rounds 1-5 (cheap
+branch) vs ~770–816 µs/call for round 6+, a ~32× cliff exactly where the
+abstraction representation changes (sum 6→7). That's why training time clusters
+by round, not node count / true complexity (which lives in the mostly-unexplored
+infoset space — also why bigger setups are more exploitable at fixed iters). The
+penalty/temp_value hacks cut node visits, but JIT made nodes cheap, so they
+barely move the abstraction-dominated clock — which is why they "stopped
+helping" vs the old pure-Python trainer.
+
+**Speedup shipped (commit 6b21a8a).** `get_hand_abstraction` rewritten in pure
+Python (no numpy on tiny arrays, no `np.delete`-in-loops), **byte-identical**
+(verified over all hands of sizes 2-5 + sampled 6-11), **5.7× faster** on the
+function (362→64 µs/call). End-to-end ~**2.3× faster** on round-6+ setups
+(in-situ 4,5 1049→1957 it/s; abs_ids 81%→34%; jit_traverse now dominant) →
+roughly **halves the ~106-CPUh full retrain**, identical model. A result-cache
+was rejected: recurrence collapses for big hands (an 11-card hand recurs ~2×
+over 5M), so a memo costs ~GBs RAM for little gain exactly where it's needed.
+Profiler un-staled at `analysis/profile_trainer.py` (+ `--no-temporary-value`).
+
+**The redesign (the real frontier — not yet built).** The hand+action
+abstraction is hand-crafted without rigour and is the elephant. Directions:
+1. **Action abstraction / composite actions** — collapse strategically
+   equivalent bets (10s-over-9s/-Js/-Ks all serve "bluff") into a few
+   representatives: a "truthful" action = the set with the highest
+   P(exists | my cards)/P(exists | no info), plus a few bluff tiers by
+   disprovability. Shrinks the tree → fewer transpositions (temp_value → no-op)
+   → faster, better-converged, less exploitable. Highest leverage.
+2. **Richer hand summary** — encode *weaknesses* / bluff-credibility (what you
+   can credibly claim but not back, to induce a profitable check), not just
+   strengths. Hardest, biggest ceiling.
+3. **JIT the abstraction** — return integer codes (numba can't build strings),
+   a 1-1 mapping of the current partition; ~10–100× more, on top. Fold into (1).
+Blef framing: every bet is a claim about ALL cards on the table combined; you
+escalate by *recombining* the standing claim with your cards (truthfully or as a
+bluff); the *check* (does the claimed set exist?) is the pivotal action — unlike
+poker, there's no opponent-equity estimation. We now have the rigour to design
+empirically: profiler + H2H + the LBR-1/2/3 battery + the (paused) vs-NFSP
+harness can score any abstraction change.
+
+## Roadmap + V2.1 consolidation retrain (2026-05-30)
+
+**Version bump: V2 → V2.1** (hyperparameter adoption; **V3** reserved for the
+abstraction redesign).
+
+**V2.1 consolidation retrain** — bank the validated wins, no structural change:
+all 66 setups at **penalty=0** (less exploitable), **pruning -10/-12** (prune-10,
+~8.6% faster), the **fast `get_hand_abstraction`** (byte-identical → strategy
+unchanged, ~2.3× faster training), **temporary_value kept**, **5M iters** (10M
+banked). Set `VERSION="V2.1"` in `training.py`. Expected ~50 CPUh (~half of V2's
+~106, from the abstraction speedup) → ~6–7 h wall at 8-wide.
+Safe workflow: deploy the fast `information_set.py` to the box → train to an
+**isolated** dir (NOT `cfr_ai/outputs`) → validate vs current V2 by H2H (expect
+≈even-or-better; penalty=0 was ≤baseline everywhere) + the cheap-LBR probes
+(1,8/2,7) → **promote** to `cfr_ai/outputs` → redeploy Docker→ECR→Lambda. Apply
+penalty=0 + prune-10 to ALL 66 (override `_setup_configs` penalties; keep its
+per-setup min_bet).
+
+**Prioritized roadmap (post-V2.1):**
+1. **Action abstraction — THE big rock.** Limit/group actions per infoset +
+   composite actions, in **integer-coded JIT form** (this *is* "JIT the
+   abstraction"; do NOT JIT the current string version — throwaway). Build the
+   action set into the infoset and **shorten the regret/strategy_sum arrays**
+   (the 89-wide padding is waste) → faster + lower RAM + better convergence +
+   temp_value→no-op + lower exploitability. Highest leverage; absorbs the JIT
+   efficiency item.
+2. **Hand-abstraction quality** — encode *weaknesses* / bluff-credibility (not
+   just strengths), steered empirically by the human-games analysis below.
+   History abstraction is more robust → lower priority.
+3. **Evaluation (run it to *lead* the abstraction work):**
+   - Pull **human-vs-Morana games (1k+) from DynamoDB** and analyse — the
+     empirical weakness diagnosis that should steer the hand-abstraction
+     redesign. Access: needs perms in the friend's account (IAM there is
+     ECR-only — clear first).
+   - **Fix Perun** (NFSP opponent too weak; likely `--nfsp-greedy` or a stronger
+     checkpoint — confirm with friend), then re-run the vs-NFSP eval.
+   - Reusable: the **asymmetric-setup cheap-LBR trick** (1,8/2,7 → LBR in
+     minutes) as an exploitability probe for any abstraction change.
+4. **Skip C++** — numba ≈ C on the hot loops (~1.3–2×, expected-revert); and
+   post-redesign the bottleneck is the JIT'd abstraction, not numba.
+5. **Expansion (long-term)** — 3+ players (NB: not 2-player zero-sum, so CFR
+   loses its equilibrium guarantee — research-grade) and non-standard rules.
+   After the core 1v1 AI is strong + well-evaluated.
+
+**Process to bake in:** define the success metric *before* the redesign
+(exploitability ↓ on the cheap-LBR probes; H2H ≥ current; ≥ even vs humans), and
+gate every abstraction change through retrain → H2H-vs-old → redeploy.
 
 ## Goal
 
