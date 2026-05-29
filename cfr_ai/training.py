@@ -211,6 +211,12 @@ def main():
                          "files copied, summary CSV untouched) but at an "
                          "arbitrary path. Takes precedence over --archive-tag.")
     ap.add_argument("--high-priority", action="store_true")
+    ap.add_argument("--no-temporary-value", action="store_true",
+                    help="Disable the same-iteration temporary_value cache so "
+                         "every repeated infoset reach recomputes and re-updates "
+                         "regret. Theoretically cleaner (no stale cross-reach "
+                         "value reuse) but much slower and spikier on "
+                         "transposition-heavy setups; experimental.")
     args = ap.parse_args()
 
     setup = "_".join(str(x) for x in args.hand_sizes)
@@ -232,7 +238,9 @@ def main():
         _bump_priority()
 
     print(f"[training] setup={setup} iter={args.iter:,} penalty={args.penalty} "
-          f"dtype={args.dtype} capacity={args.capacity:,} -> {save_label}",
+          f"dtype={args.dtype} capacity={args.capacity:,} "
+          f"temp_value={'OFF' if args.no_temporary_value else 'on'} "
+          f"-> {save_label}",
           flush=True)
 
     proc = psutil.Process(os.getpid())
@@ -260,6 +268,7 @@ def main():
         args.pruning_range, args.penalty,
         args.log_points, initial_capacity=args.capacity,
         numba_seed=args.seed, regret_dtype=regret_dtype,
+        use_temp_value=not args.no_temporary_value,
     )
     after_alloc = proc.memory_info().rss / 1024 / 1024
     print(f"  RSS after alloc: {after_alloc:.1f} MB", flush=True)

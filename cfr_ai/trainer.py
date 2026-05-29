@@ -61,6 +61,7 @@ def _traverse_jit(
     abs_ids, hand_sizes, history_code_id,
     min_bet, pruning_threshold, min_regret, penalty,
     strategy_buf, cf_buf,
+    use_temp_value,
 ):
     # Terminal
     if hist_len > 0 and history_buf[hist_len - 1] == 88:
@@ -114,7 +115,7 @@ def _traverse_jit(
 
     # Same-iter cache. (Note: iter_i=0 vs default 0 collision is harmless —
     # the very first iter is wasted, matching the reference trainer's behaviour.)
-    if last_touched[row] == iter_i:
+    if use_temp_value and last_touched[row] == iter_i:
         return temporary_value[row]
     # Cache miss = first visit to this infoset on this iteration.
     times_touched[row] += 1
@@ -173,6 +174,7 @@ def _traverse_jit(
                     abs_ids, hand_sizes, history_code_id,
                     min_bet, pruning_threshold, min_regret, penalty,
                     strategy_buf, cf_buf,
+                    use_temp_value,
                 )
                 if state[1] != 0:
                     return 0.0
@@ -214,6 +216,7 @@ def _traverse_jit(
             abs_ids, hand_sizes, history_code_id,
             min_bet, pruning_threshold, min_regret, penalty,
             strategy_buf, cf_buf,
+            use_temp_value,
         ) + penalty
 
     last_touched[row] = iter_i
@@ -237,6 +240,7 @@ class Trainer:
         initial_capacity: int = GROW_CHUNK,
         numba_seed: int = None,
         regret_dtype=np.float32,
+        use_temp_value: bool = True,
     ):
         """initial_capacity defaults to GROW_CHUNK (64k). Arrays auto-grow by
         GROW_CHUNK rows on each fill; the user never has to size up front.
@@ -250,6 +254,7 @@ class Trainer:
         self.pruning_threshold = float(pruning_range[0])
         self.min_regret = float(pruning_range[1])
         self.penalty = float(penalty)
+        self.use_temp_value = bool(use_temp_value)
         self.log_points = log_points
         self.regret_dtype = regret_dtype
 
@@ -403,6 +408,7 @@ class Trainer:
                 int(self.min_bet), float(self.pruning_threshold),
                 float(self.min_regret), float(self.penalty),
                 self._strategy_buf, self._cf_buf,
+                bool(self.use_temp_value),
             )
             # The pre-grow above should always keep us under capacity. If a
             # pathological iter still overflows, surface it loudly — we'd
