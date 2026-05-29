@@ -744,10 +744,14 @@ def _sampling_label(n_belief: int, n_lbr_hand: int) -> str:
 
 
 def _expl_cell(r) -> str:
-    """Format a per-sp result as the "+X.XXX% [± Y.YYYpp]" cell content."""
+    """Format a per-sp result as the "+X.XXX% [+/- Y.YYYpp]" cell content.
+
+    We use the ASCII "+/-" rather than the U+00B1 glyph so the summary and
+    metadata CSVs stay pure ASCII — UTF-8 "±" renders as mojibake ("Â±")
+    when these files are opened in Excel/cp1252 tools on Windows."""
     if r["se_worst"] == 0:
         return f"{r['expl']*100:+.3f}%"
-    return f"{r['expl']*100:+.3f}% ± {r['se_worst']*100:.3f}pp"
+    return f"{r['expl']*100:+.3f}% +/- {r['se_worst']*100:.3f}pp"
 
 
 def _depth_label(depth: int) -> str:
@@ -849,7 +853,7 @@ def main():
             print(f"  starting_player={sp}: exploitability={result['expl']*100:+.3f}% (exact)  ({dt:.1f}s)", flush=True)
         else:
             print(f"  starting_player={sp}: exploitability={result['expl']*100:+.3f}% "
-                  f"± {result['se_worst']*100:.3f}pp (K={result['K_lbr_hand']})  ({dt:.1f}s)", flush=True)
+                  f"+/- {result['se_worst']*100:.3f}pp (K={result['K_lbr_hand']})  ({dt:.1f}s)", flush=True)
 
     if args.update_summary:
         _update_summary(hand_sizes, args.depth, per_sp_results, sampling_labels)

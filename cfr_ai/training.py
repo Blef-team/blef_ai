@@ -60,7 +60,8 @@ def _build_exploitability_callback(args):
             if r["se_worst"] == 0:
                 cell = f"{r['expl']*100:+.4f}%"
             else:
-                cell = f"{r['expl']*100:+.4f}% ± {r['se_worst']*100:.4f}pp"
+                # ASCII "+/-", not "±", to keep metadata.csv mojibake-free.
+                cell = f"{r['expl']*100:+.4f}% +/- {r['se_worst']*100:.4f}pp"
             log[f"LBR-{depth} expl sp={sp} at Iter {iter_num}"] = cell
             print(f"  iter {iter_num:,} LBR-{depth} sp={sp}: {cell}", flush=True)
 
@@ -204,16 +205,28 @@ def main():
                     help="If set, save to cfr_ai/archive/<tag>/ (and copy "
                          "history.csv + information_set.py there) instead of "
                          "the default cfr_ai/outputs/<setup>/.")
+    ap.add_argument("--out-root", type=str, default=None,
+                    help="Explicit save root, e.g. cfr_ai/experiments/<tag>. "
+                         "Like --archive-tag (isolated outputs/, supporting "
+                         "files copied, summary CSV untouched) but at an "
+                         "arbitrary path. Takes precedence over --archive-tag.")
     ap.add_argument("--high-priority", action="store_true")
     args = ap.parse_args()
 
     setup = "_".join(str(x) for x in args.hand_sizes)
-    if args.archive_tag is not None:
+    if args.out_root is not None:
+        out_root = args.out_root
+        save_label = f"out-root {out_root!r}"
+    elif args.archive_tag is not None:
         out_root = os.path.join("cfr_ai", "archive", args.archive_tag)
         save_label = f"archive tag {args.archive_tag!r}"
     else:
         out_root = "cfr_ai"
         save_label = "production cfr_ai/outputs/"
+    # Any non-production root is an isolated snapshot (archive or experiment):
+    # it needs history.csv + information_set.py copied so head_to_head.py can
+    # load it, and it must NOT touch the shared summary CSV.
+    is_isolated_root = os.path.normpath(out_root) != "cfr_ai"
 
     if args.high_priority:
         _bump_priority()
@@ -269,8 +282,9 @@ def main():
           flush=True)
     print(f"  utils: P0={u0:+.4f}, P1={u1:+.4f}", flush=True)
 
-    # If archiving, copy supporting files so head_to_head can load the snapshot.
-    if args.archive_tag is not None:
+    # Isolated roots (archive snapshot or experiment variant) need supporting
+    # files copied so head_to_head can load them.
+    if is_isolated_root:
         os.makedirs(out_root, exist_ok=True)
         for src, name in [(os.path.join("cfr_ai", "history.csv"), "history.csv"),
                           (os.path.join("cfr_ai", "information_set.py"), "information_set.py")]:
