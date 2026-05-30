@@ -41,11 +41,12 @@ class DeckSpec:
     use_card_embeddings: bool
     use_history_embeddings: bool
     # When True, vectorize_obs appends MAX_PLAYERS extra floats encoding
-    # per-slot team membership (+1 teammate / -1 opp / 0 none). Default
-    # True for new trainings; production_agent flips it to False when
-    # loading legacy checkpoints whose obs_dim predates the team-flag
-    # block (so old artifacts keep working post-deploy).
-    team_aware: bool = True
+    # per-slot team membership (+1 teammate / -1 opp / 0 none). Defaults
+    # False so the obs schema stays backward-compatible with pre-team
+    # checkpoints (whose obs_dim predates the team-flag block); MyEnv turns
+    # it on automatically whenever team mode is active (n_teams >= 2), and
+    # callers can force it on via the flag.
+    team_aware: bool = False
 
 
 def _compute_obs_dim(
@@ -53,7 +54,7 @@ def _compute_obs_dim(
     hist_dim: int,
     card_feature_dim: Optional[int] = None,
     history_feature_dim: Optional[int] = None,
-    team_aware: bool = True,
+    team_aware: bool = False,
 ) -> int:
     card_dim = card_feature_dim if card_feature_dim is not None else hand_vec_dim
     history_dim = history_feature_dim if history_feature_dim is not None else hist_dim
@@ -78,7 +79,7 @@ def _build_deck_spec(
     rules: Dict,
     card_embedding: Optional["CardEmbeddingRuntime"] = None,
     history_embedding: Optional["HistoryEmbeddingRuntime"] = None,
-    team_aware: bool = True,
+    team_aware: bool = False,
 ) -> DeckSpec:
     deck_size = int(rules.get("deck_size", 24))
     if deck_size % 4 != 0:
@@ -208,7 +209,7 @@ def _deck_spec_from_game(
     game: dict,
     card_embedding: Optional["CardEmbeddingRuntime"] = None,
     history_embedding: Optional["HistoryEmbeddingRuntime"] = None,
-    team_aware: bool = True,
+    team_aware: bool = False,
 ) -> DeckSpec:
     rules = game.get("rules", {}) or {}
     return _build_deck_spec(
@@ -754,7 +755,7 @@ def vectorize_obs(
     # opponent, 0 if no player in slot or game is solo (no team mode).
     # Gated on spec.team_aware so legacy checkpoints (obs_dim predates
     # the team-flag block) keep producing the original obs shape.
-    if getattr(spec, "team_aware", True):
+    if getattr(spec, "team_aware", False):
         team_map = {p.get("nickname"): p.get("team") for p in players}
         actor_team = team_map.get(game.get("cp_nickname"))
         team_flags = np.zeros((MAX_PLAYERS,), dtype=np.float32)
@@ -894,7 +895,7 @@ class MyEnv:
         pick_n_teams_in_range: bool = False,
         n_teams: int = 0,
         randomize_initial_hands: bool = False,
-        team_aware: bool = True,
+        team_aware: bool = False,
         personality_spec=None,
     ):
         if n_agents < 2 or n_agents > 8:
@@ -908,7 +909,10 @@ class MyEnv:
         self.blank_cap = max(0, int(blanks))
         self.common_card_cap = max(0, int(common_cards))
         self.n_teams_cap = max(0, int(n_teams))
-        self.team_aware = bool(team_aware)
+        # Auto-enable the team-flag obs block whenever team mode is active,
+        # even if the caller left team_aware at its backward-compatible
+        # False default. An explicit team_aware=True still forces it on.
+        self.team_aware = bool(team_aware) or self.n_teams_cap >= 2
         # Optional personality bias spec (PersonalityTrainSpec). Attached to
         # deck_spec on every rebuild so vectorize_obs and _legal_action_mask
         # can find it via the spec they already receive. None = baseline.
@@ -1906,7 +1910,7 @@ def main():
         )
         agent.export_inference(
             export_path,
-            team_aware=bool(getattr(env.deck_spec, "team_aware", True)),
+            team_aware=bool(getattr(env.deck_spec, "team_aware", False)),
             personality_spec_dict=personality_dict,
         )
         print(f"[export] inference-only checkpoint saved to {export_path}")

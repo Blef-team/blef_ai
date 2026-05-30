@@ -250,42 +250,38 @@ def head_to_head(
         random.seed(seed)
         torch.manual_seed(seed)
 
-    env = MyEnv(
-        n_agents=n_players,
-        max_cards=max_cards,
-        deck_size=deck_size,
-        jokers=jokers,
-        blanks=blanks,
-        common_cards=common_cards,
-        card_embedding=card_embedding,
-        history_embedding=history_embedding,
-    )
+    def _make_env(team_aware: bool) -> MyEnv:
+        return MyEnv(
+            n_agents=n_players,
+            max_cards=max_cards,
+            deck_size=deck_size,
+            jokers=jokers,
+            blanks=blanks,
+            common_cards=common_cards,
+            card_embedding=card_embedding,
+            history_embedding=history_embedding,
+            team_aware=team_aware,
+        )
 
-    # Sanity: env obs_dim must match the learner's expected input.
-    # Learners trained with different rules / embeddings have different
-    # obs_dims that aren't recorded in the checkpoint, so configuration
-    # has to be supplied at eval time. Catch the mismatch with a clear
-    # error rather than letting torch raise "mat1 and mat2 shapes ...".
-    probe_obs, _probe_mask, _ = env.reset()
-    if int(probe_obs.shape[-1]) != int(learner.obs_dim):
+    # The env appends an 8-slot team-flag block to the obs when team_aware is
+    # on. That flag isn't recorded in older checkpoints, so probe both ways
+    # and keep whichever matches the learner's input dim (legacy 2p artifacts
+    # need team_aware=False). Mirrors tools/team_eval.py's probe.
+    env = None
+    for ta in (True, False):
+        cand = _make_env(ta)
+        probe_obs, _probe_mask, _ = cand.reset()
+        if int(probe_obs.shape[-1]) == int(learner.obs_dim):
+            env = _make_env(ta)  # fresh env so the first game starts cleanly
+            break
+    if env is None:
         raise ValueError(
             f"Env obs_dim {int(probe_obs.shape[-1])} does not match learner obs_dim "
-            f"{int(learner.obs_dim)} for checkpoint. The checkpoint was trained with "
-            f"different rules (deck_size, jokers, blanks, common_cards) or with embeddings "
-            f"enabled. Re-run with matching --deck-size / --jokers / --blanks / --common-cards "
-            f"flags."
+            f"{int(learner.obs_dim)} for checkpoint (tried team_aware both ways). The "
+            f"checkpoint was trained with different rules (deck_size, jokers, blanks, "
+            f"common_cards) or embeddings. Re-run with matching --deck-size / --jokers / "
+            f"--blanks / --common-cards / --use-*-embeddings flags."
         )
-    # Reset env so the first game starts cleanly.
-    env = MyEnv(
-        n_agents=n_players,
-        max_cards=max_cards,
-        deck_size=deck_size,
-        jokers=jokers,
-        blanks=blanks,
-        common_cards=common_cards,
-        card_embedding=card_embedding,
-        history_embedding=history_embedding,
-    )
 
     rounds_won = rounds_lost = 0
     total_actions = 0
