@@ -189,21 +189,60 @@ def _top_deviations(diff_pp: Dict[str, float], n: int = 3) -> list:
     return items[:n]
 
 
-def _auto_sentence(name: str, diff_pp: Dict[str, float], bluff_pp: float) -> str:
-    """One-line trait sentence from the top-3 distinguishing stats."""
-    top = _top_deviations(diff_pp, n=3)
-    fragments = []
-    for ht, d in top:
-        if abs(d) < 2.0:
-            continue  # noise floor
-        verb = "claims" if ht != "CHECK" else "checks"
-        direction = "more" if d > 0 else "less"
-        fragments.append(f"{verb} {ht} {abs(d):.0f}pp {direction}")
-    if abs(bluff_pp) >= 2.0:
-        fragments.append(f"bluffs {abs(bluff_pp):.0f}pp {'more' if bluff_pp > 0 else 'less'}")
-    if not fragments:
-        return f"{name.capitalize()} plays essentially like the baseline."
-    return f"{name.capitalize()} " + "; ".join(fragments) + " than baseline."
+def _auto_sentence(
+    name: str,
+    diff_pp: Dict[str, float],
+    bluff_pp: float,
+    spec: Optional[PersonalityTrainSpec] = None,
+) -> str:
+    """One-line trait sentence anchored on the spec's mechanism, verified by data.
+
+    Treats a positive CHECK delta specially when ``spec.forbid_check_unless_only``
+    is set: the personality didn't choose to check more, it got *pinned* at the
+    top of the bet ladder. The phrasing makes that distinction so readers don't
+    mistake aggressive bots for passive ones.
+    """
+    cap = name.capitalize()
+    parts = []
+
+    # 1) CHECK delta — phrase depends on whether the spec forbids voluntary CHECK.
+    check_delta = diff_pp.get("CHECK", 0.0)
+    forbids_check = bool(spec and spec.forbid_check_unless_only)
+    if forbids_check and check_delta >= 10:
+        parts.append(
+            f"escalates aggressively and only checks when pinned at the ceiling "
+            f"(forced CHECK {check_delta:+.0f}pp)"
+        )
+    elif check_delta >= 10:
+        parts.append(f"checks far more often ({check_delta:+.0f}pp)")
+    elif check_delta <= -10:
+        parts.append(f"rarely checks ({check_delta:+.0f}pp)")
+
+    # 2) Hand-type deviations (top 2, excluding CHECK).
+    hand_pairs = sorted(
+        ((ht, d) for ht, d in diff_pp.items() if ht != "CHECK"),
+        key=lambda kv: -abs(kv[1]),
+    )
+    used = 0
+    for ht, d in hand_pairs:
+        if used >= 2 or abs(d) < 5:
+            break
+        if d < 0:
+            parts.append(f"rarely claims {ht.lower()} ({d:+.0f}pp)")
+        else:
+            parts.append(f"claims {ht.lower()} far more often ({d:+.0f}pp)")
+        used += 1
+
+    # 3) Bluff rate.
+    if abs(bluff_pp) >= 5:
+        if bluff_pp > 0:
+            parts.append(f"bluffs {bluff_pp:+.0f}pp more often (claims hands it doesn't have)")
+        else:
+            parts.append(f"bluffs {abs(bluff_pp):.0f}pp less often (plays honest)")
+
+    if not parts:
+        return f"**{cap}** plays essentially like the baseline."
+    return f"**{cap}**: " + "; ".join(parts) + "."
 
 
 def write_card(
@@ -224,12 +263,12 @@ def write_card(
     base_bluff = 100 * main_stats["baseline_bluff_count"] / bb_total
     bluff_pp = learn_bluff - base_bluff
 
-    sentence = _auto_sentence(name, diff, bluff_pp)
+    sentence = _auto_sentence(name, diff, bluff_pp, spec)
 
     lines = []
     lines.append(f"# {name} — trait card")
     lines.append("")
-    lines.append(f"**{sentence}**")
+    lines.append(sentence)
     lines.append("")
     lines.append(f"Sample: {n_games} games (24-deck, 2p, vanilla).  "
                  f"Personality vs baseline NFSP at seat 0/1.")
