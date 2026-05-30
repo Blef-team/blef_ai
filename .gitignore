@@ -180,3 +180,7 @@ runs*/*
 # Temporary notes
 scratch/
 cfr_ai/analysis/cfr_vs_nfsp_games_*.npy
+cfr_ai/analysis/cfr_vs_cfr_*.npy
+
+# Isolated experiment out-roots (strategies live on the box; local pulls are scratch)
+cfr_ai/exp_*/

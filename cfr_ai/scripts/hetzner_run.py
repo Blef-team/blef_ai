@@ -340,11 +340,6 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--workers", type=int, default=16,
                     help="Parallel processes (default 16 — match CCX43 vCPUs).")
-    # Accepted-and-ignored: an earlier build had a --max-heavy RAM scheduler
-    # (removed — the OOM was a save-prep spike, fixed in trainer.py, not
-    # concurrency). A systemd unit launched with the old flag would otherwise
-    # fail argparse on restart and could thrash; tolerate it as a no-op.
-    ap.add_argument("--max-heavy", type=int, default=None, help=argparse.SUPPRESS)
     ap.add_argument("--iter", type=int, default=5_000_000,
                     help="MCCFR iterations per setup (default 5M).")
     ap.add_argument("--log-points", type=int, default=20)
