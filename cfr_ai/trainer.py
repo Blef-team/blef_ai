@@ -602,24 +602,28 @@ class Trainer:
         keys = np.empty(n, dtype=np.int64)
         for k, row in self.key_to_row.items():
             keys[int(row)] = int(k)
-        lower = self.lower_action[:n].copy()
-        upper = self.upper_action[:n].copy()
-        regrets = np.ascontiguousarray(self.regrets[:n]).astype(np.float32)
-        strategy_sum = np.ascontiguousarray(self.strategy_sum[:n]).copy()
-        first_touched = self.first_touched[:n].copy()
-        last_touched = self.last_touched[:n].copy()
-        times_touched = self.times_touched[:n].copy()
-
         order = np.argsort(keys, kind="stable")
+        keys = keys[order]
+        # Small arrays: index the [:n] view once each (one fresh array apiece).
+        lower = self.lower_action[:n][order]
+        upper = self.upper_action[:n][order]
+        first_touched = self.first_touched[:n][order]
+        last_touched = self.last_touched[:n][order]
+        times_touched = self.times_touched[:n][order]
+        # Reorder each via a single fancy-index then drop trainer's own array to avoid RAM usage spike
+        regrets = self.regrets[:n][order].astype(np.float32, copy=False)
+        self.regrets = None
+        strategy_sum = self.strategy_sum[:n][order]
+        self.strategy_sum = None
         return {
-            "keys": keys[order],
-            "lower": lower[order],
-            "upper": upper[order],
-            "regrets": regrets[order],
-            "strategy_sum": strategy_sum[order],
-            "first_touched": first_touched[order],
-            "last_touched": last_touched[order],
-            "times_touched": times_touched[order],
+            "keys": keys,
+            "lower": lower,
+            "upper": upper,
+            "regrets": regrets,
+            "strategy_sum": strategy_sum,
+            "first_touched": first_touched,
+            "last_touched": last_touched,
+            "times_touched": times_touched,
         }
 
 

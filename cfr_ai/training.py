@@ -103,6 +103,7 @@ def save_strategies(trainer: Trainer, out_root: str, hand_sizes,
     fs, meaningful_policies = trainer.get_final_flat_strategy(
         drop_check_only=True, clear_lows_threshold=0.01)
     save_strategy(fs, setup_dir, compressed=True)
+    del fs # Drop to avoid RAM usage spike during save
 
     diag = trainer.get_diagnostic_arrays()
     save_diagnostic(
@@ -115,6 +116,7 @@ def save_strategies(trainer: Trainer, out_root: str, hand_sizes,
         strategy_sum=diag["strategy_sum"],
         compressed=True,
     )
+    del diag # Drop to avoid RAM usage spike during save
 
     duration_hhmm = time.strftime('%H:%M', time.gmtime(training_seconds))
     md_path = os.path.join(setup_dir, "metadata.csv")
