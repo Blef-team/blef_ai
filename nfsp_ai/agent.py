@@ -1172,6 +1172,7 @@ class NFSPAgent:
         loser=None,          # <-- loser id ONLY on terminal step (None otherwise)
         actor_team=None,     # <-- actor's team id (None in solo mode); per-step
         loser_team=None,     # <-- loser's team id (None in solo mode); terminal-only
+        personality_terminal_scale: float = 1.0,  # multiplied into the MC terminal credit; 1.0 = no shaping
     ):
         if not hasattr(self, "_nstep_queue"):
             raise ValueError("_nstep_queue not in self!")
@@ -1220,6 +1221,10 @@ class NFSPAgent:
             "loser": loser if done else None, # ONLY present on terminal step
             "actor_team": actor_team,        # team id for THIS step's actor (None in solo)
             "loser_team": loser_team if done else None,  # team id of the round's loser
+            # Per-trajectory personality terminal-magnitude scalar; only the
+            # terminal entry's value is read in _flush_nstep. Default 1.0 (no
+            # shaping) for the baseline pantheon and non-terminal steps.
+            "personality_terminal_scale": float(personality_terminal_scale) if done else 1.0,
         }
         self._nstep_queue.append(entry)
 
@@ -1305,7 +1310,10 @@ class NFSPAgent:
                 sign = -1.0 if actor_team == loser_team else +1.0
             else:
                 sign = -1.0 if actor_id == loser_id else +1.0
-            R = sign * g
+            # Personality terminal-magnitude shaping: multiply the MC credit by
+            # the scalar emitted at terminal by the env (1.0 = no shaping).
+            ps_scale = float(term.get("personality_terminal_scale", 1.0))
+            R = sign * g * ps_scale
 
             if not step.get("is_br", False):
                 continue
@@ -1535,6 +1543,7 @@ class NFSPAgent:
             if rr is not None:
                 loser = rr.get("loser", None)
                 loser_team = rr.get("loser_team", None)
+            ps_scale = float(info_dict.get("personality_terminal_scale", 1.0)) if info_dict else 1.0
 
             # Pass actor/loser (and their teams) so _flush_nstep can
             # distribute rewards correctly in both solo and team modes.
@@ -1547,6 +1556,7 @@ class NFSPAgent:
                     obs, mask, action, reward, nobs, nmask, done, is_br=use_br,
                     actor=actor, loser=loser,
                     actor_team=actor_team, loser_team=loser_team,
+                    personality_terminal_scale=ps_scale,
                 )
 
             # Ensure n-step buffer flushes at terminals (round end)
@@ -1943,29 +1953,44 @@ class NFSPAgent:
             "check_explore_prob": float(getattr(self, "_check_explore_prob", 0.0)),
         }, path)
 
-    def export_inference(self, path: str, *, team_aware: Optional[bool] = None):
+    def export_inference(
+        self,
+        path: str,
+        *,
+        team_aware: Optional[bool] = None,
+        personality_spec_dict: Optional[dict] = None,
+    ):
         """Persist an inference-only checkpoint.
 
         `team_aware` records whether the model's expected obs vector
         includes the per-slot team-flag block. Stamped in cfg so the
         production loader doesn't have to probe obs_dim. Defaults to
         True (current training-time obs format) when not specified.
+
+        `personality_spec_dict` (when set) is the serialised
+        ``PersonalityTrainSpec`` the run was trained with. Stamped in
+        cfg["personality"] so the production loader reapplies the obs
+        blind-spots and mask restrictions at serve time (symmetric to
+        training). Version bumps to 3 when present.
         """
+        cfg: dict = {
+            "hidden": int(self.cfg.hidden),
+            "factorize_action_head": bool(getattr(self.cfg, "factorize_action_head", False)),
+            "team_aware": bool(team_aware) if team_aware is not None else True,
+            "gamma": float(self.cfg.gamma),
+            "anticipatory_eta": float(self.cfg.anticipatory_eta),
+            "eps_start": float(self.cfg.eps_start),
+            "eps_end": float(self.cfg.eps_end),
+        }
+        if personality_spec_dict is not None:
+            cfg["personality"] = personality_spec_dict
         payload = {
-            "version": 2,
+            "version": 3 if personality_spec_dict is not None else 2,
             "obs_dim": int(self.obs_dim),
             "act_dim": int(self.act_dim),
             "q": self.q.state_dict(),
             "pi": self.pi.state_dict(),
-            "cfg": {
-                "hidden": int(self.cfg.hidden),
-                "factorize_action_head": bool(getattr(self.cfg, "factorize_action_head", False)),
-                "team_aware": bool(team_aware) if team_aware is not None else True,
-                "gamma": float(self.cfg.gamma),
-                "anticipatory_eta": float(self.cfg.anticipatory_eta),
-                "eps_start": float(self.cfg.eps_start),
-                "eps_end": float(self.cfg.eps_end),
-            },
+            "cfg": cfg,
         }
         torch.save(payload, path)
 

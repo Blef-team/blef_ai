@@ -510,6 +510,14 @@ def _legal_action_mask(game: dict, spec: DeckSpec, pub_prior: list) -> torch.Ten
             # walks into this corner.
             if not mask.any() and check_legal_pre:
                 mask[check] = 1.0
+
+    # Per-personality hard-mask restrictions, with their own safety rail
+    # (mandatory: never produce an empty mask). No-op when spec carries no
+    # personality_spec attribute (the baseline pantheon / untrained personalities).
+    psspec = getattr(spec, "personality_spec", None)
+    if psspec is not None:
+        from nfsp_ai.personality_train import apply_personality_to_mask
+        mask = apply_personality_to_mask(mask, psspec, spec)
     return torch.from_numpy(mask)
 
 
@@ -820,6 +828,14 @@ def vectorize_obs(
     if idx != spec.obs_dim:
         raise ValueError(f"vectorize_obs produced dim {idx}, expected {spec.obs_dim}")
 
+    # Per-personality obs zero-mask (perceptual blind spots). No-op when no
+    # personality_spec is attached. Applied AFTER the dim check so the layout
+    # resolver and _compute_obs_dim stay the single source of truth.
+    psspec = getattr(spec, "personality_spec", None)
+    if psspec is not None:
+        from nfsp_ai.personality_train import apply_personality_to_obs
+        apply_personality_to_obs(obs, psspec, spec)
+
     # Validations on probability slices
     if len(pvt_prior) != spec.hist_dim:
         raise ValueError(
@@ -879,6 +895,7 @@ class MyEnv:
         n_teams: int = 0,
         randomize_initial_hands: bool = False,
         team_aware: bool = True,
+        personality_spec=None,
     ):
         if n_agents < 2 or n_agents > 8:
             raise ValueError("n_agents must be in [2, 8]")
@@ -892,6 +909,10 @@ class MyEnv:
         self.common_card_cap = max(0, int(common_cards))
         self.n_teams_cap = max(0, int(n_teams))
         self.team_aware = bool(team_aware)
+        # Optional personality bias spec (PersonalityTrainSpec). Attached to
+        # deck_spec on every rebuild so vectorize_obs and _legal_action_mask
+        # can find it via the spec they already receive. None = baseline.
+        self.personality_spec = personality_spec
         self.rules = {
             "deck_size": int(deck_size),
             "jokers": self.joker_cap,
@@ -907,6 +928,7 @@ class MyEnv:
             history_embedding=self.history_embedding,
             team_aware=self.team_aware,
         )
+        self.deck_spec.personality_spec = self.personality_spec
 
         self.verbose = verbose
         self.illegal_penalty = float(illegal_penalty)
@@ -958,6 +980,7 @@ class MyEnv:
                 history_embedding=self.history_embedding,
                 team_aware=self.team_aware,
             )
+            self.deck_spec.personality_spec = self.personality_spec
             cp = self.game.get("cp_nickname")
             obs, pub_prior = vectorize_obs(
                 self.game,
@@ -1032,6 +1055,7 @@ class MyEnv:
             history_embedding=self.history_embedding,
             team_aware=self.team_aware,
         )
+        self.deck_spec.personality_spec = self.personality_spec
 
         # New match bookkeeping
         self.rounds_since_reset = 0
@@ -1112,6 +1136,7 @@ class MyEnv:
             history_embedding=self.history_embedding,
             team_aware=self.team_aware,
         )
+        self.deck_spec.personality_spec = self.personality_spec
         cp = self.game.get("cp_nickname")
         obs, pub_prior = vectorize_obs(
             self.game,
@@ -1129,6 +1154,7 @@ class MyEnv:
         round_result = None
         history_for_log = None
         done_reason = None
+        personality_terminal_scale = 1.0
 
         if is_check:
             # Round has been resolved by the manager, and a new round likely started.
@@ -1179,6 +1205,21 @@ class MyEnv:
             }
             history_for_log = history_before
 
+            # Personality terminal-magnitude shaping. Uses history_before (the
+            # round's actions in order, captured before gm.play() advanced the
+            # state). compute_personality_terminal_scale returns 1.0 when no
+            # personality_spec is attached, so this is a no-op for the baseline.
+            psspec = getattr(self.deck_spec, "personality_spec", None)
+            if psspec is not None and loser is not None:
+                from nfsp_ai.personality_train import compute_personality_terminal_scale
+                personality_terminal_scale = compute_personality_terminal_scale(
+                    psspec,
+                    {"history": history_before},
+                    actor_nick,
+                    loser,
+                    int(self.deck_spec.deck_size),
+                )
+
             # --- Key change: make the round boundary terminal ---
             done = True
             done_reason = "round_terminal"
@@ -1226,6 +1267,9 @@ class MyEnv:
             "history": history_for_log,
             "round_result": round_result,
             "reward": float(reward),
+            # Per-trajectory shaping scalar; multiplied into the MC return in
+            # agent._flush_nstep. 1.0 means no shaping (baseline / non-terminal).
+            "personality_terminal_scale": float(personality_terminal_scale),
             # Helpful breadcrumbs for debugging:
             "round_terminal": bool(is_check),
             "game_status": self.game.get("status", ""),
@@ -1509,6 +1553,19 @@ def main():
         help="Optional path to save an inference-only checkpoint (no training buffers).",
     )
     parser.add_argument(
+        "--personality-spec",
+        dest="personality_spec_path",
+        type=str,
+        default=None,
+        help=(
+            "Optional path to a PersonalityTrainSpec JSON. When set, the env "
+            "applies the spec's obs blind-spots, mask restrictions, and "
+            "terminal-magnitude shaping during training; the export-inference "
+            "checkpoint is stamped with the spec so production reapplies the "
+            "obs/mask hooks at serve time. See nfsp_ai/personality_specs/."
+        ),
+    )
+    parser.add_argument(
         "--verbose",
         action="store_true",
         help="Enable verbose logging from the game manager.",
@@ -1738,6 +1795,12 @@ def main():
     else:
         print("[embeddings] using legacy history multi-hot features.")
 
+    personality_spec_obj = None
+    if getattr(args, "personality_spec_path", None):
+        from nfsp_ai.personality_train import load_spec
+        personality_spec_obj = load_spec(args.personality_spec_path)
+        print(f"[personality] loaded {personality_spec_obj.name!r} from {args.personality_spec_path}")
+
     env = MyEnv(
         n_agents=args.n_agents,
         max_cards=args.max_cards,
@@ -1759,6 +1822,7 @@ def main():
         n_teams=getattr(args, "n_teams", 0),
         pick_n_teams_in_range=getattr(args, "pick_n_teams_in_range", False),
         randomize_initial_hands=args.randomize_initial_hands,
+        personality_spec=personality_spec_obj,
     )
     obs0, mask0, _ = env.reset()
 
@@ -1823,6 +1887,7 @@ def main():
         pick_common_cards_in_range=args.pick_common_cards_in_range,
         n_teams=getattr(args, "n_teams", 0),
         pick_n_teams_in_range=getattr(args, "pick_n_teams_in_range", False),
+        personality_spec=personality_spec_obj,
         # Eval env intentionally does NOT use randomize_initial_hands: the RIC
         # curriculum is a training-time intervention; eval scores the agent on
         # natural-distribution starts (all players begin with 1 card).
@@ -1831,11 +1896,18 @@ def main():
     if args.export_inference:
         export_path = os.path.abspath(args.export_inference)
         os.makedirs(os.path.dirname(export_path) or ".", exist_ok=True)
-        # Stamp team_aware from the training env's deck spec so the
-        # production loader doesn't have to probe obs_dim.
+        # Stamp team_aware (from training env's deck spec) and personality
+        # (when the run was driven by --personality-spec) so the production
+        # loader doesn't have to probe obs_dim and can reapply the obs/mask
+        # hooks symmetrically at serve time.
+        from nfsp_ai.personality_train import spec_to_dict
+        personality_dict = (
+            spec_to_dict(personality_spec_obj) if personality_spec_obj is not None else None
+        )
         agent.export_inference(
             export_path,
             team_aware=bool(getattr(env.deck_spec, "team_aware", True)),
+            personality_spec_dict=personality_dict,
         )
         print(f"[export] inference-only checkpoint saved to {export_path}")
         return
