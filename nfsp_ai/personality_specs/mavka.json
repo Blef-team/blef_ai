@@ -2,5 +2,7 @@
   "name": "mavka",
   "win_multiplier": 0.8,
   "loss_multiplier": 2.5,
-  "bluff_caught_penalty": 0.5
+  "bluff_caught_penalty": 0.5,
+  "greedy": false,
+  "head": "pi"
 }

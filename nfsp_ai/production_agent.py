@@ -579,11 +579,24 @@ class NFSPProductionAgent:
                 logger.exception(
                     "personality_action failed for '%s'; using baseline policy", pers_name)
 
+        # Per-personality variety knobs (greedy / head) when serving a TRAINED
+        # personality. Default head="pi" (Nash-shaped avg policy) and
+        # greedy=True (deterministic argmax) — same as baseline. A spec can
+        # opt into greedy=False (sample from softmax(masked_logits) -> less
+        # stiff, more varied) or head="q" (use best-response Q-net -> sharper
+        # / more aggressive). Baseline and sculpted-only personalities keep
+        # the existing global `self.greedy` and pi-head behavior.
+        use_avg_policy = True
+        be_greedy = self.greedy
+        if trained_personality_spec is not None:
+            use_avg_policy = (trained_personality_spec.head == "pi")
+            be_greedy = bool(trained_personality_spec.greedy)
+
         action = agent.select_action(
             obs_tensor,
             mask_tensor,
-            use_average_policy=True,
-            greedy=self.greedy,
+            use_average_policy=use_avg_policy,
+            greedy=be_greedy,
         )
         return int(action)
 

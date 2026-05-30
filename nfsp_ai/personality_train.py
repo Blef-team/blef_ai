@@ -83,6 +83,15 @@ class PersonalityTrainSpec:
     forbid_check_unless_only: bool = False
     # --- C: observation feature zero-mask ---
     obs_blind_spots: tuple = ()
+    # --- Inference-time variety (NOT used during training) ---
+    # greedy: True = argmax over the masked logits (deterministic, "stiff");
+    #         False = sample from softmax(masked_logits) (variety, less predictable).
+    # head:   "pi" = use the average policy (Nash-shaped); "q" = use the
+    #         best-response Q-net (sharper, more aggressive). "pi" + greedy=False
+    #         is the canonical "feels human" setting for trained personalities;
+    #         "q" + greedy=True is the perun "wall" setting (sculpted only today).
+    greedy: bool = True
+    head: str = "pi"
 
 
 def load_spec(path: str) -> PersonalityTrainSpec:
@@ -119,6 +128,9 @@ def spec_from_dict(data: dict) -> PersonalityTrainSpec:
             raise ValueError(
                 f"Unknown obs block {blk!r} in obs_blind_spots; known: {KNOWN_OBS_BLOCKS}"
             )
+    head = d.get("head", "pi")
+    if head not in ("pi", "q"):
+        raise ValueError(f"head must be 'pi' or 'q', got {head!r}")
     return PersonalityTrainSpec(**d)
 
 

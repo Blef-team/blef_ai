@@ -1,6 +1,6 @@
 {
   "name": "kupala",
-  "win_multiplier": 1.8,
-  "loss_multiplier": 0.5,
-  "forbid_check_unless_only": true
+  "forbid_check_unless_only": true,
+  "greedy": false,
+  "head": "pi"
 }

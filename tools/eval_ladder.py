@@ -39,6 +39,7 @@ import torch
 
 # Project imports — assume repo root is on sys.path (run as `python -m tools.eval_ladder`).
 from conservative_ai.agent import ConservativeAgent
+from conservative_crawling_ai.agent import ConservativeCrawlingAgent
 from nfsp_ai.agent import NFSPAgent, NFSPConfig
 from nfsp_ai.nfsp_run_local import MyEnv, _compute_obs_dim
 
@@ -85,6 +86,22 @@ class ConservativeOpponent(Opponent):
     def act(self, game_state, obs, mask):
         try:
             a = ConservativeAgent.determine_action(game_state)
+        except Exception:
+            a = None
+        return _legal_or_random(a, mask)
+
+
+class ConservativeCrawlingOpponent(Opponent):
+    """Pure-Python heuristic that escalates along high-probability bets
+    (uses BOTH private and generic priors, unlike `conservative`). Distinct
+    from `ConservativeOpponent` — different action selection rule. Used by
+    the existing `domovoi` sculpted personality as its delegated source."""
+
+    name = "conservative_crawling"
+
+    def act(self, game_state, obs, mask):
+        try:
+            a = ConservativeCrawlingAgent.determine_action(game_state)
         except Exception:
             a = None
         return _legal_or_random(a, mask)
@@ -140,10 +157,21 @@ class SnapshotOpponent(Opponent):
         self.checkpoint_path = checkpoint_path
         self.name = label or f"snapshot:{os.path.basename(checkpoint_path)}"
         self.device = device or torch.device("cpu")
-        # Tiny buffers — we don't train, but NFSPAgent's __init__ allocates them.
-        cfg = NFSPConfig(rl_capacity=1, sl_capacity=1)
-        self.agent = NFSPAgent(obs_dim, act_dim, device=self.device, cfg=cfg)
+        # Detect hidden width + factorize from the checkpoint so 256-wide and
+        # factorized-head snapshots load correctly (mirrors BRSelfOpponent).
         ckpt = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
+        try:
+            hidden = _detect_hidden_from_checkpoint(ckpt)
+        except Exception:
+            hidden = 128
+        saved_cfg = ckpt.get("cfg") or {}
+        factorize = bool(saved_cfg.get("factorize_action_head", False))
+        if not factorize:
+            q_state = ckpt.get("q") or {}
+            if any(str(k).endswith("bet_head.weight") for k in (q_state.keys() if isinstance(q_state, dict) else [])):
+                factorize = True
+        cfg = NFSPConfig(rl_capacity=1, sl_capacity=1, hidden=hidden, factorize_action_head=factorize)
+        self.agent = NFSPAgent(obs_dim, act_dim, device=self.device, cfg=cfg)
         # Use the inference-relevant subset; tolerate both full and exported payloads.
         if "q" in ckpt:
             self.agent.q.load_state_dict(ckpt["q"])
@@ -456,6 +484,7 @@ def load_learner(checkpoint_path: str, device: Optional[torch.device] = None) ->
 OPPONENT_REGISTRY: Dict[str, Callable[[int, int], Opponent]] = {
     "random": lambda obs_dim, act_dim: RandomOpponent(),
     "conservative": lambda obs_dim, act_dim: ConservativeOpponent(),
+    "conservative_crawling": lambda obs_dim, act_dim: ConservativeCrawlingOpponent(),
     "cfr": lambda obs_dim, act_dim: CFROpponent(),
 }
 

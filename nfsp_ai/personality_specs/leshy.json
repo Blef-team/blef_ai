@@ -1,4 +1,6 @@
 {
   "name": "leshy",
-  "obs_blind_spots": ["public_priors"]
+  "obs_blind_spots": ["public_priors"],
+  "greedy": false,
+  "head": "pi"
 }

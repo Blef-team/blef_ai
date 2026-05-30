@@ -74,6 +74,22 @@ class TestSpecRoundTrip(unittest.TestCase):
         with self.assertRaises(ValueError):
             spec_from_dict({"name": "bad", "obs_blind_spots": ["wibble"]})
 
+    def test_inference_variety_defaults_and_overrides(self):
+        # Defaults: greedy=True (deterministic), head="pi" (avg policy).
+        s = spec_from_dict({"name": "default"})
+        self.assertTrue(s.greedy)
+        self.assertEqual(s.head, "pi")
+        # Explicit overrides round-trip.
+        s2 = spec_from_dict({"name": "soft", "greedy": False, "head": "q"})
+        self.assertFalse(s2.greedy)
+        self.assertEqual(s2.head, "q")
+        round_tripped = spec_from_dict(spec_to_dict(s2))
+        self.assertEqual(round_tripped, s2)
+
+    def test_invalid_head_rejected(self):
+        with self.assertRaises(ValueError):
+            spec_from_dict({"name": "bad", "head": "wibble"})
+
 
 class TestLayoutResolver(unittest.TestCase):
     """The block-slice resolver must match _compute_obs_dim exactly."""
