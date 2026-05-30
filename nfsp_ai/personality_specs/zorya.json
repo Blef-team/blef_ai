@@ -1,0 +1,6 @@
+{
+  "name": "zorya",
+  "win_multiplier": 1.3,
+  "loss_multiplier": 1.3,
+  "obs_blind_spots": ["seat_counts"]
+}

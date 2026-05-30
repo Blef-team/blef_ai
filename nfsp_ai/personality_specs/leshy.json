@@ -1,0 +1,4 @@
+{
+  "name": "leshy",
+  "obs_blind_spots": ["public_priors"]
+}
