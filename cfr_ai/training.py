@@ -80,7 +80,7 @@ def _bump_priority():
         print(f"  priority bump failed: {e}", flush=True)
 
 
-VERSION = "V2"
+VERSION = "V2.1"
 
 
 def save_strategies(trainer: Trainer, out_root: str, hand_sizes,
