@@ -245,5 +245,129 @@ class ResolveModelPathsTest(unittest.TestCase):
         self.assertEqual(set(out.keys()), {"24"})
 
 
+# ---------------------------------------------------------------------------
+# Personality-keyed routing additions (new in feat/trained-personalities)
+# ---------------------------------------------------------------------------
+
+class PersonalityFilenameRegexTest(unittest.TestCase):
+    """The personality suffix is captured separately from the variant suffix."""
+
+    def test_personality_with_variant(self):
+        self.assertEqual(
+            _model_key_from_filename("nfsp_inference_24_1v1_kupala.pt"),
+            "24_1v1_kupala",
+        )
+        self.assertEqual(
+            _model_key_from_filename("nfsp_inference_24_multi_zorya.pt"),
+            "24_multi_zorya",
+        )
+        self.assertEqual(
+            _model_key_from_filename("nfsp_inference_32_team_leshy.pt"),
+            "32_team_leshy",
+        )
+
+    def test_personality_without_variant(self):
+        # Deck-only + personality (no variant slot).
+        self.assertEqual(
+            _model_key_from_filename("nfsp_inference_24_kupala.pt"),
+            "24_kupala",
+        )
+
+    def test_uppercase_personality_rejected(self):
+        """Personalities are lowercase by convention; reject UPPERCASE entries."""
+        self.assertIsNone(_model_key_from_filename("nfsp_inference_24_KUPALA.pt"))
+        self.assertIsNone(_model_key_from_filename("nfsp_inference_24_1v1_LESHY.pt"))
+
+
+class PersonalityRoutingChainTest(unittest.TestCase):
+    """Routing must prepend personality-keyed candidates when one is resolved.
+
+    The variant-only chain remains the fallback, so sculpted-only
+    personalities (no trained checkpoint) keep routing to the baseline
+    where the existing `personality_action` sculpting layer runs.
+    """
+
+    def test_personality_prepended_for_1v1(self):
+        chain = _routing_keys(
+            {"deck_size": 24, "jokers": 0, "blanks": 0, "common_cards": 0},
+            n_active=2,
+            players=[],
+            personality="kupala",
+        )
+        self.assertEqual(
+            chain,
+            [
+                "24_1v1_kupala",
+                "24_multi_kupala",
+                "24_kupala",
+                "24_1v1",
+                "24_multi",
+                "24",
+            ],
+        )
+
+    def test_personality_prepended_for_multi(self):
+        chain = _routing_keys(
+            {"deck_size": 24, "jokers": 1},
+            n_active=3,
+            players=[],
+            personality="zorya",
+        )
+        self.assertEqual(
+            chain,
+            ["24_multi_zorya", "24_zorya", "24_multi", "24"],
+        )
+
+    def test_personality_prepended_for_team(self):
+        chain = _routing_keys(
+            {"deck_size": 24, "teams": True},
+            n_active=4,
+            players=[],
+            personality="poludnica",
+        )
+        # team gets the most-specific personality key first.
+        self.assertEqual(chain[0], "24_team_poludnica")
+        # Variant-only fallback chain preserved.
+        self.assertIn("24_team", chain)
+        self.assertIn("24_multi", chain)
+        self.assertIn("24", chain)
+
+    def test_personality_chain_for_32_deck(self):
+        chain = _routing_keys(
+            {"deck_size": 32, "jokers": 0, "blanks": 0, "common_cards": 0},
+            n_active=2,
+            players=[],
+            personality="leshy",
+        )
+        self.assertEqual(
+            chain,
+            [
+                "32_1v1_leshy",
+                "32_multi_leshy",
+                "32_leshy",
+                "32_1v1",
+                "32_multi",
+                "32",
+            ],
+        )
+
+    def test_personality_none_falls_back_to_variant_chain(self):
+        """When no personality is resolved, the chain is the original."""
+        chain_a = _routing_keys(
+            {"deck_size": 24}, n_active=2, players=[], personality=None
+        )
+        chain_b = _routing_keys(
+            {"deck_size": 24}, n_active=2, players=[]
+        )
+        self.assertEqual(chain_a, chain_b)
+        self.assertEqual(chain_a, ["24_1v1", "24_multi", "24"])
+
+    def test_chain_is_deduped(self):
+        chain = _routing_keys(
+            {"deck_size": 24}, n_active=2, players=[], personality="mavka"
+        )
+        self.assertEqual(len(chain), len(set(chain)))
+
+
 if __name__ == "__main__":
     unittest.main()
