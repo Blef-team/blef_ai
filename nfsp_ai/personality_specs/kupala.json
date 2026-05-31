@@ -1,9 +1,8 @@
 {
   "name": "kupala",
-  "win_multiplier": 1.4,
-  "loss_multiplier": 0.7,
-  "bluff_call_bonus": 0.4,
-  "hand_type_bias": {"Three of a kind": 0.2, "Full house": 0.3},
+  "hand_type_bias": {"High card": -0.1, "Pair": -0.2, "Two pairs": -0.15},
+  "bluff_call_bonus": 0.3,
+  "bluff_caught_penalty": 0.3,
   "greedy": false,
   "head": "pi"
 }
