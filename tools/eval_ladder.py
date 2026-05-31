@@ -107,6 +107,51 @@ class ConservativeCrawlingOpponent(Opponent):
         return _legal_or_random(a, mask)
 
 
+class SimpleOpponent(Opponent):
+    """Minimal stochastic strategy: 50% CHECK the previous bet (challenge it),
+    50% raise to the next legal bet (the strict minimum legal raise).
+
+    When CHECK isn't legal (round opening — no bet to challenge yet), always
+    raise. Useful as the "weakest principled bot" benchmark — somewhere
+    between random and conservative."""
+
+    name = "simple"
+
+    def act(self, game_state, obs, mask):
+        legal = mask.nonzero(as_tuple=False).view(-1).tolist()
+        if not legal:
+            return 0
+        check_id = mask.shape[-1] - 1  # CHECK is the last action id by convention
+        non_check_legal = [a for a in legal if a != check_id]
+        check_legal = check_id in legal
+        # 50/50 between CHECK (if legal) and the minimum legal bet.
+        if check_legal and random.random() < 0.5:
+            return check_id
+        if non_check_legal:
+            return min(non_check_legal)
+        return check_id  # safety: only CHECK legal
+
+
+class CheckAlwaysOpponent(Opponent):
+    """Always CHECK when CHECK is legal; otherwise pick the minimum legal bet.
+
+    The "Checkbog" — challenges every bet immediately. Will win when the
+    opponent bluffs (which they often must, to drive a CHECK), and lose
+    when the opponent's bet is honest. Useful as a degenerate-defensive
+    benchmark."""
+
+    name = "check_always"
+
+    def act(self, game_state, obs, mask):
+        legal = mask.nonzero(as_tuple=False).view(-1).tolist()
+        if not legal:
+            return 0
+        check_id = mask.shape[-1] - 1
+        if check_id in legal:
+            return check_id
+        return legal[0]
+
+
 class CFROpponent(Opponent):
     """
     Loads CFR strategy CSVs lazily. If the strategy files aren't present,
@@ -485,6 +530,8 @@ OPPONENT_REGISTRY: Dict[str, Callable[[int, int], Opponent]] = {
     "random": lambda obs_dim, act_dim: RandomOpponent(),
     "conservative": lambda obs_dim, act_dim: ConservativeOpponent(),
     "conservative_crawling": lambda obs_dim, act_dim: ConservativeCrawlingOpponent(),
+    "simple": lambda obs_dim, act_dim: SimpleOpponent(),
+    "check_always": lambda obs_dim, act_dim: CheckAlwaysOpponent(),
     "cfr": lambda obs_dim, act_dim: CFROpponent(),
 }
 
