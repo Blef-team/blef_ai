@@ -307,6 +307,11 @@ class PersonalityRoutingChainTest(unittest.TestCase):
         )
 
     def test_personality_prepended_for_multi(self):
+        # For non-team multi-player games, the chain now includes the trained
+        # 1v1 personality ckpt as a fallback before the generic variant
+        # baseline — the 1v1-trained obs schema is compatible with non-team
+        # play, and the design choice is "trained trait is more important
+        # than variant-specific strategic refinement."
         chain = _routing_keys(
             {"deck_size": 24, "jokers": 1},
             n_active=3,
@@ -315,8 +320,34 @@ class PersonalityRoutingChainTest(unittest.TestCase):
         )
         self.assertEqual(
             chain,
-            ["24_multi_zorya", "24_zorya", "24_multi", "24"],
+            ["24_multi_zorya", "24_zorya", "24_1v1_zorya", "24_multi", "24"],
         )
+
+    def test_personality_chain_for_32_deck_multi(self):
+        # Same cross-variant trained-1v1 fallback applies to 32-deck.
+        chain = _routing_keys(
+            {"deck_size": 32, "jokers": 1},
+            n_active=3,
+            players=[],
+            personality="zorya",
+        )
+        self.assertEqual(
+            chain,
+            ["32_multi_zorya", "32_zorya", "32_1v1_zorya", "32_multi", "32"],
+        )
+
+    def test_personality_team_does_not_fall_back_to_1v1(self):
+        # Team mode: the trained 1v1 ckpt has obs_dim 390 (team_aware=False),
+        # incompatible with team obs (398-dim). Routing chain must NOT include
+        # the cross-variant 1v1 fallback so we don't try to load a shape-
+        # mismatched ckpt. Variant-only chain handles team mode.
+        chain = _routing_keys(
+            {"deck_size": 24, "teams": True},
+            n_active=4,
+            players=[],
+            personality="mavka",
+        )
+        self.assertNotIn("24_1v1_mavka", chain[chain.index("24_team_mavka") + 1:])
 
     def test_personality_prepended_for_team(self):
         chain = _routing_keys(

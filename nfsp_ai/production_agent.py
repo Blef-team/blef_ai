@@ -141,6 +141,17 @@ def _routing_keys(
     # Personality-keyed candidates (most specific first). Only prepended when
     # a personality was resolved from game_state. If no trained checkpoint
     # exists for any of these, the variant-only fallback below catches it.
+    #
+    # Design choice: trained personalities exist to be UNIQUE, not stronger.
+    # So when a variant-specific personality ckpt doesn't exist, fall through
+    # to the trained `<deck>_1v1_<personality>` ckpt even on multi/team games
+    # — the obs schema is compatible for non-team variants (the 1v1 ckpt has
+    # team_aware=False, obs_dim matches non-team obs of the same deck), and
+    # the cost is "personality plays its trait without variant-specific
+    # strategic refinement" — which is exactly the trade we want. For team
+    # mode the obs would mismatch, so the variant-only fallback catches it
+    # (team_aware base NFSP + sculpt overlay) — see the trade-off table in
+    # PR #70's description.
     if personality:
         if is_team:
             keys.append(f"{deck}_team_{personality}")
@@ -148,6 +159,14 @@ def _routing_keys(
             keys.append(f"{deck}_1v1_{personality}")
         keys.append(f"{deck}_multi_{personality}")
         keys.append(f"{deck}_{personality}")
+        # Cross-variant trained-personality fallback: prefer the 1v1 trained
+        # ckpt over the generic variant baseline whenever the obs schema is
+        # compatible. Compatibility = NOT team mode (1v1-trained checkpoints
+        # have team_aware=False; building the obs without team flags matches
+        # their input shape). For team mode, the variant-only fallback chain
+        # below applies instead (sculpt overlay on team-trained NFSP).
+        if not is_1v1 and not is_team:
+            keys.append(f"{deck}_1v1_{personality}")
 
     # Variant-only fallback chain (the original routing).
     if is_team:
