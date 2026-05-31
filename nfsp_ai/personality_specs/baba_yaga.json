@@ -1,0 +1,8 @@
+{
+  "name": "baba_yaga",
+  "loss_multiplier": 0.8,
+  "bluff_call_bonus": 0.6,
+  "hand_type_bias": {"Three of a kind": 0.3, "Four of a kind": 0.3},
+  "greedy": false,
+  "head": "pi"
+}
