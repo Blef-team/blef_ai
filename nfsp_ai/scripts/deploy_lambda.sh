@@ -15,22 +15,6 @@ if [[ -n "${AWS_PROFILE:-}" ]]; then
   AWS_ARGS=(--profile "${AWS_PROFILE}")
 fi
 
-if [[ -z "${ACCT:-}" || -z "${REGION:-}" ]]; then
-  cat <<EOF
-Environment variables ACCT and REGION must be set before running this script.
-  ACCT         – AWS account ID (numeric)
-  REGION       – AWS region code (e.g., us-east-1)
-  AWS_PROFILE  – (optional) named AWS profile to use; if unset, the
-                 default credentials chain is used.
-
-Example:
-  export ACCT=123456789012
-  export REGION=us-east-1
-  export AWS_PROFILE=blef-deploy    # optional
-EOF
-  exit 1
-fi
-
 if ! command -v aws >/dev/null 2>&1; then
   echo "[error] aws CLI not found in PATH" >&2
   exit 1
@@ -41,14 +25,42 @@ if ! command -v docker >/dev/null 2>&1; then
 fi
 
 # Pre-flight auth check: fail fast (before the Docker build) if creds are
-# wrong. Reports the resolved identity so the operator can sanity-check
-# they're pointing at the right account.
-if ! WHOAMI="$(aws "${AWS_ARGS[@]}" sts get-caller-identity --region "${REGION}" --output text 2>&1)"; then
+# wrong. Also doubles as the source of truth for ACCT when ACCT is not
+# explicitly set — pulls the account id directly from sts.
+if ! STS_OUT="$(aws "${AWS_ARGS[@]}" sts get-caller-identity --output text 2>&1)"; then
   echo "[error] aws sts get-caller-identity failed${AWS_PROFILE:+ (AWS_PROFILE=${AWS_PROFILE})}:" >&2
-  echo "  ${WHOAMI}" >&2
+  echo "  ${STS_OUT}" >&2
+  echo "  Configure the aws CLI (\`aws sso login\`, \`aws configure\`, or set" >&2
+  echo "  AWS_PROFILE / standard AWS_* env vars), then retry." >&2
   exit 1
 fi
-echo "[auth] caller identity: ${WHOAMI}${AWS_PROFILE:+  (profile=${AWS_PROFILE})}"
+# STS output is tab-separated: "AccountId  ARN  UserId" (with the default
+# --output text format). Pull the first field as the account id.
+ACCT_FROM_STS="$(awk '{print $1}' <<<"${STS_OUT}")"
+ACCT="${ACCT:-${ACCT_FROM_STS}}"
+if [[ "${ACCT}" != "${ACCT_FROM_STS}" ]]; then
+  echo "[warn] explicit ACCT (${ACCT}) differs from current caller identity account (${ACCT_FROM_STS})" >&2
+  echo "       continuing with ACCT=${ACCT} — make sure that's intended" >&2
+fi
+
+# REGION resolution: explicit env var > AWS_DEFAULT_REGION > the active
+# CLI/profile's configured region. Hard-fail only when all three are empty.
+if [[ -z "${REGION:-}" ]]; then
+  REGION="${AWS_DEFAULT_REGION:-$(aws "${AWS_ARGS[@]}" configure get region 2>/dev/null || true)}"
+fi
+if [[ -z "${REGION:-}" ]]; then
+  cat <<EOF >&2
+[error] could not determine an AWS region.
+Set one of:
+  REGION=eu-west-2 ./nfsp_ai/scripts/deploy_lambda.sh
+  export AWS_DEFAULT_REGION=eu-west-2
+  aws configure set region eu-west-2 ${AWS_PROFILE:+--profile ${AWS_PROFILE}}
+EOF
+  exit 1
+fi
+
+echo "[auth] caller identity: ${STS_OUT}${AWS_PROFILE:+  (profile=${AWS_PROFILE})}"
+echo "[auth] using ACCT=${ACCT}  REGION=${REGION}"
 
 declare -a REQUIRED_ARTIFACTS=(
   "artifacts/nfsp_inference_24.pt"
