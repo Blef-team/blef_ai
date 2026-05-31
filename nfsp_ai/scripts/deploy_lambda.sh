@@ -27,7 +27,7 @@ fi
 # Pre-flight auth check: fail fast (before the Docker build) if creds are
 # wrong. Also doubles as the source of truth for ACCT when ACCT is not
 # explicitly set — pulls the account id directly from sts.
-if ! STS_OUT="$(aws "${AWS_ARGS[@]}" sts get-caller-identity --output text 2>&1)"; then
+if ! STS_OUT="$(aws ${AWS_ARGS[@]+"${AWS_ARGS[@]}"} sts get-caller-identity --output text 2>&1)"; then
   echo "[error] aws sts get-caller-identity failed${AWS_PROFILE:+ (AWS_PROFILE=${AWS_PROFILE})}:" >&2
   echo "  ${STS_OUT}" >&2
   echo "  Configure the aws CLI (\`aws sso login\`, \`aws configure\`, or set" >&2
@@ -46,7 +46,7 @@ fi
 # REGION resolution: explicit env var > AWS_DEFAULT_REGION > the active
 # CLI/profile's configured region. Hard-fail only when all three are empty.
 if [[ -z "${REGION:-}" ]]; then
-  REGION="${AWS_DEFAULT_REGION:-$(aws "${AWS_ARGS[@]}" configure get region 2>/dev/null || true)}"
+  REGION="${AWS_DEFAULT_REGION:-$(aws ${AWS_ARGS[@]+"${AWS_ARGS[@]}"} configure get region 2>/dev/null || true)}"
 fi
 if [[ -z "${REGION:-}" ]]; then
   cat <<EOF >&2
@@ -105,7 +105,7 @@ TAG="${TAG:-lambda-compatible}"
 ECR="${ACCT}.dkr.ecr.${REGION}.amazonaws.com/${REPO}:${TAG}"
 
 echo "[login] Logging into ECR ${ACCT}.dkr.ecr.${REGION}.amazonaws.com"
-aws "${AWS_ARGS[@]}" ecr get-login-password --region "${REGION}" \
+aws ${AWS_ARGS[@]+"${AWS_ARGS[@]}"} ecr get-login-password --region "${REGION}" \
   | docker login --username AWS --password-stdin "${ACCT}.dkr.ecr.${REGION}.amazonaws.com"
 
 echo "[tag] Tagging image ${IMAGE_NAME} -> ${ECR}"
@@ -119,7 +119,7 @@ FUNCTION="${FUNCTION:-blef-aiagent-nfsp}"
 # touching production. Swap explicitly (SWAP=1) once the new image is verified.
 if [[ "${SWAP:-0}" == "1" ]]; then
   echo "[lambda] Updating Lambda function ${FUNCTION} to image ${ECR}"
-  aws "${AWS_ARGS[@]}" lambda update-function-code \
+  aws ${AWS_ARGS[@]+"${AWS_ARGS[@]}"} lambda update-function-code \
     --function-name "${FUNCTION}" \
     --region "${REGION}" \
     --image-uri "${ECR}"
