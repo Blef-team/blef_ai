@@ -1,7 +1,10 @@
 from typing import List
+import os
 import numpy as np
 
-history_codes = np.genfromtxt('cfr_ai/history.csv', delimiter=',', dtype='|U5', skip_header=0)
+# Resolve history.csv relative to this module to prevent imports failing
+_HISTORY_CSV = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'history.csv')
+history_codes = np.genfromtxt(_HISTORY_CSV, delimiter=',', dtype='|U5', skip_header=0)
 
 
 def get_possible_actions(history: List[int], min_bet: int) -> List[int]:
