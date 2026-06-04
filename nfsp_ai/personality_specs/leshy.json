@@ -1,0 +1,6 @@
+{
+  "name": "leshy",
+  "obs_blind_spots": ["private_priors", "last_bet_prob"],
+  "greedy": false,
+  "head": "pi"
+}

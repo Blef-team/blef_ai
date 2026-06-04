@@ -67,7 +67,10 @@ DEFAULT_GREEDY = os.environ.get("NFSP_GREEDY", "1") not in {"0", "false", "False
 # deployments without variant-specific files keep working unchanged.
 
 _INFERENCE_FILENAME_RE = re.compile(
-    r"^nfsp_inference_(?P<deck>24|32)(?:_(?P<variant>[A-Za-z0-9]+))?\.pt$"
+    r"^nfsp_inference_(?P<deck>24|32)"
+    r"(?:_(?P<variant>1v1|multi|team))?"
+    r"(?:_(?P<personality>[a-z]+))?"
+    r"\.pt$"
 )
 _KNOWN_VARIANTS = ("1v1", "multi", "team")
 
@@ -75,7 +78,9 @@ _KNOWN_VARIANTS = ("1v1", "multi", "team")
 def _model_key_from_filename(path: str) -> Optional[str]:
     """Map an inference file path to its routing key.
 
-    Returns None if the filename doesn't match the convention.
+    Returns None if the filename doesn't match the convention. Keys take
+    the form ``<deck>[_<variant>][_<personality>]`` — e.g. ``"24"``,
+    ``"24_1v1"``, ``"24_1v1_kupala"``, ``"24_kupala"``.
     """
     name = os.path.basename(path)
     m = _INFERENCE_FILENAME_RE.match(name)
@@ -83,12 +88,21 @@ def _model_key_from_filename(path: str) -> Optional[str]:
         return None
     deck = m.group("deck")
     variant = m.group("variant")
-    if variant is None:
-        return deck  # legacy
-    return f"{deck}_{variant}"
+    personality = m.group("personality")
+    parts = [deck]
+    if variant:
+        parts.append(variant)
+    if personality:
+        parts.append(personality)
+    return "_".join(parts)
 
 
-def _routing_keys(rules: dict, n_active: int, players: Optional[list] = None) -> list[str]:
+def _routing_keys(
+    rules: dict,
+    n_active: int,
+    players: Optional[list] = None,
+    personality: Optional[str] = None,
+) -> list[str]:
     """Return preferred routing keys, most-specific first.
 
     Routes by *active* player count (players with cards remaining), not
@@ -97,14 +111,21 @@ def _routing_keys(rules: dict, n_active: int, players: Optional[list] = None) ->
     provided the obs is canonicalized to drop eliminated seats before
     inference (see `_canonicalize_to_active`).
 
+    When ``personality`` is set (resolved from game_state via
+    ``personalities.resolve_personality``), personality-suffixed keys are
+    prepended to the chain so a trained-personality checkpoint wins over
+    the generic variant model. Existing variant-only keys remain as
+    fallback, so sculpted-only personalities (no trained checkpoint)
+    still route to the baseline and pick up the existing sculpting layer.
+
     The caller walks this list and picks the first key with a loaded
-    agent. Always ends with the bare `<deck>` legacy key so a
+    agent. Always ends with the bare ``<deck>`` legacy key so a
     single-model deployment continues to work.
 
-    Team mode is detected by inspecting `players[*].team` (the engine
-    schema). A players list with any non-None team value means team
-    mode. The legacy `rules.teams` flag is also honoured for callers
-    that pre-compute it.
+    Team mode is detected by inspecting ``players[*].team`` (the engine
+    schema). A players list with any non-None team value means team mode.
+    The legacy ``rules.teams`` flag is also honoured for callers that
+    pre-compute it.
     """
     deck = int(rules.get("deck_size", 24))
     is_team = bool(rules.get("teams", False))
@@ -116,6 +137,38 @@ def _routing_keys(rules: dict, n_active: int, players: Optional[list] = None) ->
     is_1v1 = (n_active == 2 and j == 0 and b == 0 and cc == 0 and not is_team)
 
     keys: list[str] = []
+
+    # Personality-keyed candidates (most specific first). Only prepended when
+    # a personality was resolved from game_state. If no trained checkpoint
+    # exists for any of these, the variant-only fallback below catches it.
+    #
+    # Design choice: trained personalities exist to be UNIQUE, not stronger.
+    # So when a variant-specific personality ckpt doesn't exist, fall through
+    # to the trained `<deck>_1v1_<personality>` ckpt even on multi/team games
+    # — the obs schema is compatible for non-team variants (the 1v1 ckpt has
+    # team_aware=False, obs_dim matches non-team obs of the same deck), and
+    # the cost is "personality plays its trait without variant-specific
+    # strategic refinement" — which is exactly the trade we want. For team
+    # mode the obs would mismatch, so the variant-only fallback catches it
+    # (team_aware base NFSP + sculpt overlay) — see the trade-off table in
+    # PR #70's description.
+    if personality:
+        if is_team:
+            keys.append(f"{deck}_team_{personality}")
+        if is_1v1:
+            keys.append(f"{deck}_1v1_{personality}")
+        keys.append(f"{deck}_multi_{personality}")
+        keys.append(f"{deck}_{personality}")
+        # Cross-variant trained-personality fallback: prefer the 1v1 trained
+        # ckpt over the generic variant baseline whenever the obs schema is
+        # compatible. Compatibility = NOT team mode (1v1-trained checkpoints
+        # have team_aware=False; building the obs without team flags matches
+        # their input shape). For team mode, the variant-only fallback chain
+        # below applies instead (sculpt overlay on team-trained NFSP).
+        if not is_1v1 and not is_team:
+            keys.append(f"{deck}_1v1_{personality}")
+
+    # Variant-only fallback chain (the original routing).
     if is_team:
         keys.append(f"{deck}_team")
     if is_1v1:
@@ -152,6 +205,40 @@ def _canonicalize_to_active(game_state: dict) -> dict:
     out = dict(game_state)
     out["players"] = active
     return out
+
+
+_PUB_PRIOR_EPSILON = 1e-9
+
+
+def _filter_mask_by_public_priors(
+    mask: torch.Tensor, pub_prior, check_action_id: int
+) -> torch.Tensor:
+    """Zero mask entries for bet actions whose public-prior probability is
+    effectively zero. Public priors encode "given visible cards alone, is
+    this set even reachable?" — a 0 means the bet is provably-impossible
+    regardless of hidden hands (e.g. Full house with only 4 cards in play).
+
+    Applied at inference only — training-time masks intentionally keep these
+    actions legal (per PR #40, hard-zeroing them in training tied the action
+    set to a buggy probability calculator). At inference, we never want a
+    bot betting a provably-impossible set; it reads as a bug, not a trait.
+
+    Safety rail: if filtering would zero the mask (rare — only when CHECK is
+    also illegal, i.e. the round has resolved), the original mask is
+    returned unchanged.
+    """
+    if pub_prior is None:
+        return mask
+    pub_arr = np.asarray(pub_prior, dtype=np.float32)
+    if pub_arr.size == 0:
+        return mask
+    n = int(min(pub_arr.size, check_action_id))
+    plausible = (pub_arr[:n] > _PUB_PRIOR_EPSILON)
+    mask_np = mask.detach().cpu().numpy().astype(np.float32, copy=True)
+    mask_np[:n] = mask_np[:n] * plausible.astype(np.float32)
+    if mask_np.sum() <= 0:
+        return mask
+    return torch.from_numpy(mask_np).to(mask.dtype)
 
 
 def _resolve_model_paths(path: Optional[str]) -> dict[str, str]:
@@ -283,12 +370,17 @@ class NFSPProductionAgent:
         self.history_embeddings = _load_history_embedding_map(history_embedding_path, self.device)
 
         # agents: routing-key -> NFSPAgent
-        # routing-key examples: "24" (legacy), "24_1v1", "24_multi", "32_team"
+        # routing-key examples: "24" (legacy), "24_1v1", "24_multi", "32_team",
+        # "24_1v1_kupala", "24_kupala", etc.
         self.agents: dict[str, NFSPAgent] = {}
         self.model_sources: dict[str, str] = {}
         # team_aware per loaded model: chosen at determine_action time
         # to build the right-shape obs for the served checkpoint.
         self.agent_team_aware: dict[str, bool] = {}
+        # personality_spec per loaded model when stamped (training was driven
+        # by --personality-spec). Reapplied at serve time so the obs blind
+        # spots and mask restrictions match the training distribution.
+        self.agent_personality_spec: dict = {}
         for key, cand in _resolve_model_paths(model_path).items():
             ckpt = torch.load(cand, map_location=self.device)
             act_dim = int(ckpt.get("act_dim", 0))
@@ -315,6 +407,39 @@ class NFSPProductionAgent:
             self.agents[key] = agent
             self.model_sources[key] = cand
             cfg = ckpt.get("cfg") or {}
+            # Rehydrate the stamped personality spec, if present. Warn (but do
+            # not fail) when the stamped spec diverges from the on-disk spec
+            # at nfsp_ai/personality_specs/<name>.json — the checkpoint's
+            # stamped value is the contract, the on-disk spec is the source
+            # the next training run would use.
+            pers_dict = cfg.get("personality")
+            if pers_dict is not None:
+                try:
+                    from nfsp_ai.personality_train import spec_from_dict, load_spec, spec_to_dict
+                    stamped_spec = spec_from_dict(pers_dict)
+                    self.agent_personality_spec[key] = stamped_spec
+                    disk_path = f"nfsp_ai/personality_specs/{stamped_spec.name}.json"
+                    if os.path.exists(disk_path):
+                        try:
+                            disk_spec = load_spec(disk_path)
+                            if spec_to_dict(disk_spec) != spec_to_dict(stamped_spec):
+                                logger.warning(
+                                    "personality spec stamped on %s differs from %s; "
+                                    "serving the stamped spec.",
+                                    cand,
+                                    disk_path,
+                                )
+                        except Exception:
+                            logger.exception(
+                                "could not validate on-disk spec %s; continuing with stamped.",
+                                disk_path,
+                            )
+                except Exception:
+                    logger.exception(
+                        "failed to rehydrate cfg['personality'] on %s; "
+                        "this trained-personality checkpoint will serve as a baseline.",
+                        cand,
+                    )
             cfg_team_aware = cfg.get("team_aware")
             if cfg_team_aware is None:
                 self.agent_team_aware[key] = self._infer_team_aware(deck_size, int(ckpt["obs_dim"]))
@@ -431,7 +556,7 @@ class NFSPProductionAgent:
         players = game_state.get("players", []) or []
         n_seated = len(players)
         n_active = sum(1 for p in players if int(p.get("n_cards", 0)) > 0)
-        keys = _routing_keys(rules, n_active, players=players)
+        keys = _routing_keys(rules, n_active, players=players, personality=pers_name)
         agent = None
         chosen_key = None
         for key in keys:
@@ -451,7 +576,10 @@ class NFSPProductionAgent:
         # training distribution. multi/team specialists trained on
         # games that include eliminations and expect the seat block
         # to retain eliminated slots, so they pass through unchanged.
-        if chosen_key and chosen_key.endswith("_1v1") and n_active < n_seated:
+        # Personality variants inherit the same canonicalization rule from
+        # their underlying variant (1v1/multi/team) — the personality suffix
+        # doesn't change the seat semantics.
+        if chosen_key and ("_1v1" in chosen_key) and n_active < n_seated:
             game_state = _canonicalize_to_active(game_state)
         # Embeddings remain keyed by deck size; variant doesn't change
         # the card / history vocabulary.
@@ -468,6 +596,13 @@ class NFSPProductionAgent:
             history_embedding=history_embedding,
             team_aware=spec_team_aware,
         )
+        # Attach the rehydrated personality spec (if any) to the deck_spec so
+        # vectorize_obs and _legal_action_mask reapply the obs blind-spots /
+        # mask restrictions symmetrically to training. Absent for baseline
+        # and sculpted-only personalities.
+        trained_personality_spec = self.agent_personality_spec.get(chosen_key)
+        if trained_personality_spec is not None:
+            spec.personality_spec = trained_personality_spec
         obs_vec, pub_prior = vectorize_obs(
             game_state,
             cp,
@@ -478,6 +613,9 @@ class NFSPProductionAgent:
         mask = _legal_action_mask(game_state, spec, pub_prior)
         if mask.sum() <= 0:
             raise RuntimeError("No legal actions available for current game state")
+        # Inference-only sanity floor: forbid bets the public information
+        # already proves impossible (e.g. Full house with 4 cards in play).
+        mask = _filter_mask_by_public_priors(mask, pub_prior, int(spec.check_action_id))
 
         obs_tensor = torch.from_numpy(np.asarray(obs_vec, dtype=np.float32)).to(self.device)
         mask_tensor = mask.to(device=self.device, dtype=torch.float32)
@@ -485,7 +623,11 @@ class NFSPProductionAgent:
         # NFSP-backed personality: sculpt the chosen head's logits. Any failure
         # falls back to the unmodified baseline policy so a bad config can never
         # take a bot offline.
-        if pers_name is not None:
+        # SKIP sculpting when a trained-personality checkpoint is serving — the
+        # bias is already baked into the policy weights, and overlaying sculpt
+        # logits on top would distort it. Sculpting still runs when the
+        # resolved personality has no trained checkpoint (existing pantheon).
+        if pers_name is not None and trained_personality_spec is None:
             try:
                 return int(personalities.personality_action(
                     agent, obs_tensor, mask_tensor, game_state, spec, pub_prior, pers_name))
@@ -493,11 +635,24 @@ class NFSPProductionAgent:
                 logger.exception(
                     "personality_action failed for '%s'; using baseline policy", pers_name)
 
+        # Per-personality variety knobs (greedy / head) when serving a TRAINED
+        # personality. Default head="pi" (Nash-shaped avg policy) and
+        # greedy=True (deterministic argmax) — same as baseline. A spec can
+        # opt into greedy=False (sample from softmax(masked_logits) -> less
+        # stiff, more varied) or head="q" (use best-response Q-net -> sharper
+        # / more aggressive). Baseline and sculpted-only personalities keep
+        # the existing global `self.greedy` and pi-head behavior.
+        use_avg_policy = True
+        be_greedy = self.greedy
+        if trained_personality_spec is not None:
+            use_avg_policy = (trained_personality_spec.head == "pi")
+            be_greedy = bool(trained_personality_spec.greedy)
+
         action = agent.select_action(
             obs_tensor,
             mask_tensor,
-            use_average_policy=True,
-            greedy=self.greedy,
+            use_average_policy=use_avg_policy,
+            greedy=be_greedy,
         )
         return int(action)
 

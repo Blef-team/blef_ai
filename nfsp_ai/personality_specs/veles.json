@@ -1,0 +1,7 @@
+{
+  "name": "veles",
+  "bluff_caught_penalty": 0.3,
+  "bluff_call_bonus": 0.3,
+  "greedy": false,
+  "head": "q"
+}

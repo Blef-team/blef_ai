@@ -1,0 +1,9 @@
+{
+  "name": "domovoi",
+  "loss_multiplier": 1.5,
+  "bluff_caught_penalty": 0.6,
+  "bluff_call_bonus": 0.3,
+  "hand_type_bias": {"High card": 0.1, "Pair": 0.15, "Two pairs": 0.1},
+  "greedy": false,
+  "head": "pi"
+}

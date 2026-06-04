@@ -1,0 +1,7 @@
+{
+  "name": "poludnica",
+  "loss_multiplier": 0.6,
+  "obs_blind_spots": ["history"],
+  "greedy": false,
+  "head": "pi"
+}
