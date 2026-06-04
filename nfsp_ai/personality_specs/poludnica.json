@@ -1,7 +1,6 @@
 {
   "name": "poludnica",
-  "loss_multiplier": 0.6,
-  "obs_blind_spots": ["history"],
+  "obs_blind_spots": ["history", "last_bet_prob"],
   "greedy": false,
   "head": "pi"
 }
