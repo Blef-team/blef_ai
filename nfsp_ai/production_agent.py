@@ -207,6 +207,40 @@ def _canonicalize_to_active(game_state: dict) -> dict:
     return out
 
 
+_PUB_PRIOR_EPSILON = 1e-9
+
+
+def _filter_mask_by_public_priors(
+    mask: torch.Tensor, pub_prior, check_action_id: int
+) -> torch.Tensor:
+    """Zero mask entries for bet actions whose public-prior probability is
+    effectively zero. Public priors encode "given visible cards alone, is
+    this set even reachable?" — a 0 means the bet is provably-impossible
+    regardless of hidden hands (e.g. Full house with only 4 cards in play).
+
+    Applied at inference only — training-time masks intentionally keep these
+    actions legal (per PR #40, hard-zeroing them in training tied the action
+    set to a buggy probability calculator). At inference, we never want a
+    bot betting a provably-impossible set; it reads as a bug, not a trait.
+
+    Safety rail: if filtering would zero the mask (rare — only when CHECK is
+    also illegal, i.e. the round has resolved), the original mask is
+    returned unchanged.
+    """
+    if pub_prior is None:
+        return mask
+    pub_arr = np.asarray(pub_prior, dtype=np.float32)
+    if pub_arr.size == 0:
+        return mask
+    n = int(min(pub_arr.size, check_action_id))
+    plausible = (pub_arr[:n] > _PUB_PRIOR_EPSILON)
+    mask_np = mask.detach().cpu().numpy().astype(np.float32, copy=True)
+    mask_np[:n] = mask_np[:n] * plausible.astype(np.float32)
+    if mask_np.sum() <= 0:
+        return mask
+    return torch.from_numpy(mask_np).to(mask.dtype)
+
+
 def _resolve_model_paths(path: Optional[str]) -> dict[str, str]:
     """Discover inference checkpoints. Returns {routing_key: path}.
 
@@ -579,6 +613,9 @@ class NFSPProductionAgent:
         mask = _legal_action_mask(game_state, spec, pub_prior)
         if mask.sum() <= 0:
             raise RuntimeError("No legal actions available for current game state")
+        # Inference-only sanity floor: forbid bets the public information
+        # already proves impossible (e.g. Full house with 4 cards in play).
+        mask = _filter_mask_by_public_priors(mask, pub_prior, int(spec.check_action_id))
 
         obs_tensor = torch.from_numpy(np.asarray(obs_vec, dtype=np.float32)).to(self.device)
         mask_tensor = mask.to(device=self.device, dtype=torch.float32)
