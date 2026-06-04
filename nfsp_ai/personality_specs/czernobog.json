@@ -1,9 +1,7 @@
 {
   "name": "czernobog",
-  "win_multiplier": 1.5,
-  "loss_multiplier": 0.6,
-  "bluff_caught_penalty": -0.2,
-  "hand_type_bias": {"Straight flush": 0.4, "Four of a kind": 0.4},
+  "forbid_hand_types": ["High card", "Pair", "Two pairs"],
+  "loss_multiplier": 0.8,
   "greedy": false,
   "head": "pi"
 }
