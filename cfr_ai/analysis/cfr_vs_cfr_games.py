@@ -156,8 +156,9 @@ def _game_task(game_id):
 
 
 def _ensure_mmap(outputs_base):
-    """Stage sparse-mmap sidecars for any setup that lacks them. Additive —
-    never modifies strategy.npz. Returns count staged."""
+    """Stage the sparse-mmap files for any setup that lacks them. Additive —
+    never modifies strategy.npz; macro masses are carried through. Returns
+    count staged."""
     from cfr_ai.strategy_io import write_mmap_layout
     staged = 0
     for name in sorted(os.listdir(outputs_base)):

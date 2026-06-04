@@ -54,9 +54,17 @@ def save_strategy(
     setup_dir: str,
     *,
     compressed: bool = True,
+    masses: Optional[np.ndarray] = None,
+    kinds: Optional[List[str]] = None,
 ) -> str:
     """Write the deployment-ready strategy.npz + strategy.abs.json under
-    `setup_dir`. Returns the path of the .npz."""
+    `setup_dir`. Returns the path of the .npz.
+
+    `masses` ([N, n_macros], row-aligned to `flat_strategy`) + `kinds` make this
+    a macro strategy: the concrete `probs` are the per-infoset `c/T` and each
+    macro's mass `m_k/T` rides in `masses`, on the same scale (concrete + masses
+    sum to the row total). The agent resolves each macro to a per-hand bet and
+    folds its mass there at serve. Omit both for a plain concrete strategy."""
     from cfr_ai.lbr import FlatStrategy  # local to avoid circular imports
     assert isinstance(flat_strategy, FlatStrategy)
     os.makedirs(setup_dir, exist_ok=True)
@@ -79,6 +87,10 @@ def save_strategy(
 
     npz_path = os.path.join(setup_dir, "strategy.npz")
     saver = np.savez_compressed if compressed else np.savez
+    extra = {}
+    if masses is not None and kinds:
+        extra["masses"] = np.asarray(masses)[order]
+        extra["kinds"] = np.array(list(kinds), dtype=object)
     saver(
         npz_path,
         version=np.int32(STRATEGY_NPZ_VERSION),
@@ -87,6 +99,7 @@ def save_strategy(
         upper=upper_sorted,
         probs=probs_sorted,
         min_bet=np.int32(flat_strategy.min_bet),
+        **extra,
     )
 
     abs_path = os.path.join(setup_dir, "strategy.abs.json")
@@ -190,6 +203,13 @@ class FlatStrategyAgent:
     _sparse_indices: Optional[np.ndarray] = None  # uint8, 1D
     _sparse_values: Optional[np.ndarray] = None   # int16, 1D
     _probs_offset: Optional[np.ndarray] = None    # int64[N+1]
+    # Augmenting macros (V3+). When present, `kinds` lists the macro kinds and
+    # `masses[row]` holds each macro's probability mass (`m_k/T`), on the SAME
+    # scale as the row's concrete `probs` slice (`c/T`): concrete + masses sum to
+    # the row total. The agent resolves each macro to a per-hand bet `b*` and
+    # folds its mass there at serve. `None` for plain concrete strategies.
+    masses: Optional[np.ndarray] = None  # [N, n_macros]
+    kinds: Optional[List[str]] = None
 
     def lookup(self, comp_key: int) -> Optional[int]:
         """O(log N) binary search. Returns row index or None if absent."""
@@ -233,14 +253,14 @@ def _check_version(data, label: str) -> None:
 
 
 def _read_npz_arrays(setup_dir: str):
-    """Open the strategy.npz + abs.json sidecar, validate version, return
+    """Open strategy.npz + its abs.json companion, validate version, return
     the loose ingredients. Shared by both loader entry points."""
     npz_path = os.path.join(setup_dir, "strategy.npz")
     abs_path = os.path.join(setup_dir, "strategy.abs.json")
     if not os.path.exists(npz_path):
         raise FileNotFoundError(f"strategy.npz not found at {npz_path}")
 
-    data = np.load(npz_path)
+    data = np.load(npz_path, allow_pickle=True)
     _check_version(data, "strategy.npz")
     arrays = dict(
         keys=data["keys"],
@@ -248,6 +268,8 @@ def _read_npz_arrays(setup_dir: str):
         upper=data["upper"],
         probs=data["probs"],
         min_bet=int(data["min_bet"]),
+        masses=data["masses"] if "masses" in data.files else None,
+        kinds=([str(x) for x in data["kinds"]] if "kinds" in data.files else None),
     )
     if os.path.exists(abs_path):
         with open(abs_path, "r", encoding="utf-8") as f:
@@ -292,12 +314,14 @@ def load_strategy_for_agent(setup_dir: str) -> FlatStrategyAgent:
         upper_action=a["upper"],
         abs_str_to_id=a["abs_str_to_id"],
         min_bet=a["min_bet"],
+        masses=a["masses"],
+        kinds=a["kinds"],
     )
 
 
 def _load_mmap(setup_dir: str) -> FlatStrategyAgent:
     """Mmap sparse_indices + sparse_values + eager-load the small meta arrays."""
-    meta = np.load(os.path.join(setup_dir, "strategy_meta.npz"))
+    meta = np.load(os.path.join(setup_dir, "strategy_meta.npz"), allow_pickle=True)
     _check_version(meta, "strategy_meta.npz")
     sparse_indices = np.load(
         os.path.join(setup_dir, "probs_sparse_indices.npy"), mmap_mode="r")
@@ -318,6 +342,8 @@ def _load_mmap(setup_dir: str) -> FlatStrategyAgent:
         _sparse_indices=sparse_indices,
         _sparse_values=sparse_values,
         _probs_offset=np.asarray(meta["probs_offset"]),
+        masses=(np.asarray(meta["masses"]) if "masses" in meta.files else None),
+        kinds=([str(x) for x in meta["kinds"]] if "kinds" in meta.files else None),
     )
 
 
@@ -336,21 +362,32 @@ def write_mmap_layout(setup_dir_src: str, setup_dir_dst: str) -> None:
     supporting `mmap_mode='r'` so the agent's peak memory stays tiny."""
     a = _read_npz_arrays(setup_dir_src)
     keys = a["keys"]; lower = a["lower"]; upper = a["upper"]; probs = a["probs"]
+    masses_src = a["masses"]; kinds = a["kinds"]
     n = keys.shape[0]
+    has_macros = masses_src is not None and kinds is not None and len(kinds) > 0
+    n_macros = int(masses_src.shape[1]) if has_macros else 0
+    masses_out = np.zeros((n, n_macros), dtype=np.uint16) if has_macros else None
 
-    # Single pass: re-normalise each row (defends against fp32 drift), scale
-    # by 65535, round to uint16, and stash only the non-zero (index, value)
-    # pairs. Strategies are typically 5-10% dense after `clear_lows`, so
-    # this drops ~90% of the storage volume vs. the dense int16 layout.
+    # Single pass: re-normalise each row, scale by 65535, round to uint16, and
+    # stash only the non-zero (index, value) pairs. Strategies are typically
+    # 5-10% dense after `clear_lows`, so this drops ~90% of the storage volume.
+    # For macro strategies the per-row total includes the macro masses, so the
+    # concrete slice AND the masses are scaled by the SAME factor — they stay on
+    # one comparable scale for the agent's serve-time fold (concrete + masses).
     parts_idx: List[np.ndarray] = []
     parts_val: List[np.ndarray] = []
     nz_per_row = np.zeros(n, dtype=np.int64)
     for i in range(n):
         lo, hi = int(lower[i]), int(upper[i])
         row_slice = probs[i, lo:hi + 1]
-        row_sum = float(row_slice.sum())
-        if row_sum > 0:
-            scaled = np.clip(np.round(row_slice / row_sum * 65535.0), 0, 65535).astype(np.uint16)
+        row_total = float(row_slice.sum())
+        if has_macros:
+            row_total += float(masses_src[i].sum())
+        if row_total > 0:
+            scaled = np.clip(np.round(row_slice / row_total * 65535.0), 0, 65535).astype(np.uint16)
+            if has_macros:
+                masses_out[i] = np.clip(np.round(masses_src[i] / row_total * 65535.0),
+                                        0, 65535).astype(np.uint16)
         else:
             scaled = np.zeros(hi - lo + 1, dtype=np.uint16)
         nz = np.flatnonzero(scaled)
@@ -366,8 +403,7 @@ def write_mmap_layout(setup_dir_src: str, setup_dir_dst: str) -> None:
     np.cumsum(nz_per_row, out=probs_offset[1:])
 
     os.makedirs(setup_dir_dst, exist_ok=True)
-    np.savez_compressed(
-        os.path.join(setup_dir_dst, "strategy_meta.npz"),
+    meta = dict(
         version=np.int32(STRATEGY_NPZ_VERSION),
         keys=keys,
         lower=lower,
@@ -375,6 +411,10 @@ def write_mmap_layout(setup_dir_src: str, setup_dir_dst: str) -> None:
         min_bet=np.int32(a["min_bet"]),
         probs_offset=probs_offset,
     )
+    if has_macros:
+        meta["masses"] = masses_out
+        meta["kinds"] = np.array(kinds, dtype=object)
+    np.savez_compressed(os.path.join(setup_dir_dst, "strategy_meta.npz"), **meta)
     np.save(os.path.join(setup_dir_dst, "probs_sparse_indices.npy"), sparse_indices)
     np.save(os.path.join(setup_dir_dst, "probs_sparse_values.npy"), sparse_values)
 
@@ -385,6 +425,31 @@ def write_mmap_layout(setup_dir_src: str, setup_dir_dst: str) -> None:
         with open(os.path.join(setup_dir_dst, "strategy.abs.json"),
                   "w", encoding="utf-8") as f:
             json.dump(abs_str_to_id, f, ensure_ascii=False)
+
+
+def save_macro_strategy(setup_dir: str, *, keys, lower, upper, probs,
+                        masses, kinds, min_bet) -> str:
+    """Write the unified deployment `strategy.npz` for a MACRO model directly
+    from arrays: int64 composite `keys`, the concrete `c/T` `probs` (padded
+    [N,89]), per-row macro `masses` ([N,n_macros], on the same scale as the
+    concrete slice), the `kinds`, and `min_bet`. Sorts by key so the on-disk
+    form is canonical / binary-searchable, matching `save_strategy`."""
+    keys = np.asarray(keys, dtype=np.int64)
+    order = np.argsort(keys, kind="stable")
+    os.makedirs(setup_dir, exist_ok=True)
+    path = os.path.join(setup_dir, "strategy.npz")
+    np.savez_compressed(
+        path,
+        version=np.int32(STRATEGY_NPZ_VERSION),
+        keys=keys[order],
+        lower=np.asarray(lower, np.int16)[order],
+        upper=np.asarray(upper, np.int16)[order],
+        probs=np.asarray(probs, np.float32)[order],
+        min_bet=np.int32(min_bet),
+        masses=np.asarray(masses, np.float32)[order],
+        kinds=np.array(list(kinds), dtype=object),
+    )
+    return path
 
 
 def load_strategy(setup_dir: str):

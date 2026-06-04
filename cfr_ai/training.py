@@ -80,7 +80,7 @@ def _bump_priority():
         print(f"  priority bump failed: {e}", flush=True)
 
 
-VERSION = "V2.1"
+VERSION = "V3"  # Shows up in metadata
 
 
 def save_strategies(trainer: Trainer, out_root: str, hand_sizes,
@@ -88,7 +88,7 @@ def save_strategies(trainer: Trainer, out_root: str, hand_sizes,
                     min_bet, pruning_threshold, min_regret,
                     u0, u1, utility_log, exploitability_log):
     """Save the trained strategy as `<out_root>/outputs/<setup>/strategy.npz`
-    (+ sidecar JSON), the diagnostic data as `diagnostic.npz`, plus a
+    (+ abs.json), the diagnostic data as `diagnostic.npz`, plus a
     human-readable `metadata.csv` with training parameters. `out_root` is
     either `cfr_ai/` (production saves) or `cfr_ai/archive/<tag>/`. Production
     saves additionally update the unified summary CSV; archive saves write
@@ -130,6 +130,8 @@ def save_strategies(trainer: Trainer, out_root: str, hand_sizes,
         w.writerow({"k": "Pruning threshold", "v": pruning_threshold})
         w.writerow({"k": "Minimum regret", "v": min_regret})
         w.writerow({"k": "Penalty", "v": penalty})
+        if getattr(trainer, "macro_kinds", None):
+            w.writerow({"k": "Macro kinds", "v": ",".join(trainer.macro_kinds)})
         w.writerow({"k": "Nodes touched", "v": trainer.nodes_touched})
         w.writerow({"k": "Explored infosets", "v": trainer.n_rows})
         w.writerow({"k": "Non-checking infosets", "v": meaningful_policies})
@@ -155,6 +157,7 @@ def save_strategies(trainer: Trainer, out_root: str, hand_sizes,
             "Iterations": iter_count,
             "Penalty": penalty,
             "Min bet": min_bet,
+            "Macro kinds": ",".join(getattr(trainer, "macro_kinds", []) or []),
             "Pruning threshold": pruning_threshold,
             "Minimum regret": min_regret,
             "Duration": duration_hhmm,

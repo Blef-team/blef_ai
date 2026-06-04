@@ -39,6 +39,13 @@ _STRATEGY_CACHE_SIZE = int(os.environ.get("CFR_STRATEGY_CACHE_SIZE", "1"))
 _current_setup: Optional[Tuple[int, ...]] = None
 _current_strategy = None
 
+# Persistent per-setup strategy cache (each value is a FlatStrategyAgent, which
+# may carry macro masses/kinds). Size = CFR_STRATEGY_CACHE_SIZE (default 1 =
+# single-slot, low RAM for the Lambda). Evaluation harnesses that revisit many
+# setups (whole-game sims traverse all 66) set it high so each setup is loaded
+# once instead of every time play returns to it.
+_SERVER_CACHE: dict = {}
+
 # Optional override of the strategy source directory. None => production
 # behaviour (Lambda working dir, then cfr_ai/outputs/). Evaluation tools set
 # this to a specific model version's outputs dir (e.g. cfr_ai/archive/<tag>/
@@ -55,6 +62,7 @@ def set_outputs_base(path: Optional[str]) -> None:
     _OUTPUTS_BASE = path
     _current_setup = None
     _current_strategy = None
+    _SERVER_CACHE.clear()
 
 
 def _resolve_setup_dir(hand_sizes: Tuple[int, ...]) -> str:
@@ -82,24 +90,25 @@ def _resolve_setup_dir(hand_sizes: Tuple[int, ...]) -> str:
     )
 
 
-def _get_strategy(hand_sizes: Tuple[int, ...]):
-    """Load (or fetch from cache) the strategy for `hand_sizes`.
-
-    Cache holds at most ONE strategy. On a miss: drop the current strategy
-    BEFORE loading the new one, so peak RAM is one strategy + base runtime
-    (not two strategies in flight as you transition setups).
-    """
+def _ensure_loaded(hand_sizes: Tuple[int, ...]) -> None:
+    """Point `_current_strategy` at the FlatStrategyAgent for `hand_sizes`.
+    Strategies are held in `_SERVER_CACHE` (size CFR_STRATEGY_CACHE_SIZE,
+    default 1 = single-slot / low RAM). A cached setup is rebound for free; only
+    a miss loads from disk, so whole-game sims that revisit setups don't reload
+    every round. A macro strategy (a FlatStrategyAgent carrying `.kinds`/
+    `.masses`) and a plain concrete one go through the same `determine_action`."""
     global _current_setup, _current_strategy
-    if hand_sizes == _current_setup and _current_strategy is not None:
-        return _current_strategy
-    # Drop the old one first so the loader peak ~= 1 strategy in flight.
-    _current_strategy = None
-    _current_setup = None
-    setup_dir = _resolve_setup_dir(hand_sizes)
-    fs = load_strategy_for_agent(setup_dir)
+    key = tuple(hand_sizes)
+    fs = _SERVER_CACHE.get(key)
+    if fs is None:
+        fs = load_strategy_for_agent(_resolve_setup_dir(hand_sizes))
+        if _STRATEGY_CACHE_SIZE <= 1:
+            _SERVER_CACHE.clear()
+        elif len(_SERVER_CACHE) >= _STRATEGY_CACHE_SIZE:
+            _SERVER_CACHE.pop(next(iter(_SERVER_CACHE)))
+        _SERVER_CACHE[key] = fs
     _current_strategy = fs
-    _current_setup = hand_sizes
-    return fs
+    _current_setup = key
 
 
 def _compose_key(hand_size: int, last_bet: int,
@@ -138,7 +147,8 @@ def determine_action(game_state):
     my_cards = [card["value"] * 4 + card["colour"]
                 for card in matching_hands[0]["hand"]]
 
-    fs = _get_strategy(hand_sizes)
+    _ensure_loaded(hand_sizes)
+    fs = _current_strategy
     min_bet = fs.min_bet
     hand_abstraction = get_hand_abstraction(my_cards, list(hand_sizes))
     key = make_key(my_cards, hand_abstraction, history, min_bet)
@@ -167,6 +177,47 @@ def determine_action(game_state):
     n = min(len(probs), len(relevant_actions))
     weights = np.zeros(len(relevant_actions))
     weights[:n] = probs[:n]
+
+    # Macro strategy (V3+): fold each macro's mass onto its per-hand b* — the
+    # argmax (value/difftruthy) or argmin (bluff) of the macro's score over the
+    # legal bets, random tie-break — then clear_lows, exactly as during training.
+    # The existence kernel here is the pure-Python `p_vector_factored`, which is
+    # bit-exact to the numba `p_vector_fast` used in training (probs_jit self-test:
+    # max abs diff 0.0) — so the resolved b* matches, and the Lambda image stays
+    # numba-free (one p/g build per decision; JIT speed is irrelevant at serve).
+    if fs.kinds:
+        from cfr_ai.abstraction.probs import g_vector, p_vector_factored
+        from cfr_ai.encoding import clear_lows
+        masses = fs.masses[row]
+        total_cards = sum(hand_sizes)
+        pv = g = None
+        for k, kind in enumerate(fs.kinds):
+            if float(masses[k]) <= 0.0:
+                continue
+            if pv is None:
+                pv = p_vector_factored(list(my_cards), total_cards - len(my_cards))
+                g = g_vector(total_cards)
+            score = pv if kind == "value" else (pv - g if kind == "difftruthy" else g - pv)
+            best, bs, ties = -1.0e18, -1, 0
+            for a in relevant_actions:
+                if a <= 87:
+                    s = score[a]
+                    if s > best + 1e-9:
+                        best, bs, ties = s, a, 1
+                    elif s > best - 1e-9:
+                        ties += 1
+                        if random.random() * ties < 1.0:
+                            bs = a
+            if bs >= 0:
+                weights[relevant_actions.index(bs)] += float(masses[k])
+        tot = float(weights.sum())
+        if tot <= 0.0:
+            return 88
+        w = [float(x) for x in clear_lows(weights / tot)]
+        if sum(w) <= 0.0:
+            return 88
+        return random.choices(relevant_actions, weights=w, k=1)[0]
+
     total = float(weights.sum())
     if total <= 0:
         return 88
