@@ -292,10 +292,10 @@ Training cols (written by `training.py` on save):
 * **Setup**, **Finished**, **Iterations**, **Penalty**, **Min bet**, **Pruning threshold**, **Minimum regret**, **Duration**, **Nodes touched**, **Explored infosets**, **Non-checking infosets**, **RAM (MB)**, **P0 value**, **P1 value**, **Version**.
 
 LBR cols (written by `lbr.py --update-summary`):
-* **LBR-K expl** / **LBR-K duration** — one pair per depth K evaluated. Point estimate (and `+/- std_err_worst_case` if sampled; ASCII `+/-`, not `±`, so the CSV stays mojibake-free in Excel/cp1252 tools). Asymmetric setups join two starting-player results with `|`. Expl reported as percentage of game value, duration as seconds.
-* **Sampling** — the caps used as `(lbr, opp)`, e.g. `(300, 500)`. Populations smaller than the cap are enumerated; otherwise sampled without replacement.
+* **LBR-K expl** / **LBR-K duration** / **LBR-K sampling** — one triple per depth K evaluated. *expl* is the point estimate (and `+/- std_err_worst_case` if sampled; ASCII `+/-`, not `±`, so the CSV stays mojibake-free in Excel/cp1252 tools); asymmetric setups join two starting-player results with `|`. Expl is a percentage of game value, duration is seconds.
+* **LBR-K sampling** — the caps used as `(lbr, opp)`, e.g. `(300, 500)` (populations under the cap are enumerated, else sampled without replacement). It is **per-depth** because a cheap LBR-1 can enumerate fully where LBR-2/inf must subsample, so a single shared value would mis-describe the others.
 
-A training save **blanks that row's LBR cols**, so a populated LBR cell always corresponds to the current trained policy. The LBR depth-pair columns grow rightward as more depths get computed.
+A training save **blanks that row's LBR cols**, so a populated LBR cell always corresponds to the current trained policy. The LBR depth-triple columns grow rightward as more depths get computed.
 
 When LBR runs on a setup with no training row (e.g. an LBR'd archive snapshot), the row is created with empty training cols.
 
@@ -313,7 +313,7 @@ Pass `--get-exploitability` to `cfr_ai.training` to compute LBR-K at several eve
 
 Cost is modest: a few LBR-1 calls per training run. Off by default to keep the production training command fast.
 
-`analysis/training_analytics.py` is an admin tool for **rebuilding** the unified summary from the per-setup `metadata.csv` files (preserving existing LBR cols when the training timestamp matches) and **regenerating** the per-setup utility chart PNGs. Day-to-day, `training.py` and `lbr.py` maintain the summary incrementally — this script is for migrations or recovering from a corrupted summary file.
+`analysis/training_analytics.py` is an admin tool for **rebuilding** the unified summary from the per-setup `metadata.csv` files and **regenerating** the per-setup utility chart PNGs. metadata.csv is the source of truth: the rebuild reconstructs both training and LBR cols from each file's FINAL `--- LBR Exploitability ---` block (never the in-training `--- Exploitability Log ---`), so a setup's exploitability always matches its training run (a retrain rewrites metadata.csv, dropping the stale block until LBR is re-run). Day-to-day, `training.py` and `lbr.py` maintain the summary incrementally — this script is for migrations or recovering from a corrupted summary file.
 
 ```
 python -m cfr_ai.analysis.training_analytics             # rebuild CSV + regenerate charts

@@ -9,20 +9,22 @@ LBR own disjoint column sets:
     Non-checking infosets, RAM (MB), P0 value, P1 value, Version
 
   LBR cols       (written by `cfr_ai/lbr.py` on `--update-summary`):
-    LBR-<d> expl, LBR-<d> duration  (one pair per depth d evaluated)
-    Sampling                        (the sampling params used)
+    LBR-<d> expl, LBR-<d> duration, LBR-<d> sampling  (one triple per depth d)
 
-When training writes a row, it blanks that row's LBR cols (the trained
-policy changed, so old exploitability is stale). When LBR writes a row, it
-creates the row with empty training cols if one doesn't exist yet.
+  Sampling is per-depth: a cheap LBR-1 (round-1) can enumerate fully while
+  LBR-2/inf must subsample, so a single shared column would mis-describe the
+  others. Depth triples grow rightward as more depths get computed.
 
-The LBR depth column pairs grow rightward as more depths get computed; the
-helpers preserve existing depth columns across writes.
+When training writes a row, it blanks that row's LBR cols (the trained policy
+changed, so old exploitability is stale). When LBR writes a row, it creates the
+row with empty training cols if one doesn't exist yet.
 
-The old `lbr_summary.csv` is superseded by this file. The training-analytics
-rebuild path (`cfr_ai/analysis/training_analytics.py`) is the one-shot
-"regenerate everything from outputs/*/metadata.csv" tool, useful after a
-migration or to fix a corrupted file.
+Each setup's metadata.csv is the SOURCE OF TRUTH: `rebuild_from_metadata`
+reconstructs the whole summary (training AND LBR cols) from
+`outputs/*/metadata.csv`, reading each file's FINAL `--- LBR Exploitability ---`
+block (never the in-training periodic `--- Exploitability Log ---`). A retrain
+rewrites metadata.csv, so a setup's exploitability is always consistent with its
+training run. The old `lbr_summary.csv` is superseded by this file.
 """
 
 import csv
@@ -53,11 +55,8 @@ TRAINING_COLS: List[str] = [
     "Version",
 ]
 
-# Non-depth LBR cols (shared across all depths in a row).
-LBR_FIXED_COLS: List[str] = ["Sampling"]
-
-# Detects LBR depth columns like "LBR-1 expl", "LBR-2 duration", "LBR-inf expl".
-_LBR_DEPTH_RE = re.compile(r"^LBR-(\d+|inf) (expl|duration)$")
+# Detects LBR depth columns like "LBR-1 expl", "LBR-2 duration", "LBR-1 sampling".
+_LBR_DEPTH_RE = re.compile(r"^LBR-(\d+|inf) (expl|duration|sampling)$")
 
 
 def _depth_sort_key(label: str):
@@ -87,8 +86,10 @@ def _setup_sort_key(key: str):
 # Schema helpers
 # ---------------------------------------------------------------------------
 
-def _depth_cols(depth_label: str) -> Tuple[str, str]:
-    return f"LBR-{depth_label} expl", f"LBR-{depth_label} duration"
+def _depth_cols(depth_label: str) -> Tuple[str, str, str]:
+    return (f"LBR-{depth_label} expl",
+            f"LBR-{depth_label} duration",
+            f"LBR-{depth_label} sampling")
 
 
 def _depth_labels_in_rows(rows: Dict[str, Dict[str, str]]) -> List[str]:
@@ -105,21 +106,19 @@ def _build_fields(rows: Dict[str, Dict[str, str]],
                   extra_depth_labels: Optional[List[str]] = None) -> List[str]:
     """Construct the full ordered field list given the rows currently in the
     file plus any depth labels we're about to add. Training cols come first,
-    then per-depth LBR cols, then the fixed LBR cols on the right."""
+    then the per-depth LBR triples (expl/duration/sampling)."""
     labels = set(_depth_labels_in_rows(rows))
     if extra_depth_labels:
         labels.update(extra_depth_labels)
     depth_cols: List[str] = []
     for label in sorted(labels, key=_depth_sort_key):
-        e, d = _depth_cols(label)
-        depth_cols.extend([e, d])
-    return ["Setup"] + TRAINING_COLS + depth_cols + LBR_FIXED_COLS
+        depth_cols.extend(_depth_cols(label))
+    return ["Setup"] + TRAINING_COLS + depth_cols
 
 
 def _all_lbr_cols(fields: List[str]) -> List[str]:
-    """LBR-related cols in `fields` (depth pairs + fixed LBR cols)."""
-    return [c for c in fields
-            if _LBR_DEPTH_RE.match(c) or c in LBR_FIXED_COLS]
+    """LBR-related cols in `fields` (the per-depth expl/duration/sampling triples)."""
+    return [c for c in fields if _LBR_DEPTH_RE.match(c)]
 
 
 # ---------------------------------------------------------------------------
@@ -187,18 +186,18 @@ def update_lbr_row(hand_sizes, depth_label,
                    expl_str: str, duration_str: str,
                    sampling_label: str,
                    path: str = SUMMARY_PATH) -> None:
-    """Replace this setup's LBR-<depth_label> cols (and the shared Sampling
-    cell) in the unified summary. Creates the row with empty training cols if
-    it doesn't exist yet (LBR-on-archived-snapshot case). `depth_label` is a
-    string like "1", "2", or "inf" (for exact best response)."""
+    """Replace this setup's LBR-<depth_label> expl/duration/sampling cols in the
+    unified summary. Creates the row with empty training cols if it doesn't exist
+    yet (LBR-on-archived-snapshot case). `depth_label` is a string like "1", "2",
+    or "inf" (for exact best response)."""
     key = setup_key(hand_sizes)
     rows, _ = read_summary(path)
     row = rows.get(key, {"Setup": key})
     label = str(depth_label)
-    e_col, d_col = _depth_cols(label)
+    e_col, d_col, s_col = _depth_cols(label)
     row[e_col] = expl_str
     row[d_col] = duration_str
-    row["Sampling"] = sampling_label
+    row[s_col] = sampling_label
     rows[key] = row
     write_summary(rows, path=path, extra_depth_labels=[label])
 
@@ -207,20 +206,49 @@ def update_lbr_row(hand_sizes, depth_label,
 # Per-setup metadata.csv LBR block
 # ---------------------------------------------------------------------------
 
-# Matches both the new ("LBR Exploitability") and the legacy v0 ("Exploitability")
-# block markers, so a snapshot archived with the old format gets replaced
-# cleanly when the new LBR runs.
-_LBR_SECTION_RE = re.compile(r"^---\s.*xploitability\b", re.IGNORECASE)
-_LBR_DEPTH_LINE_RE = re.compile(r"^LBR-(\d+|inf) (expl|duration)$")
+# Matches the FINAL exploitability block — the new ("--- LBR Exploitability ---")
+# and the legacy v0 ("--- Exploitability ---") markers — so an old-format snapshot
+# is replaced cleanly. It deliberately EXCLUDES the in-training periodic
+# "--- Exploitability Log ---" block (training.py --get-exploitability): that is a
+# convergence trajectory, NOT the final separately-computed exploitability, and
+# must never be read into the summary.
+_LBR_SECTION_RE = re.compile(r"^---\s*(LBR\s+)?Exploitability\s*---\s*$", re.IGNORECASE)
+_LBR_DEPTH_LINE_RE = re.compile(r"^LBR-(\d+|inf) (expl|duration|sampling)$")
+
+
+def _parse_lbr_block(block_rows: List[List[str]]) -> Dict[str, Dict[str, str]]:
+    """Parse the rows *inside* a final LBR block into
+    {depth_label: {"expl":..., "duration":..., "sampling":...}}. A legacy shared
+    "Sampling" row is applied to every depth found, so nothing is lost when the
+    block is rewritten in the per-depth format. Lines that don't match the depth
+    regex (e.g. periodic "LBR-1 expl sp=0 at Iter N") are ignored."""
+    out: Dict[str, Dict[str, str]] = {}
+    legacy_shared_sampling = ""
+    for row in block_rows:
+        if not row or len(row) < 2:
+            continue
+        k, v = row[0], row[1]
+        if k == "Sampling":            # legacy shared-sampling row
+            legacy_shared_sampling = v
+            continue
+        m = _LBR_DEPTH_LINE_RE.match(k)
+        if not m:
+            continue
+        out.setdefault(m.group(1), {})[m.group(2)] = v
+    if legacy_shared_sampling:
+        for cells in out.values():
+            cells.setdefault("sampling", legacy_shared_sampling)
+    return out
 
 
 def update_metadata_lbr(setup_dir: str, depth_label: str,
                         expl_str: str, duration_str: str,
                         sampling_label: str) -> None:
-    """Append/update the `--- LBR Exploitability ---` block at the end of
-    `setup_dir/metadata.csv`. Preserves prior depths' rows in the block, and
-    replaces the legacy v0 `--- Exploitability ---` block if present (it
-    didn't carry depth-aware rows, so there's nothing to preserve from it).
+    """Append/update the FINAL `--- LBR Exploitability ---` block at the end of
+    `setup_dir/metadata.csv`. Preserves prior depths' rows (expl/duration/
+    sampling, stored per depth) and replaces a legacy v0 `--- Exploitability ---`
+    block if present. The in-training periodic `--- Exploitability Log ---` block
+    is NEVER touched — `_LBR_SECTION_RE` excludes it, so it stays in `head`.
 
     Silently no-ops if `metadata.csv` doesn't exist — the LBR-on-archived-
     snapshot or LBR-without-prior-training case is already handled by the
@@ -238,41 +266,44 @@ def update_metadata_lbr(setup_dir: str, depth_label: str,
             break
 
     head = rows[:cutoff]
+    existing = _parse_lbr_block(rows[cutoff + 1:])
 
-    existing_depths: Dict[str, Tuple[str, str]] = {}
-    existing_sampling = sampling_label
-    for row in rows[cutoff + 1:]:
-        if not row or len(row) < 2:
-            continue
-        k, v = row[0], row[1]
-        if k == "Sampling":
-            existing_sampling = v
-            continue
-        m = _LBR_DEPTH_LINE_RE.match(k)
-        if not m:
-            continue
-        d = m.group(1)
-        e, dur = existing_depths.get(d, ("", ""))
-        if m.group(2) == "expl":
-            e = v
-        else:
-            dur = v
-        existing_depths[d] = (e, dur)
-
-    existing_depths[depth_label] = (expl_str, duration_str)
-    # The new sampling label always wins (we wrote the new run after all).
-    existing_sampling = sampling_label
+    # This run's depth wins for all three cells.
+    existing[depth_label] = {
+        "expl": expl_str, "duration": duration_str, "sampling": sampling_label,
+    }
 
     with open(md_path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         for row in head:
             w.writerow(row)
         w.writerow(["--- LBR Exploitability ---", ""])
-        w.writerow(["Sampling", existing_sampling])
-        for d in sorted(existing_depths.keys(), key=_depth_sort_key):
-            e, dur = existing_depths[d]
-            w.writerow([f"LBR-{d} expl", e])
-            w.writerow([f"LBR-{d} duration", dur])
+        for d in sorted(existing.keys(), key=_depth_sort_key):
+            cells = existing[d]
+            w.writerow([f"LBR-{d} expl", cells.get("expl", "")])
+            w.writerow([f"LBR-{d} duration", cells.get("duration", "")])
+            w.writerow([f"LBR-{d} sampling", cells.get("sampling", "")])
+
+
+def parse_metadata_lbr(path: str) -> Dict[str, Dict[str, str]]:
+    """Parse the FINAL `--- LBR Exploitability ---` block of a metadata.csv into
+    {depth_label: {"expl":..., "duration":..., "sampling":...}}; {} if absent.
+
+    The in-training periodic `--- Exploitability Log ---` block is deliberately
+    NOT read: `_LBR_SECTION_RE` excludes its header, and its
+    `LBR-<d> expl sp=.. at Iter ..` keys don't match `_LBR_DEPTH_LINE_RE` either.
+    This returns the *final*, separately-computed exploitability only."""
+    if not os.path.exists(path):
+        return {}
+    rows = _read_csv_rows(path)
+    start = None
+    for i, row in enumerate(rows):
+        if row and _LBR_SECTION_RE.match(row[0]):
+            start = i
+            break
+    if start is None:
+        return {}
+    return _parse_lbr_block(rows[start + 1:])
 
 
 # ---------------------------------------------------------------------------
@@ -353,22 +384,19 @@ def _fmt_value(s: str) -> str:
 
 
 def rebuild_from_metadata(outputs_dir: str = os.path.join("cfr_ai", "outputs"),
-                          preserve_lbr_from: Optional[str] = SUMMARY_PATH,
                           path: str = SUMMARY_PATH) -> int:
-    """Walk `outputs_dir/*/metadata.csv`, project each to the training cols of
-    the unified summary, then merge with any LBR cols from `preserve_lbr_from`
-    (defaults to the current summary file). LBR cols are cleared whenever the
-    `Finished` timestamp for that setup differs between the new training
-    metadata and the existing summary — the same auto-invalidation that
-    `update_training_row` applies on a single setup.
+    """Rebuild the unified summary entirely from `outputs_dir/*/metadata.csv`:
+    training cols from each file, and LBR cols from each file's FINAL
+    `--- LBR Exploitability ---` block (via `parse_metadata_lbr`, which ignores
+    the in-training `--- Exploitability Log ---`).
+
+    metadata.csv is the single source of truth, so the summary is fully
+    reconstructable and a setup's exploitability is automatically consistent
+    with its training run: a retrain rewrites metadata.csv, dropping the stale
+    LBR block until LBR is re-run.
 
     Returns the number of training rows written.
     """
-    # Step 1: existing LBR cols, keyed by setup, indexed by training timestamp.
-    existing_rows: Dict[str, Dict[str, str]] = {}
-    if preserve_lbr_from and os.path.exists(preserve_lbr_from):
-        existing_rows, _ = read_summary(preserve_lbr_from)
-
     new_rows: Dict[str, Dict[str, str]] = {}
     extra_depth_labels: List[str] = []
     for entry in sorted(os.scandir(outputs_dir), key=lambda e: e.name):
@@ -381,15 +409,12 @@ def rebuild_from_metadata(outputs_dir: str = os.path.join("cfr_ai", "outputs"),
         meta = parse_metadata_csv(md_path)
         row = {"Setup": setup_name, **metadata_to_training_cols(meta)}
 
-        existing = existing_rows.get(setup_name)
-        if existing is not None and existing.get("Finished") == row["Finished"]:
-            for col, val in existing.items():
-                if col in row:
-                    continue  # training col, already set
-                row[col] = val
-                m = _LBR_DEPTH_RE.match(col)
-                if m:
-                    extra_depth_labels.append(m.group(1))
+        for depth_label, cells in parse_metadata_lbr(md_path).items():
+            e_col, d_col, s_col = _depth_cols(depth_label)
+            row[e_col] = cells.get("expl", "")
+            row[d_col] = cells.get("duration", "")
+            row[s_col] = cells.get("sampling", "")
+            extra_depth_labels.append(depth_label)
         new_rows[setup_name] = row
 
     write_summary(new_rows, path=path, extra_depth_labels=extra_depth_labels)
