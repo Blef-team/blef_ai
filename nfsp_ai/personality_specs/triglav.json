@@ -1,6 +1,0 @@
-{
-  "name": "triglav",
-  "opponent_passivity_bias": 0.8,
-  "greedy": false,
-  "head": "pi"
-}
