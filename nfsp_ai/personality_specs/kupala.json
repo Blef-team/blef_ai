@@ -1,8 +1,6 @@
 {
   "name": "kupala",
-  "forbid_hand_types": ["High card", "Pair"],
-  "win_multiplier": 1.2,
-  "loss_multiplier": 1.0,
+  "opponent_honesty_bias": 0.8,
   "greedy": false,
   "head": "pi"
 }
