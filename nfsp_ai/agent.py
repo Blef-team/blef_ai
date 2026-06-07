@@ -1524,6 +1524,16 @@ class NFSPAgent:
             else:
                 use_br = (random.random() < self.cfg.anticipatory_eta)
                 action = self.act(obs, mask, use_br=use_br, epsilon=eps)
+            # Mechanism E: opponent-distribution shaping ("honesty bias").
+            # If the personality spec carries a non-zero opponent_honesty_bias
+            # AND the current actor is NOT the learning seat, possibly resample
+            # the action to a truthful alternative. The learner's own actions
+            # are never resampled. No-op for baseline personalities.
+            try:
+                from nfsp_ai.personality_train import maybe_apply_opponent_honesty_bias
+                action = maybe_apply_opponent_honesty_bias(env, mask, action, random)
+            except Exception:
+                pass
             nobs, nmask, reward, done, info = env.step(action)
             nobs, nmask = nobs.to(self.device), nmask.to(self.device)
 
