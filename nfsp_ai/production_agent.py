@@ -617,6 +617,24 @@ class NFSPProductionAgent:
         # already proves impossible (e.g. Full house with 4 cards in play).
         mask = _filter_mask_by_public_priors(mask, pub_prior, int(spec.check_action_id))
 
+        # Inference-only trust override (mechanism D, sculpted-personality
+        # config only). The trained personality_train spec doesn't carry
+        # trust_history — that would invite retraining and the policy would
+        # learn to ignore the distorted features. trust_history lives on
+        # the sculpt-config layer so the underlying trained policy stays
+        # off-distribution at serve time, which is the whole point of the
+        # trait.
+        if pers_name is not None:
+            pcfg = personalities.PERSONALITIES.get(pers_name)
+            trust = getattr(pcfg, "trust_history", ()) if pcfg is not None else ()
+            if trust:
+                from nfsp_ai.personality_train import apply_trust_history_to_obs
+                # obs_vec is a torch.Tensor at this point; convert in-place via
+                # numpy view to share storage and avoid an extra copy.
+                obs_np = obs_vec.detach().cpu().numpy() if hasattr(obs_vec, "detach") else np.asarray(obs_vec)
+                apply_trust_history_to_obs(obs_np, spec, game_state, trust)
+                obs_vec = torch.from_numpy(np.asarray(obs_np, dtype=np.float32))
+
         obs_tensor = torch.from_numpy(np.asarray(obs_vec, dtype=np.float32)).to(self.device)
         mask_tensor = mask.to(device=self.device, dtype=torch.float32)
 

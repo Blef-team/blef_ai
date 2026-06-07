@@ -83,6 +83,12 @@ class PersonalityConfig:
     mood: str = "none"
     mood_params: dict = field(default_factory=dict)
     note: str = ""  # design rationale (also usable as flavor/debug text)
+    # Inference-only obs override (no retraining). For each non-CHECK
+    # action_id in game.history whose actor matches the selector, set BOTH
+    # private_priors[id] and public_priors[id] to 1.0. Logical consistency
+    # (public=1 ↔ private=1) means we override both slices simultaneously.
+    # Values: any subset of {"self", "opponent"}. Empty tuple = no-op.
+    trust_history: tuple = ()
 
 
 @dataclass
