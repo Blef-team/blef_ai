@@ -80,7 +80,7 @@ def _bump_priority():
         print(f"  priority bump failed: {e}", flush=True)
 
 
-VERSION = "V3"  # Shows up in metadata
+VERSION = "V3.2"  # Shows up in metadata
 
 
 def save_strategies(trainer: Trainer, out_root: str, hand_sizes,

@@ -20,9 +20,11 @@ def get_hand_abstraction(hand: List[int], hand_sizes: List[int]) -> List[str]:
 
     vals = [c // 4 for c in hand]
     suits = [c % 4 for c in hand]
+    total = sum(hand_sizes)
+    val_multiset = ''.join(sorted(str(v) for v in vals))
     # Rounds 1-5: just the sorted value multiset.
-    if sum(hand_sizes) <= 6:
-        return [''.join(sorted(str(v) for v in vals))] * 89
+    if total <= 7:
+        return [val_multiset] * 89
 
     # counts: index 0-3 = suit counts, 4-9 = value counts (values 0-5).
     counts = [0] * 10
@@ -93,6 +95,9 @@ def get_hand_abstraction(hand: List[int], hand_sizes: List[int]) -> List[str]:
         out.append(str(sf[j]) + ' ' + str(max(sf[j + 1:])))
     out.append('X')        # great straight flush spades: hand-independent
     out.append(pre)        # index 88: round start, same as pre-straight
+    # Root token only: per-suit count shape at total >= 17
+    if total >= 17:
+        out[88] = pre + ' ' + ''.join(str(counts[s]) for s in range(4))
     return out
 
 

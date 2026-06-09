@@ -320,7 +320,15 @@ def load_strategy_for_agent(setup_dir: str) -> FlatStrategyAgent:
 
 
 def _load_mmap(setup_dir: str) -> FlatStrategyAgent:
-    """Mmap sparse_indices + sparse_values + eager-load the small meta arrays."""
+    """Mmap the sparse probs + the per-row meta. Two meta layouts are supported:
+
+    * **mmap-meta (current)**: the big per-row arrays (keys / offset / lower / upper /
+      masses) are separate UNCOMPRESSED `.npy`, detected by `meta_keys.npy`. They are
+      `mmap`'d and paged in lazily per lookup — eliminating the eager decompress that
+      dominated cold first-load (~196 ms of a 257 ms load on a 2.27 M-infoset setup).
+    * **legacy**: keys/lower/upper/probs_offset/masses live inside the compressed
+      `strategy_meta.npz` and are read eagerly. Kept so already-staged images (e.g. the
+      rollback target) load unchanged."""
     meta = np.load(os.path.join(setup_dir, "strategy_meta.npz"), allow_pickle=True)
     _check_version(meta, "strategy_meta.npz")
     sparse_indices = np.load(
@@ -333,33 +341,53 @@ def _load_mmap(setup_dir: str) -> FlatStrategyAgent:
             abs_str_to_id = json.load(f)
     else:
         abs_str_to_id = {}
+
+    keys_npy = os.path.join(setup_dir, "meta_keys.npy")
+    if os.path.exists(keys_npy):                      # mmap-meta layout (current)
+        keys = np.load(keys_npy, mmap_mode="r")
+        probs_offset = np.load(os.path.join(setup_dir, "meta_offset.npy"), mmap_mode="r")
+        lower = np.load(os.path.join(setup_dir, "meta_lower.npy"), mmap_mode="r")
+        upper = np.load(os.path.join(setup_dir, "meta_upper.npy"), mmap_mode="r")
+        masses_npy = os.path.join(setup_dir, "meta_masses.npy")
+        masses = np.load(masses_npy, mmap_mode="r") if os.path.exists(masses_npy) else None
+    else:                                             # legacy all-in-one compressed meta
+        keys = np.asarray(meta["keys"])
+        probs_offset = np.asarray(meta["probs_offset"])
+        lower = np.asarray(meta["lower"])
+        upper = np.asarray(meta["upper"])
+        masses = np.asarray(meta["masses"]) if "masses" in meta.files else None
+
     return FlatStrategyAgent(
-        keys_sorted=np.asarray(meta["keys"]),
-        lower_action=np.asarray(meta["lower"]),
-        upper_action=np.asarray(meta["upper"]),
+        keys_sorted=keys,
+        lower_action=lower,
+        upper_action=upper,
         abs_str_to_id=abs_str_to_id,
         min_bet=int(meta["min_bet"]),
         _sparse_indices=sparse_indices,
         _sparse_values=sparse_values,
-        _probs_offset=np.asarray(meta["probs_offset"]),
-        masses=(np.asarray(meta["masses"]) if "masses" in meta.files else None),
+        _probs_offset=probs_offset,
+        masses=masses,
         kinds=([str(x) for x in meta["kinds"]] if "kinds" in meta.files else None),
     )
 
 
 def write_mmap_layout(setup_dir_src: str, setup_dir_dst: str) -> None:
-    """Convert a setup's compressed padded `strategy.npz` into the
-    variable-width mmap layout in `setup_dir_dst`:
+    """Convert a setup's compressed padded `strategy.npz` into the mmap-friendly
+    serving layout in `setup_dir_dst`:
 
-      * `strategy_meta.npz` (compressed): keys, lower, upper, min_bet,
-        probs_offset (the prefix-sum of legal-action widths per row).
-      * `probs_flat.npy` (uncompressed): each row's legal-action
-        probability slice concatenated end-to-end. mmappable.
+      * `meta_keys.npy` (int64), `meta_offset.npy` (int32 CSR-style row offsets),
+        `meta_lower.npy`/`meta_upper.npy` (int16), `meta_masses.npy` (uint16[N,k],
+        macro setups only) — the per-row meta as SEPARATE UNCOMPRESSED arrays so the
+        agent `mmap`s them and pages in lazily per lookup (no eager decompress at load).
+      * `probs_sparse_indices.npy` (uint8) + `probs_sparse_values.npy` (uint16): each
+        row's nonzero (position, value) pairs concatenated end-to-end; mmappable.
+      * `strategy_meta.npz` (tiny, compressed): version, min_bet, kinds.
       * `strategy.abs.json`: copied unchanged.
 
-    The flat layout drops zero-padding for illegal actions → ~3-5×
-    smaller than the padded `.npz` would be uncompressed, while still
-    supporting `mmap_mode='r'` so the agent's peak memory stays tiny."""
+    Probabilities are uint16-quantised and sparse (~5-10% dense post `clear_lows`), so
+    the agent's resident memory stays tiny. The uncompressed meta trades disk for load
+    speed (the old all-in-one compressed `strategy_meta.npz` is still read by `_load_mmap`
+    as a fallback for already-staged images)."""
     a = _read_npz_arrays(setup_dir_src)
     keys = a["keys"]; lower = a["lower"]; upper = a["upper"]; probs = a["probs"]
     masses_src = a["masses"]; kinds = a["kinds"]
@@ -399,22 +427,41 @@ def write_mmap_layout(setup_dir_src: str, setup_dir_dst: str) -> None:
                       else np.empty(0, dtype=np.uint8))
     sparse_values = (np.concatenate(parts_val) if parts_val
                      else np.empty(0, dtype=np.uint16))
-    probs_offset = np.zeros(n + 1, dtype=np.int64)
-    np.cumsum(nz_per_row, out=probs_offset[1:])
+    # int32 row offsets: the max value is the total nonzero count (= len of the
+    # sparse arrays), ~30M for the biggest setup — far under int32's 2.1B ceiling,
+    # so this halves the array vs int64 losslessly. Accumulate in int64 (overflow-
+    # safe), guard, then store int32. The loader's `int(probs_offset[row])` cast
+    # is dtype-agnostic, so no loader change is needed.
+    cum = np.cumsum(nz_per_row)  # int64 accumulation
+    if cum.size and int(cum[-1]) >= 2**31:
+        raise ValueError(
+            f"total nonzeros {int(cum[-1])} exceeds int32 probs_offset capacity; "
+            "revert this setup to int64 offsets")
+    probs_offset = np.zeros(n + 1, dtype=np.int32)
+    probs_offset[1:] = cum.astype(np.int32)
 
     os.makedirs(setup_dir_dst, exist_ok=True)
-    meta = dict(
-        version=np.int32(STRATEGY_NPZ_VERSION),
-        keys=keys,
-        lower=lower,
-        upper=upper,
-        min_bet=np.int32(a["min_bet"]),
-        probs_offset=probs_offset,
-    )
+    # MMAP-META layout: the big per-row arrays (keys / probs_offset / lower / upper /
+    # masses) go to SEPARATE UNCOMPRESSED .npy so the agent can mmap them and page them
+    # in lazily per lookup — eliminating the eager decompress that dominated cold
+    # first-load. Only the scalars (version, min_bet, kinds) stay in the tiny
+    # strategy_meta.npz. The loader detects this layout via meta_keys.npy and falls back
+    # to the legacy all-in-one compressed meta otherwise. Trade-off: uncompressed meta is
+    # bigger on disk (the repetitive offset/lower/upper/masses no longer compress ~10:1),
+    # which is the intended cost — load speed over image size.
+    np.save(os.path.join(setup_dir_dst, "meta_keys.npy"),
+            np.ascontiguousarray(keys, dtype=np.int64))
+    np.save(os.path.join(setup_dir_dst, "meta_offset.npy"), probs_offset)        # int32
+    np.save(os.path.join(setup_dir_dst, "meta_lower.npy"),
+            np.ascontiguousarray(lower, dtype=np.int16))
+    np.save(os.path.join(setup_dir_dst, "meta_upper.npy"),
+            np.ascontiguousarray(upper, dtype=np.int16))
     if has_macros:
-        meta["masses"] = masses_out
-        meta["kinds"] = np.array(kinds, dtype=object)
-    np.savez_compressed(os.path.join(setup_dir_dst, "strategy_meta.npz"), **meta)
+        np.save(os.path.join(setup_dir_dst, "meta_masses.npy"), masses_out)      # uint16[N,k]
+    small = dict(version=np.int32(STRATEGY_NPZ_VERSION), min_bet=np.int32(a["min_bet"]))
+    if has_macros:
+        small["kinds"] = np.array(kinds, dtype=object)
+    np.savez_compressed(os.path.join(setup_dir_dst, "strategy_meta.npz"), **small)
     np.save(os.path.join(setup_dir_dst, "probs_sparse_indices.npy"), sparse_indices)
     np.save(os.path.join(setup_dir_dst, "probs_sparse_values.npy"), sparse_values)
 
