@@ -11,12 +11,6 @@ Two kinds of entries live here:
   These are research records, not active code; nothing in production
   `cfr_ai/` imports from them.
 
-## Strategy snapshots
-
-| Tag | Date | Setups | Note |
-|---|---|---|---|
-| `v1` | 2026-05-27 | all (66) | Pre-Hetzner-retrain baseline (Python trainer prod CFR). Diagnostics excluded; rerun with --include-diagnostics to add them. |
-
 ## Shelved code experiments
 
 | Directory | Shelved | Note |

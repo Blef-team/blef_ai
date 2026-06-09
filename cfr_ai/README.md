@@ -79,7 +79,7 @@ One cannot compute this algorithm with 10^11.7 information sets.
 
 Instead, our abstraction is designed to have a limit of around 5 million (10^6.7) infosets. This has the following benefits: 
 * it limits the memory consumption to around 4 GB;
-* it limits the strategy csv output files to less than 250 MB, so that they can be uploaded to AWS lambda using one Lambda per setup; and
+* it keeps each setup's served strategy small enough that all 66 fit comfortably inside a single Lambda container image; and
 * each setup's strategy can be calibrated to a reasonable extent in around 0.5 core-days.
 
 The AI should then take around a core-month with 4GB of memory to train, which costs in the order of 30 USD when trained on on-demand AWS EC2 instances. It can also be reasonably trained on a personal machine.
@@ -144,9 +144,9 @@ This abstraction tries not to differentiate between bets that are less relevant 
 
 The AI does not consider the exact cards in its hand. Instead, it uses a hand-crafted abstraction that extracts only the most strategically relevant features of the hand, which changes depending on the round and the last bet made. It's encoded in `get_hand_abstraction` in `information_set.py`.
 
-In rounds 1-5, the AI only looks at card values and completely ignores the suits. 
+While the players hold few cards between them (total hand size ≤ 7), the AI only looks at card values and completely ignores the suits.
 
-In further rounds, there is a more complex hand-crafted abstraction. First, as the AI, we extract features:
+In the later rounds, there is a more complex hand-crafted abstraction. First, as the AI, we extract features:
 * we count the number of cards of each value and each suit it holds, for a total of 10 integers.
 * we identify the strongest features of our hand among these 10 integers. N cards of a given value are considered stronger than N+1 cards of a given suit, but weaker than N+2 cards of a given suit (so that four-of-a-kind on hand is considered stronger than a flush on hand). There is also an augmented version of these strengths, where each suit strength also contains information about whether we have the 9 and whether we have the Ace of that suit. 
 
@@ -170,13 +170,27 @@ We then pick these numbers as identifiers of our hand, depending on the last bet
 * For the last best of a small/big straight flush, report augmented information about the suit being bet on and our strongest suit 
 * For the last best of a great straight flush, report augmented information about the suit being bet on and our strongest suit among those that can still be bet on
 
+At the largest hand sizes (total ≥ 17 cards), the round-start token is additionally refined by the player's own per-suit card counts, which sharpens play in the suit-heavy endgame.
+
 ### Action abstraction
 
 We have a mechanism for the AI to not acknowledge or make a specific number of the lowest bets (e.g. all high cards). If it encounters one of those bets during online play, it acts as if the round just started.
 
 With 14 cards, any specific high card has 98% chance of existing (97% and 99% with 13 and 15 cards respectively).
 
-With 16 cards on the table, the great straight has 96% chance of existing (88%, 93%, 98% and 99% for 14, 15, 17 and 18 cards respectively). In an experiment we found that having the 11 11 setup discard all bets below straights results in an approximately twofold improvement in time, memory and strategy storage space used.
+With 16 cards on the table, the great straight has 96% chance of existing (88%, 93%, 98% and 99% for 14, 15, 17 and 18 cards respectively). The production models therefore raise this floor as the table fills: `min_bet` is 0 below 13 total cards, rises to 27 (small straight) from 13 cards onward, and is set to the top full house (65) for the 11-v-11 round, where almost every lower claim is trivially true. Discarding near-certain low bets apart from the last one cuts training time, memory and storage while *sharpening* the meaningful play.
+
+### Augmenting action macros
+
+From the mid-game onward (total hand size ≥ 8, where the suit-aware abstraction kicks in), each infoset's action menu is augmented with three *macro* actions — `value`, `difftruthy`, and `bluff`. Unlike a concrete bet, a macro does not name a fixed claim; it resolves at decision time to a specific bet drawn from the legal range by its own scoring rule.
+
+If we define `p` as the vector of hand-aware probabilities and `g` as the vector of hand-unaware probabilities, then:
+
+* `value` is `argmax(p)` 
+* `difftruthy` is `argmax(p-g)` 
+* `bluff` is `argmin(p-g)` 
+
+This lets a single abstracted infoset express hand-dependent aggression. Each macro's probability mass is stored alongside the concrete-action probabilities and folded onto the resolved bet when the agent serves the strategy.
 
 ### Strategy storage format
 
@@ -185,12 +199,16 @@ Every infoset is keyed by a composite int64 encoding hand size, last bet, two hi
 Two on-disk layouts are supported, both produced from the same training run and both loaded by `strategy_io.load_strategy_for_agent`:
 
 1. **Compressed `strategy.npz`** — what `training.py` writes; the resting format under `cfr_ai/outputs/<setup>/`. A single compressed numpy archive containing `keys` (int64, sorted), `lower`/`upper` action bounds (int16), a padded float32 `[N, 89]` probability table, and `min_bet`. Read eagerly into RAM. Convenient for local development.
-2. **Sparse mmap layout** — what `scripts/stage_for_docker.py` produces for the Lambda image. The per-setup directory contains:
-   * `strategy_meta.npz` (compressed) — `keys`, `lower`, `upper`, `min_bet`, and `probs_offset` (length-`N+1` prefix sum into the sparse arrays).
-   * `probs_sparse_indices.npy` (uint8, uncompressed) — non-zero positions within each row's legal-action slice.
-   * `probs_sparse_values.npy` (uint16, uncompressed) — non-zero probability values, quantised with scale `1/65535`.
+2. **Sparse mmap layout** — what `scripts/stage_for_docker.py` produces for the Lambda image. Every large per-row array is stored as its own uncompressed `.npy` so the agent can `mmap` it and page it in lazily, with no eager decompression at load. The per-setup directory contains:
+   * `meta_keys.npy` (int64, sorted) — the composite infoset keys.
+   * `meta_offset.npy` (int32) — length-`N+1` CSR-style prefix sum into the sparse arrays.
+   * `meta_lower.npy` / `meta_upper.npy` (int16) — per-row legal-action bounds.
+   * `meta_masses.npy` (uint16 `[N, k]`, macro setups only) — each infoset's macro masses, on the same scale as its concrete probabilities.
+   * `probs_sparse_indices.npy` (uint8) — non-zero positions within each row's legal-action slice.
+   * `probs_sparse_values.npy` (uint16) — non-zero probability values, quantised with scale `1/65535`.
+   * `strategy_meta.npz` (tiny, compressed) — just the scalars: format version, `min_bet`, and the macro `kinds`.
 
-   The `.npy` files are `mmap`'d at load time. Strategies are typically 5-10% dense after `clear_lows`, so peak resident memory per loaded strategy is ~10-50 MB regardless of `N`.
+   The `.npy` files are `mmap`'d at load time, so peak resident memory per loaded strategy is a few tens of MB regardless of `N` (strategies are typically 5-10% dense after `clear_lows`). An older layout that packed `keys`/`lower`/`upper`/`probs_offset`/`masses` into the compressed `strategy_meta.npz` and read them eagerly is still recognised by the loader, so images staged before this change continue to load unchanged.
 
 The agent loader returns a `FlatStrategyAgent` regardless of which layout is on disk: lookup is always `np.searchsorted` on the sorted keys, and `get_strategy(row)` reconstructs the dense legal-action slice from whichever representation was loaded. The loader does not import numba.
 
@@ -409,7 +427,7 @@ bash cfr_ai/scripts/deploy_lambda.sh
 
 ### Runtime characteristics
 
-Lambda is sized at **256 MB**. Cold start total wall: ~2.5-3.5s (~0.8-1.3s Init Duration + ~1.5-2.5s first decision). Warm decision: ~30-50ms. Peak resident memory: ~115-170 MB on the biggest (7,8) setup, comfortably under the 256 MB cap.
+Lambda is sized at **1024 MB** — chosen for the vCPU that tier provides, not the resident set, which is far smaller. Cold start total wall is ~3 s on the first invocation (dominated by the image pull) and ~0.7 s thereafter. A decision on an already-loaded setup takes ~30-260 ms; the first decision on a *new* setup costs ~1-2 s, because that setup's `.npy` arrays must be paged in from the container's read-only filesystem — an I/O cost, not computation. Peak resident memory is ~166 MB on the biggest setup, comfortably under the cap.
 
 ### Architecture choice
 
