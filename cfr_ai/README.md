@@ -86,7 +86,7 @@ The AI should then take around a core-month with 4GB of memory to train, which c
 
 ### Memory consumption
 
-Each information set object stores a regret array of up to 88 double-precision floats, a strategy sum array of up to 88 double-precision floats and an array of possible actions. The former two could easily fit into single-precision float arrays and possible actions could be recomputed, but both turn out to slow the code down substantially. 
+Training state is held in flat 2D numpy arrays indexed by infoset row: one for regrets and one for strategy sums, each row covering that infoset's legal action range. These arrays default to single-precision (`--dtype fp32`).
 
 An average information set will only have 30-40 possible actions. Therefore, in setups where a wide range of bets are viable and risky (not just e.g. the first 12), the average infoset weight in memory will be 1-2 kB.
 
@@ -341,9 +341,9 @@ python -m cfr_ai.analysis.training_analytics --only-charts # only regenerate cha
 
 ### Head-to-head comparison
 
-There is a `analysis/head_to_head.py` script that can be used to compare two versions of strategies for a single setup by making them play against each other. Using the Monte Carlo sampling, it takes in the order of 10 minutes to run 10,000 games for most setups. It is the best tool for evaluating modifications to the core algorithm.
+`analysis/head_to_head.py` compares two versions of a strategy for a **single setup** by replaying that setup's deals against each other (Monte Carlo; ~10 minutes for 10,000 deals on most setups), reporting a per-seat advantage. It accepts explicit folder paths (`--model1-folder`, `--model2-folder`) or archive-tag shortcuts (`--model1 <tag>`, `--model2 <tag>`) resolving to `cfr_ai/archive/<tag>/`; the tag `current` (or `.`) refers to the working `cfr_ai/` tree.
 
-The script accepts either explicit folder paths (`--model1-folder`, `--model2-folder`) or archive-tag shortcuts (`--model1 <tag>`, `--model2 <tag>`) that resolve to `cfr_ai/archive/<tag>/`. The tag `current` (or `.`) refers to the working `cfr_ai/` tree.
+Its scope is **non-macro setups** — value-only setups (total ≤ 7) and pre-V3 / V2.1 models. It reads only the concrete probability slice, which is sub-stochastic for an augmenting-action (V3+) model, so it **refuses macro setups** rather than silently comparing a policy the agent never plays. For the current macro methodology the primary version-vs-version signals are the whole-game harnesses — `cfr_vs_cfr_games.py` (CFR-vs-CFR) and `cfr_vs_nfsp_games.py` (CFR-vs-Perun) — and, per setup, `selftest_macros.py` / `lbr_macro.py`, all of which fold the macro masses through the real serving path. `head_to_head.py` nonetheless remains the shared foundation those macro tools build on: its key and legal-action helpers are imported by `selftest_macros.py` and `selftest_bluff.py`, and it is the consumer of the archive-tag snapshots produced by `archive_tool.py`.
 
 ### CFR-vs-NFSP benchmark (`analysis/cfr_vs_nfsp.py`)
 

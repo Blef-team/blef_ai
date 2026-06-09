@@ -7,10 +7,13 @@ incrementally by `cfr_ai/training.py` (training cols) and `cfr_ai/lbr.py`
 or to fix a corrupted summary file.
 
 Rebuild logic (delegated to `cfr_ai/summary.py:rebuild_from_metadata`):
+  - Each `outputs/<setup>/metadata.csv` is the single source of truth; the
+    existing summary is NOT consulted and no timestamps are compared.
   - Read every `outputs/<setup>/metadata.csv`, project to training cols.
-  - Preserve LBR cols from the EXISTING summary for setups whose training
-    timestamp hasn't changed; otherwise blank them (training was re-run, the
-    LBR result is stale).
+  - Rebuild LBR cols from each file's FINAL `--- LBR Exploitability ---`
+    block (the in-training `--- Exploitability Log ---` is ignored). A setup
+    with no final LBR block simply gets blank LBR cols, so a retrain that
+    rewrites metadata.csv automatically drops its stale exploitability.
 
 Chart regeneration walks the same metadata.csv files and emits
 `outputs/<setup>/utility_chart_<setup>.png` from the `--- Utility Log ---`

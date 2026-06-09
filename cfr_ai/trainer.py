@@ -421,7 +421,7 @@ class Trainer:
 
             utils[starting_player] += v
 
-            if self.log_points > 0 and (i + 1) % (num_iterations // self.log_points) == 0:
+            if self.log_points > 0 and (i + 1) % max(1, num_iterations // self.log_points) == 0:
                 now = time.time()
                 chunk_iters = (i + 1) - last_log_iter
                 chunk_secs = now - last_log_time
@@ -511,9 +511,11 @@ class Trainer:
                 strategy is 100% check (i.e. all mass on action 88) are
                 NOT stored. Matches the legacy CSV convention; the JIT
                 lookup defaults to check-100% on missing keys.
-            clear_lows_threshold: probabilities below this fraction of the
-                row max are zeroed and the remainder renormalised. Set to
-                0 to skip cleaning.
+            clear_lows_threshold: enable flag only, NOT a tunable cutoff.
+                Any positive value turns cleaning ON; when enabled, any
+                probability below an absolute 0.01 is zeroed and the
+                remainder renormalised (the 0.01 cutoff is hardcoded in
+                `clear_lows`). Set to 0 to skip cleaning entirely.
         """
         # Local import: avoids circular dependency at module load time.
         from cfr_ai.lbr import FlatStrategy
@@ -596,7 +598,12 @@ class Trainer:
         Includes ALL infosets (the check-only ones that `strategy.npz` drops
         are still present here, so the diagnostic file is a superset of the
         deployment file). Trim with `keep[mask]` if you want only the rows
-        in `strategy.npz`."""
+        in `strategy.npz`.
+
+        SIDE EFFECT: to release RAM, this nulls `self.regrets` and
+        `self.strategy_sum` as it extracts them. Call this AFTER any
+        `get_final_*` export; calling those afterwards will fail because the
+        underlying arrays are gone."""
         n = self.n_rows
         # Snapshot the live row arrays.
         keys = np.empty(n, dtype=np.int64)

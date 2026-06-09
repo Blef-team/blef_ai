@@ -273,7 +273,10 @@ def update_metadata_lbr(setup_dir: str, depth_label: str,
         "expl": expl_str, "duration": duration_str, "sampling": sampling_label,
     }
 
-    with open(md_path, "w", newline="", encoding="utf-8") as f:
+    # Write atomically: a crash mid-write must not corrupt the source-of-truth
+    # metadata.csv. Mirrors write_summary's temp-then-os.replace pattern.
+    tmp = md_path + ".tmp"
+    with open(tmp, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         for row in head:
             w.writerow(row)
@@ -283,6 +286,7 @@ def update_metadata_lbr(setup_dir: str, depth_label: str,
             w.writerow([f"LBR-{d} expl", cells.get("expl", "")])
             w.writerow([f"LBR-{d} duration", cells.get("duration", "")])
             w.writerow([f"LBR-{d} sampling", cells.get("sampling", "")])
+    os.replace(tmp, md_path)
 
 
 def parse_metadata_lbr(path: str) -> Dict[str, Dict[str, str]]:

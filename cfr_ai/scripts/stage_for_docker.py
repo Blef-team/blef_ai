@@ -100,10 +100,10 @@ def main() -> int:
     shutil.copy2(cfr_src / "deployment" / "requirements.txt", dest / "requirements.txt")
 
     # Convert each setup's compressed strategy.npz into the mmap-friendly
-    # split layout (uncompressed probs_flat.npy + small strategy_meta.npz +
-    # the abs.json companion). The agent's load_strategy_for_agent prefers this
-    # layout and mmap's the probs file → ~50 MB peak resident regardless
-    # of strategy size.
+    # split layout (uncompressed probs_sparse_indices.npy + probs_sparse_values.npy
+    # + small strategy_meta.npz + the abs.json companion). The agent's
+    # load_strategy_for_agent prefers this layout and mmap's the sparse probs
+    # files → ~50 MB peak resident regardless of strategy size.
     print("[stage] converting strategies to mmap-friendly layout...", flush=True)
     from cfr_ai.strategy_io import write_mmap_layout
     outputs = dest / "cfr_ai" / "outputs"

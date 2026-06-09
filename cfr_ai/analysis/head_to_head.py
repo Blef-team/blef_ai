@@ -121,6 +121,20 @@ def preload_all_strategies(model_folder: str, hand_sizes_sorted: List[int]) -> D
         )
         return {}
 
+    # Macro (V3+) setups carry their augmenting-action masses separately from the
+    # concrete probability slice. This tool reads only the concrete slice, which is
+    # sub-stochastic for a macro model, so it would silently evaluate a policy the
+    # agent never plays. Refuse rather than mislead.
+    with np.load(npz_path, allow_pickle=True) as _z:
+        if "kinds" in _z.files or "masses" in _z.files:
+            raise RuntimeError(
+                f"head_to_head.py cannot evaluate macro (V3+) setup '{setup_name}': "
+                f"{npz_path} carries macro masses this tool ignores, which would "
+                f"compare a policy the agent never plays. Use cfr_vs_cfr_games.py / "
+                f"cfr_vs_nfsp_games.py (which drive the real folding agent) or "
+                f"selftest_macros.py for macro models."
+            )
+
     print(f"Pre-loading strategies from {npz_path}...")
     fs = load_strategy(setup_dir)
     id_to_abs = {v: k for k, v in fs.abs_str_to_id.items()}

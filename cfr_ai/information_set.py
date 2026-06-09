@@ -15,14 +15,14 @@ def get_possible_actions(history: List[int], min_bet: int) -> List[int]:
 
 def get_hand_abstraction(hand: List[int], hand_sizes: List[int]) -> List[str]:
     """A 89-entry hand abstraction (one per last-bet context; index 88 = round start). 
-    Rounds 1-5 (sum(hand_sizes) <= 6) use a cheap sorted-values abstraction; 
+    Rounds 1-6 (sum(hand_sizes) <= 7) use a cheap sorted-values abstraction;
     rounds 6+ use the main abstraction."""
 
     vals = [c // 4 for c in hand]
     suits = [c % 4 for c in hand]
     total = sum(hand_sizes)
     val_multiset = ''.join(sorted(str(v) for v in vals))
-    # Rounds 1-5: just the sorted value multiset.
+    # Rounds 1-6 (total <= 7): just the sorted value multiset.
     if total <= 7:
         return [val_multiset] * 89
 

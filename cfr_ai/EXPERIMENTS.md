@@ -32,8 +32,8 @@ V1 → V2 → V2.1 → V3 → V3.1 → V3.2; every experiment below is tagged wi
 | **V2** | Full 66-setup retrain on the new numba JIT trainer (replacing the historical pure-Python trainer). Same hyperparameters as V1. | **5.7–9× faster** training; game values, structural metrics, and (11,11) H2H all within noise of V1 — a faithful re-implementation. | `cfr_ai/archive/v2` |
 | **V2.1** | Hyperparameter *consolidation*: penalty **0**, pruning **−10/−12**, the byte-identical fast `get_hand_abstraction`. No structural change. | ≈ V2 strength, **~40% faster** to train and slightly *less* exploitable (penalty removal moved it closer to Nash). | `cfr_ai/outputs` (until V3) |
 | **V3** | V2.1 + two independent additions: **augmenting action macros** (3 per infoset, for total ≥ 7) and **min_bet = 27 for total ≥ 13**. | Beats V2.1 head-to-head (**0.535** whole-game) and **flips greedy Perun from a loss to a win** (0.489 → **0.538**). Anchor for the V3.1 round. | `cfr_ai/outputs` |
-| **V3.1** | V3 + total-7 → **value-only @ 10M** (concrete) + **suits@root for total ≥ 17**; ranks@root dropped, flush-refinement deferred. | Validated no-regression refinement of V3: whole-game vs **greedy Perun 0.550** (V3 0.538), vs **V3 0.507** (no-regression), vs **V1 0.534** (V3 0.525) — **+0.7–1.2 pt over V3 across all three independent yardsticks**. Gains localized to total-7 (value-only) and total-22 / 11,11 (suits@root). **Anchor for the V3.2 round** (since superseded). | `cfr_ai/experiments/v31` (box); shares the canonical `information_set.py` |
-| **V3.2** (anchor) | V3.1 + the §5.7/§5.8 ingredients: **11-v-11 opening floor `min_bet = 65`** (last full house) and the mid-N **flush-band refinement** on `1_6`/`2_5`/`3_4`. Same abstraction md5 `9595e646` as V3.1. | Net-neutral-to-positive vs V3.1 on the aggregate while fixing the 11-v-11 endgame. **Deployed as V3.2x2** — the same config retrained at 2× iterations (macros 10M, value-only 20M) — the strongest model on every axis: vs greedy Perun **0.564**, vs V3.1 **0.524**, vs V3.2 **0.526**, vs V1 **0.541**. **Current anchor.** V3.2x4 (4×) in progress (§5.10). | box `experiments/v32` (config) / `v32x2` (deployed, = local `cfr_ai/outputs`); live on Lambda |
+| **V3.1** | V3 + total-7 → **value-only @ 10M** (concrete) + **suits@root for total ≥ 17**; ranks@root dropped, flush-refinement deferred. | Validated no-regression refinement of V3: whole-game vs **greedy Perun 0.550** (V3 0.538), vs **V3 0.507** (no-regression), vs **V1 0.534** (V3 0.525) — **+0.7–1.2 pt over V3 across all three independent yardsticks**. Gains localized to total-7 (value-only) and total-22 / 11,11 (suits@root). **Anchor for the V3.2 round** (since superseded). | `cfr_ai/experiments/v31` (box), with its own info_set snapshot (pre the V3.2 suit-flag drop) |
+| **V3.2** (anchor) | V3.1 + the §5.7/§5.8 ingredients: **11-v-11 opening floor `min_bet = 65`** (last full house) and **dropping the round-6 suit-flag** on the total-7 setups (`1_6`/`2_5`/`3_4` → the plain value multiset; the decompressed-flush-band probe was shelved). V3.2 info_set snapshot (md5 `9595e646`). | Net-neutral-to-positive vs V3.1 on the aggregate while fixing the 11-v-11 endgame. **Deployed as V3.2x2** — the same config retrained at 2× iterations (macros 10M, value-only 20M) — the strongest model on every axis: vs greedy Perun **0.564**, vs V3.1 **0.524**, vs V3.2 **0.526**, vs V1 **0.541**. **Current anchor.** V3.2x4 (4×) in progress (§5.10). | box `experiments/v32` (config) / `v32x2` (deployed, = local `cfr_ai/outputs`); live on Lambda |
 
 V1 was historically tagged `v0`/`v0_baseline`; the archive is now consolidated to a
 single `v1` snapshot. V2's hyperparameters (pruning −20/−22, per-setup penalty
@@ -506,7 +506,8 @@ relative to Perun across bands, but far less than V1 did.
 **Conclusions.**
 1. V3.1 is a **validated, no-regression refinement of V3** (+0.7–1.2 pt, triangulated),
    adopted as the **anchor** for the V3.2 round (since superseded by V3.2 — §5.7–5.9); the model lives at `cfr_ai/experiments/v31` (box) and the
-   code is the canonical `information_set.py`.
+   info_set is its own snapshot, distinct from the now-canonical V3.2 `information_set.py`
+   (which drops the round-6 suit-flag).
 2. Relative to the original V1/V2.1, the **flush hole is largely closed and the high-N
    erosion is fixed** — the two capability targets the MORANA diagnostic named. This is the
    cumulative payoff of the V3 macros + the V3.1 abstraction.
@@ -818,12 +819,12 @@ a sparse-mmap layout (uint16-quantised values, ~10× smaller than dense int16) a
 time, so resident memory stays ~tens of MB regardless of strategy size. V2.1 ran on
 the **256 MB** tier (cold ~2.5–3.5 s), with no numba on the agent path.
 
-For V3 the macro columns ride **inside** `strategy.npz` (and the mmap `strategy_meta`),
-so the macro masses are carried through the same compact path; the agent folds them at
-serve, lazily importing the numba `p_vector_fast` only for macro setups (concrete
-setups remain numba-free). The Lambda memory was raised to **512 MB**. Deploying V3 is
-the immediate next operational step (stage → ECR → update function → verify a few
-setups including a big one → retire the dangling images).
+For V3 the macro columns ride **inside** `strategy.npz` (and the mmap meta), so the macro
+masses are carried through the same compact path; the agent folds them onto the resolved
+per-hand bet at serve. The serve path stays **numba-free** — it uses the pure-Python
+`p_vector_factored`, with the numba `p_vector_fast` kept as a training-only kernel (the two
+are bit-exact). This V3 work was superseded operationally by the V3.2x2 deploy (§5.9): the
+live function runs on the **1024 MB** tier with the sparse-mmap-meta serving layout.
 
 ---
 

@@ -179,15 +179,18 @@ class FlatStrategyAgent:
       single-file). Wastes space on zero-padded illegal actions but
       works as a local-dev fallback.
 
-    * **Variable-width flat** (`_flat_probs` + `_probs_offset` set):
-      `_flat_probs` is a 1-D fp32 array containing each row's legal
-      action probabilities concatenated end-to-end. `_probs_offset[i]`
-      gives the start index for row i; row i's strategy slice is
-      `_flat_probs[_probs_offset[i] : _probs_offset[i+1]]`. ~3-5×
-      smaller than the padded layout (no zero-padding for illegal
-      actions), and the underlying file is `mmap`able so peak resident
-      memory is ~10-50 MB regardless of strategy size. Produced by
-      `write_mmap_layout` at Docker-build time.
+    * **Variable-width sparse** (`_sparse_indices` + `_sparse_values` +
+      `_probs_offset` set): `_sparse_values` is a 1-D uint16 array of each
+      row's non-zero action probabilities and `_sparse_indices` (uint8)
+      holds their positions within the row's legal range, both
+      concatenated end-to-end. `_probs_offset[i]` gives the start index
+      for row i; row i's slices are
+      `_sparse_*[_probs_offset[i] : _probs_offset[i+1]]`. ~3-5× smaller
+      than the padded layout (no zero-padding for illegal actions), and
+      the underlying `probs_sparse_indices.npy` / `probs_sparse_values.npy`
+      files are `mmap`able so peak resident memory is ~10-50 MB regardless
+      of strategy size. Produced by `write_mmap_layout` at Docker-build
+      time.
     """
     keys_sorted: np.ndarray   # int64[N], sorted
     lower_action: np.ndarray  # int16[N]
@@ -201,7 +204,7 @@ class FlatStrategyAgent:
     #    the legal range per row. ~10× smaller than dense int16 because
     #    strategies are typically 5-10% dense post `clear_lows`.
     _sparse_indices: Optional[np.ndarray] = None  # uint8, 1D
-    _sparse_values: Optional[np.ndarray] = None   # int16, 1D
+    _sparse_values: Optional[np.ndarray] = None   # uint16, 1D
     _probs_offset: Optional[np.ndarray] = None    # int64[N+1]
     # Augmenting macros (V3+). When present, `kinds` lists the macro kinds and
     # `masses[row]` holds each macro's probability mass (`m_k/T`), on the SAME
@@ -282,13 +285,13 @@ def _read_npz_arrays(setup_dir: str):
 def load_strategy_for_agent(setup_dir: str) -> FlatStrategyAgent:
     """Agent-facing loader. Two-format aware:
 
-    1. **mmap path** (preferred at deployment time): if `setup_dir` has a
-       `probs_flat.npy` next to `strategy_meta.npz`, mmap the variable-
-       width flat probs array and load the small meta arrays eagerly.
-       The flat representation stores only the legal action slice per
-       row (no padding for illegal actions) → ~3-5× smaller than the
-       padded layout. Peak resident memory is ~10-50 MB regardless of
-       strategy size.
+    1. **mmap path** (preferred at deployment time): if `setup_dir` has
+       `probs_sparse_indices.npy` + `probs_sparse_values.npy` next to
+       `strategy_meta.npz`, mmap the variable-width sparse probs arrays
+       and load the small meta arrays eagerly. The sparse representation
+       stores only each row's non-zero legal-action slice (no padding for
+       illegal actions) → ~3-5× smaller than the padded layout. Peak
+       resident memory is ~10-50 MB regardless of strategy size.
     2. **Compressed `.npz` fallback** (used for local dev where the
        single-file format is more convenient): if only `strategy.npz` is
        present, read everything eagerly. Costs the full padded probs
