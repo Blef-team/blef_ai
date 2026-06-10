@@ -21,15 +21,15 @@ def calculate_win_probabilities():
     for _, row in df.iterrows():
         try:
             c1, c2 = map(int, row['Setup'].split(','))
-            vals = row['Exp. Value'].split(', ')
+            # The unified summary stores game values as two separate cols
+            # (P0 value, P1 value), replacing the old "Exp. Value" string.
+            v0 = float(row['P0 value'])
+            v1 = float(row['P1 value'])
             if c1 == c2:
-                util = float(vals[0])
-                utilities[(c1, c2)] = (util, -util)
+                utilities[(c1, c2)] = (v0, -v0)
             else:
-                util_c1_starts = float(vals[0])
-                util_c2_starts = float(vals[1])
-                utilities[(c1, c2)] = (util_c1_starts, -util_c2_starts)
-                utilities[(c2, c1)] = (util_c2_starts, -util_c1_starts)
+                utilities[(c1, c2)] = (v0, -v1)
+                utilities[(c2, c1)] = (v1, -v0)
         except (ValueError, IndexError):
             continue
 

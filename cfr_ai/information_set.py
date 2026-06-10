@@ -1,7 +1,10 @@
 from typing import List
+import os
 import numpy as np
 
-history_codes = np.genfromtxt('cfr_ai/history.csv', delimiter=',', dtype='|U5', skip_header=0)
+# Resolve history.csv relative to this module to prevent imports failing
+_HISTORY_CSV = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'history.csv')
+history_codes = np.genfromtxt(_HISTORY_CSV, delimiter=',', dtype='|U5', skip_header=0)
 
 
 def get_possible_actions(history: List[int], min_bet: int) -> List[int]:
@@ -11,94 +14,90 @@ def get_possible_actions(history: List[int], min_bet: int) -> List[int]:
         return [a for a in range(history[-1] + 1, 89)]
 
 def get_hand_abstraction(hand: List[int], hand_sizes: List[int]) -> List[str]:
-    hand = [str(card // 4) + str(card % 4) for card in hand]
-    # Rounds 1-5: get values
-    if (sum(hand_sizes) <= 6):
-        values = ''
-        hand.sort()
-        for x in hand:
-            values += x[0]
-        out = [values] * 89
-    # Rounds 6-21: use main abstraction
+    """A 89-entry hand abstraction (one per last-bet context; index 88 = round start). 
+    Rounds 1-6 (sum(hand_sizes) <= 7) use a cheap sorted-values abstraction;
+    rounds 6+ use the main abstraction."""
+
+    vals = [c // 4 for c in hand]
+    suits = [c % 4 for c in hand]
+    total = sum(hand_sizes)
+    val_multiset = ''.join(sorted(str(v) for v in vals))
+    # Rounds 1-6 (total <= 7): just the sorted value multiset.
+    if total <= 7:
+        return [val_multiset] * 89
+
+    # counts: index 0-3 = suit counts, 4-9 = value counts (values 0-5).
+    counts = [0] * 10
+    for v in vals:
+        counts[v + 4] += 1
+    for s in suits:
+        counts[s] += 1
+    # strengths: N of a value scores above N of a suit (suits offset by -10).
+    base = (-10, -9, -8, -7, 4, 5, 6, 7, 8, 9)
+    strengths = [base[i] + 10 * counts[i] for i in range(10)]
+    top = max(strengths)
+    # sf_strengths: suit strengths augmented with 9s (+0.1) and aces (+0.2).
+    sf = [float(strengths[i]) for i in range(4)]
+    for v, s in zip(vals, suits):
+        if v == 0:
+            sf[s] += 0.1
+        elif v == 5:
+            sf[s] += 0.2
+    sf = [round(x, 1) for x in sf]
+    aug_vals = [float(strengths[i]) for i in range(4, 10)]
+    max_aug = max(sf + aug_vals)
+
+    # Pre-straight: 4-of-a-kind/flush -> top; else 3-of-a-kind -> top 2 value
+    # strengths; else the sorted value multiset.
+    if top >= 40:
+        pre = str(top)
+    elif max(strengths[4:10]) >= 34:
+        s2 = sorted(strengths[4:10], reverse=True)
+        pre = str(s2[0]) + ' ' + str(s2[1])
     else:
-        # Make counts of suits and values
-        counts = np.zeros(10, dtype=int)
-        for x in hand:
-            counts[int(x[0]) + 4] += 1
-            counts[int(x[1])] += 1
-        # Sort the counts by opinionated strength (N of a value is better than N+1 of a suit)
-        strengths = np.arange(10, dtype=int)
-        strengths[0:4] -= 10
-        for i in range(10):
-            strengths[i] += 10 * counts[i]
-        # Keep the top 1 strength handy
-        top_strength = np.max(strengths)
-        # Make an augmented version of suit strengths, with nines and aces, for use in straight flushes
-        sf_strengths = strengths[0:4].copy().astype(float)
-        for x in hand:
-            if x[0] == '0':
-                sf_strengths[int(x[1])] += 0.1
-            if x[0] == '5':
-                sf_strengths[int(x[1])] += 0.2
-        sf_strengths = np.around(sf_strengths, decimals=1)
-        augmented_strengths = np.append(sf_strengths, strengths[4:10])
-        # Pre-straight:
-        ## If there's four of a kind or flush on hand, get the top strength
-        ## If there's a three of a kind on hand, get the top 2 value strengths
-        ## Else, get all card values
-        if top_strength >= 40:
-            pre_straight_abstraction = str(top_strength)
-        elif np.max(strengths[4:10]) >= 34:
-            pre_straight_abstraction = str(sorted(strengths[4:10], reverse=True)[0]) + ' ' + str(sorted(strengths[4:10], reverse=True)[1])
-        else:
-            values = ''
-            hand.sort()
-            for x in hand:
-                values += x[0]
-            pre_straight_abstraction = values
-        out = [pre_straight_abstraction] * 27
-        # Straight to full: if there's four of a kind or flush, report just it
-        if top_strength >= 40:
-            out += [str(top_strength)] * 39
-        else:
-            ## Else for straights: check which values we have and get top strength
-            straight_part = str(min(counts[4], 1)) + str(sum([min(x, 1) for x in counts[5:9]])) + str(min(counts[9], 1)) + ' ' + str(top_strength)
-            out += [straight_part] * 3
-            ## Else for three of a kind: check how many we have of that value and get top strength
-            for i in range(4, 10):
-                out += [str(counts[i]) + ' ' + str(top_strength)]
-            ## Else for full house: check how many we have of the two values each and get top strength
-            first_value = 0
-            second_value = 0
-            for i in range(30):
-                second_value += 1
-                if second_value == 6:
-                    first_value += 1
-                    second_value = 0
-                if second_value == first_value:
-                    second_value += 1
-                out += [str(counts[4 + first_value]) + str(counts[4 + second_value]) + ' ' + str(np.max(np.delete(strengths, [4 + first_value, 4 + second_value], 0)))]
-        # Flush: check how many we have of that suit and get top (augmented) strength
-        for i in range(4):
-            out += [str(counts[i]) + ' ' + str(np.max(augmented_strengths))]
-        # Four of a kind: check how many we have of that value and get top (augmented) strength, skipping already irrelevant ones
-        temp_strengths = augmented_strengths.copy()
-        for i in range(4, 10):
-            temp_strengths = np.delete(temp_strengths, 4, 0)
-            out += [str(counts[i]) + ' ' + str(np.max(temp_strengths))]
-        # Small / big straight flush: get augmented information about the suit being bet on and our strongest suit
-        for i in range(2):
-            for j in range(4):
-                out += [str(sf_strengths[j]) + ' ' + str(np.max(np.delete(sf_strengths, j, 0)))]
-        # Great straight flush: get augmented information about the suit being bet on and our strongest suit, skipping already irrelevant ones
-        temp_strengths = sf_strengths
-        for j in range(3):
-            temp_strengths = temp_strengths[1:]
-            out += [str(sf_strengths[j]) + ' ' + str(np.max(temp_strengths))]
-        # Great straight flush spades: ignore the hand
-        out += ['X']
-        # Beginning of round (at index 88): same as pre-straight
-        out += [pre_straight_abstraction]
+        pre = ''.join(sorted(str(v) for v in vals))
+    out = [pre] * 27
+
+    # Straight -> full house.
+    if top >= 40:
+        out += [str(top)] * 39
+    else:
+        straight_part = (str(min(counts[4], 1))
+                         + str(sum(min(counts[k], 1) for k in range(5, 9)))
+                         + str(min(counts[9], 1)) + ' ' + str(top))
+        out += [straight_part] * 3
+        for i in range(4, 10):                       # three of a kind
+            out.append(str(counts[i]) + ' ' + str(top))
+        first = second = 0                            # full house (30 pairs)
+        for _ in range(30):
+            second += 1
+            if second == 6:
+                first += 1
+                second = 0
+            if second == first:
+                second += 1
+            e1, e2 = 4 + first, 4 + second
+            m = max(strengths[k] for k in range(10) if k != e1 and k != e2)
+            out.append(str(counts[e1]) + str(counts[e2]) + ' ' + str(m))
+
+    # Flush.
+    for i in range(4):
+        out.append(str(counts[i]) + ' ' + str(max_aug))
+    # Four of a kind (progressively drop the low value strengths).
+    for k in range(6):
+        out.append(str(counts[4 + k]) + ' ' + str(max(sf + aug_vals[k + 1:])))
+    # Small / big straight flush (identical twice in the original).
+    for _ in range(2):
+        for j in range(4):
+            out.append(str(sf[j]) + ' ' + str(max(sf[t] for t in range(4) if t != j)))
+    # Great straight flush (progressively drop the low suits).
+    for j in range(3):
+        out.append(str(sf[j]) + ' ' + str(max(sf[j + 1:])))
+    out.append('X')        # great straight flush spades: hand-independent
+    out.append(pre)        # index 88: round start, same as pre-straight
+    # Root token only: per-suit count shape at total >= 17
+    if total >= 17:
+        out[88] = pre + ' ' + ''.join(str(counts[s]) for s in range(4))
     return out
 
 
@@ -119,34 +118,3 @@ def make_key(hand: List[int], hand_abstractions: List[str], history: List[int], 
     return key
 
 
-def make_full_key(my_cards: List[str], history: List[int]) -> str:
-    my_cards.sort()
-    return str(my_cards) + ' ' + str(history)
-
-
-class InformationSet():
-    def __init__(self, history: List[int], iter: int, min_bet: int):
-        self.possible_actions = get_possible_actions(history, min_bet)
-        self.regrets = np.zeros(len(self.possible_actions))
-        self.strategy_sum = np.zeros(len(self.possible_actions), dtype=np.float32)
-        self.times_touched = 0
-        self.first_touched = iter
-        self.last_touched = 0
-        self.temporary_value = 0.0
-
-    def get_strategy(self, reach_probability: float) -> np.array:
-        if any(self.regrets > 0):
-            strategy = np.maximum(0, self.regrets)
-            strategy /= sum(strategy)
-        else:
-            strategy = np.zeros(len(self.regrets))
-            strategy[-1] = 1.0
-
-        self.strategy_sum += reach_probability * strategy
-        return strategy
-
-    def get_final_strategy(self) -> np.ndarray:
-        if any(self.strategy_sum):
-            return self.strategy_sum / sum(self.strategy_sum)
-        else:
-            return np.array([0.0] * (len(self.strategy_sum) - 1) + [1.0])

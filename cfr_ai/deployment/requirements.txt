@@ -1,0 +1,5 @@
+numpy==1.26.4
+# numba + llvmlite dropped: the deployed agent uses np.searchsorted on the
+# sorted-keys array (cfr_ai/strategy_io.py:load_strategy_for_agent), not
+# the numba.typed.Dict path. Saves ~130 MB image size + ~10s cold start.
+# tqdm dropped: only used by training/LBR which never run in Lambda.

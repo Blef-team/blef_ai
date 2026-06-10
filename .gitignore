@@ -135,6 +135,36 @@ dmypy.json
 # AI strategy output
 cfr_ai/outputs
 
+# Parameter-experiment artifacts (ephemeral sweeps; see experiments_run.py)
+cfr_ai/experiments/
+
+# CFR-vs-NFSP benchmark outputs (regenerate with cfr_ai/analysis/cfr_vs_nfsp.py;
+# the tool is tracked, the result CSV/heatmaps are not)
+cfr_ai/analysis/cfr_vs_nfsp_*.csv
+cfr_ai/analysis/cfr_vs_nfsp_*.png
+cfr_nfsp_matrix_*.csv
+cfr_nfsp_matrix_*.png
+
+# local CFR strategy archive — strategy snapshots are large model files
+# we keep on disk only. The archive's index README and any shelved code
+# experiments (subdirectories with their own README) ARE tracked so the
+# decisions and rationale live in git history.
+#
+# Note: we ignore /* (contents), not the directory itself — otherwise git
+# wouldn't descend in and the !-negations below would be unreachable.
+cfr_ai/archive/*
+!cfr_ai/archive/README.md
+!cfr_ai/archive/subgame/
+cfr_ai/archive/subgame/*
+!cfr_ai/archive/subgame/README.md
+!cfr_ai/archive/subgame/subgame.py
+!cfr_ai/archive/subgame/analysis/
+cfr_ai/archive/subgame/analysis/*
+!cfr_ai/archive/subgame/analysis/*.py
+
+# local working notes — distilled content lives in README + appendices
+cfr_ai/SESSION_NOTES.md
+
 # Game orchestration
 games*/
 
@@ -146,3 +176,14 @@ logs*/*
 
 # self-play runs
 runs*/*
+
+# Temporary notes
+scratch/
+
+# Generated game records — the DynamoDB games dump (games_current.jsonl.gz) and
+# all CFR/NFSP self-play .npy logs. Regenerate via cfr_ai/analysis/
+# {dynamo_dump_jsonl,cfr_vs_nfsp_games,cfr_vs_cfr_games}.py. One dir, not per-file.
+cfr_ai/analysis/data/
+
+# Isolated experiment out-roots (strategies live on the box; local pulls are scratch)
+cfr_ai/exp_*/

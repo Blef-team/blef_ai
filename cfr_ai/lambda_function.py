@@ -1,7 +1,8 @@
 import boto3
 import json
-import agent
 import logging
+
+from cfr_ai import agent
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 

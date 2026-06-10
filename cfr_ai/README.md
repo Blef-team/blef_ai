@@ -59,12 +59,13 @@ In most setups in Blef, most information sets will never be reached by good play
 
 We are then instructing the agent who uses the CFR strategy to check with 100% probability if it cannot find the strategy for a given information set during online play.
 
-### Note: modifications considered but not used
+### Note: modifications considered
 
-We have considered but ultimately not implemented:
-* ICFR, because of the expected effort/benefit ratio;
-* some variance-reduction techniques with respect to opponent's sampled actions or cards, because of no noticeable benefit when trying them; and
-* discounting regrets, as we haven't found benefits.
+We have considered:
+* ICFR — not implemented due to the expected effort/benefit ratio;
+* variance-reduction techniques on opponent's sampled actions or cards — tried, no noticeable benefit;
+* DCFR / CFR+ regret-matching variants — tried; on rounds 1-3 they converged to the same exploitability as `es` (the hand+history abstraction was the floor) but took 10-18× longer wall-clock because pruning has to be disabled and the α-discount adds per-visit cost. Strictly worse than `es` on a resource-adjusted basis, so removed from the codebase; and
+* outcome-sampling MCCFR — implemented but **not** competitive with external sampling on Blef's structure. Removed from the codebase; see `README_Appendix_B.md` for the diagnosis.
 
 ## Resource limits and abstraction
 
@@ -78,14 +79,14 @@ One cannot compute this algorithm with 10^11.7 information sets.
 
 Instead, our abstraction is designed to have a limit of around 5 million (10^6.7) infosets. This has the following benefits: 
 * it limits the memory consumption to around 4 GB;
-* it limits the strategy csv output files to less than 250 MB, so that they can be uploaded to AWS lambda using one Lambda per setup; and
+* it keeps each setup's served strategy small enough that all 66 fit comfortably inside a single Lambda container image; and
 * each setup's strategy can be calibrated to a reasonable extent in around 0.5 core-days.
 
 The AI should then take around a core-month with 4GB of memory to train, which costs in the order of 30 USD when trained on on-demand AWS EC2 instances. It can also be reasonably trained on a personal machine.
 
 ### Memory consumption
 
-Each information set object stores a regret array of up to 88 double-precision floats, a strategy sum array of up to 88 double-precision floats and an array of possible actions. The former two could easily fit into single-precision float arrays and possible actions could be recomputed, but both turn out to slow the code down substantially. 
+Training state is held in flat 2D numpy arrays indexed by infoset row: one for regrets and one for strategy sums, each row covering that infoset's legal action range. These arrays default to single-precision (`--dtype fp32`).
 
 An average information set will only have 30-40 possible actions. Therefore, in setups where a wide range of bets are viable and risky (not just e.g. the first 12), the average infoset weight in memory will be 1-2 kB.
 
@@ -143,9 +144,9 @@ This abstraction tries not to differentiate between bets that are less relevant 
 
 The AI does not consider the exact cards in its hand. Instead, it uses a hand-crafted abstraction that extracts only the most strategically relevant features of the hand, which changes depending on the round and the last bet made. It's encoded in `get_hand_abstraction` in `information_set.py`.
 
-In rounds 1-5, the AI only looks at card values and completely ignores the suits. 
+While the players hold few cards between them (total hand size ≤ 7), the AI only looks at card values and completely ignores the suits.
 
-In further rounds, there is a more complex hand-crafted abstraction. First, as the AI, we extract features:
+In the later rounds, there is a more complex hand-crafted abstraction. First, as the AI, we extract features:
 * we count the number of cards of each value and each suit it holds, for a total of 10 integers.
 * we identify the strongest features of our hand among these 10 integers. N cards of a given value are considered stronger than N+1 cards of a given suit, but weaker than N+2 cards of a given suit (so that four-of-a-kind on hand is considered stronger than a flush on hand). There is also an augmented version of these strengths, where each suit strength also contains information about whether we have the 9 and whether we have the Ace of that suit. 
 
@@ -169,17 +170,54 @@ We then pick these numbers as identifiers of our hand, depending on the last bet
 * For the last best of a small/big straight flush, report augmented information about the suit being bet on and our strongest suit 
 * For the last best of a great straight flush, report augmented information about the suit being bet on and our strongest suit among those that can still be bet on
 
+At the largest hand sizes (total ≥ 17 cards), the round-start token is additionally refined by the player's own per-suit card counts, which sharpens play in the suit-heavy endgame.
+
 ### Action abstraction
 
 We have a mechanism for the AI to not acknowledge or make a specific number of the lowest bets (e.g. all high cards). If it encounters one of those bets during online play, it acts as if the round just started.
 
 With 14 cards, any specific high card has 98% chance of existing (97% and 99% with 13 and 15 cards respectively).
 
-With 16 cards on the table, the great straight has 96% chance of existing (88%, 93%, 98% and 99% for 14, 15, 17 and 18 cards respectively). In an experiment we found that having the 11 11 setup discard all bets below straights results in an approximately twofold improvement in time, memory and strategy storage space used.
+With 16 cards on the table, the great straight has 96% chance of existing (88%, 93%, 98% and 99% for 14, 15, 17 and 18 cards respectively). The production models therefore raise this floor as the table fills: `min_bet` is 0 below 13 total cards, rises to 27 (small straight) from 13 cards onward, and is set to the top full house (65) for the 11-v-11 round, where almost every lower claim is trivially true. Discarding near-certain low bets apart from the last one cuts training time, memory and storage while *sharpening* the meaningful play.
 
-### Strategy encoding
+### Augmenting action macros
 
-There is an encoding that highly compresses strategies so that they can be deployed on platforms with limited storage, such as within AWS Lambda functions.
+From the mid-game onward (total hand size ≥ 8, where the suit-aware abstraction kicks in), each infoset's action menu is augmented with three *macro* actions — `value`, `difftruthy`, and `bluff`. Unlike a concrete bet, a macro does not name a fixed claim; it resolves at decision time to a specific bet drawn from the legal range by its own scoring rule.
+
+If we define `p` as the vector of hand-aware probabilities and `g` as the vector of hand-unaware probabilities, then:
+
+* `value` is `argmax(p)` 
+* `difftruthy` is `argmax(p-g)` 
+* `bluff` is `argmin(p-g)` 
+
+This lets a single abstracted infoset express hand-dependent aggression. Each macro's probability mass is stored alongside the concrete-action probabilities and folded onto the resolved bet when the agent serves the strategy.
+
+### Strategy storage format
+
+Every infoset is keyed by a composite int64 encoding hand size, last bet, two history-code ids, and an abstraction id. Only non-checking infosets are written — a missing key at lookup time is interpreted as "check 100%".
+
+Two on-disk layouts are supported, both produced from the same training run and both loaded by `strategy_io.load_strategy_for_agent`:
+
+1. **Compressed `strategy.npz`** — what `training.py` writes; the resting format under `cfr_ai/outputs/<setup>/`. A single compressed numpy archive containing `keys` (int64, sorted), `lower`/`upper` action bounds (int16), a padded float32 `[N, 89]` probability table, and `min_bet`. Read eagerly into RAM. Convenient for local development.
+2. **Sparse mmap layout** — what `scripts/stage_for_docker.py` produces for the Lambda image. Every large per-row array is stored as its own uncompressed `.npy` so the agent can `mmap` it and page it in lazily, with no eager decompression at load. The per-setup directory contains:
+   * `meta_keys.npy` (int64, sorted) — the composite infoset keys.
+   * `meta_offset.npy` (int32) — length-`N+1` CSR-style prefix sum into the sparse arrays.
+   * `meta_lower.npy` / `meta_upper.npy` (int16) — per-row legal-action bounds.
+   * `meta_masses.npy` (uint16 `[N, k]`, macro setups only) — each infoset's macro masses, on the same scale as its concrete probabilities.
+   * `probs_sparse_indices.npy` (uint8) — non-zero positions within each row's legal-action slice.
+   * `probs_sparse_values.npy` (uint16) — non-zero probability values, quantised with scale `1/65535`.
+   * `strategy_meta.npz` (tiny, compressed) — just the scalars: format version, `min_bet`, and the macro `kinds`.
+
+   The `.npy` files are `mmap`'d at load time, so peak resident memory per loaded strategy is a few tens of MB regardless of `N` (strategies are typically 5-10% dense after `clear_lows`). An older layout that packed `keys`/`lower`/`upper`/`probs_offset`/`masses` into the compressed `strategy_meta.npz` and read them eagerly is still recognised by the loader, so images staged before this change continue to load unchanged.
+
+The agent loader returns a `FlatStrategyAgent` regardless of which layout is on disk: lookup is always `np.searchsorted` on the sorted keys, and `get_strategy(row)` reconstructs the dense legal-action slice from whichever representation was loaded. The loader does not import numba.
+
+Files written per setup under `cfr_ai/outputs/<setup>/`:
+
+* `strategy.npz` — the compressed layout described above.
+* `strategy.abs.json` — abstraction-string → id table, also covering diagnostic-only abstractions so they remain interpretable.
+* `diagnostic.npz` (optional) — touch counters + raw `regrets` + raw `strategy_sum` for every infoset, including check-only ones. Used by `analysis/` scripts, not by the deployed agent.
+* `metadata.csv` — human-readable training params (iterations, penalty, duration, game values, utility log).
 
 ## History abstraction and convergence
 
@@ -198,51 +236,38 @@ That is why we have left the temporary solution as the only one available to use
 
 ## Usage
 
-The training is done by setup, which is the ordered number of cards per player, no matter which player the AI is and who is starting. To train a model for a specific setup, execute `training.py`, specifying the number of hands. For example, the train the 1 card vs 1 card setup, run this from the project root:
+Training is done per setup, where a setup is the ordered number of cards per player. To train the 1 card vs 1 card setup, run this from the project root:
 
 ```
 python -m cfr_ai.training --hand-sizes 1 1
 ```
 
-`--hand-sizes` (required) sets the number of cards per player.
+CLI flags:
 
-`--num-iterations` (default: 5 million) specifies the number of Monte Carlo iterations to run. Within one iteration, each player gets one set of cards and there is only one traverser.
+* `--hand-sizes` (required) — number of cards per player.
+* `--iter` (default: 5,000,000) — Monte Carlo iterations.
+* `--penalty` (default: 0.0) — penalty for non-checking moves (see Penalty above).
+* `--dtype` (default: `fp32`) — regret-array dtype; `fp32` halves memory at no measurable quality cost on production setups.
+* `--min-bet` (default: 0) — minimum bet the AI will make or acknowledge.
+* `--capacity` (default: 64,000) — initial row capacity; auto-grows by chunks as needed, so the default is fine.
+* `--seed` (default: 42) — RNG seed for deals + opponent sampling.
+* `--log-points` (default: 20) — number of evenly-spaced iter-rate / utility log lines.
+* `--archive-tag X` — save into `cfr_ai/archive/X/outputs/<setup>/` (snapshot for `head_to_head.py`) instead of the production `cfr_ai/outputs/<setup>/`.
+* `--high-priority` — bump the process to a higher OS priority (Windows: `HIGH_PRIORITY_CLASS`; POSIX: `nice -5`). Useful for shared machines.
 
-`--no-save` (default: no) doesn't save any outputs. Designed for trial runs where you measure performance.
-
-`--min-bet` (default: 0) specifies the minimum bet the AI will make or acknowledge.
-
-`--pruning-range` (default: -20 and -22) is a tuple that specifies the threshold for pruning and the minimum regret.
-
-`--penalty` (default: 0) sets the penalty (see Penalty above).
-
-`--log-points` (default: 25) specifies the number of points (at equal intervals) where utility will be measured.
-
-`--get-exploitability` computes exact exploitability in the unabstracted game, disaggregated by which player starts.
-
-You will see a `tqdm` progress bar during training and exploitability calculations.
+You will see a `tqdm` progress bar during training.
 
 ### Training outputs
 
-A training without the `--no-save` flag will output strategy files to the `outputs` folder. Each setup gets a different folder (e.g. `1_1` for 1 vs 1 card). The strategy for each player (depending on the number of cards) will be a separate folder inside that one (e.g. `1`). 
+A training without the `--no-save` flag writes its strategy under `cfr_ai/outputs/<setup>/` — see [Strategy storage format](#strategy-storage-format) above for the file layout (`strategy.npz`, `strategy.abs.json`, `diagnostic.npz`, `metadata.csv`).
 
-Then, infosets are stored in separate csv files depending on the last bet (88 if  there was none). The keys in the csv complete the abstraction key. For example, in a 1v1 setup, if the CFR player has an Ace and the only previous bet was a High card, Ace, you will find the strategy in `outputs/1_1/1/5.csv` under `k` of `5`. 
-
-The `v` represents the strategy. A two-digit number symbolises the number of consecutive actions with 0% chance. Two-character fragments represent non-zero chances, with higher values representing higher chances and `Ya` being 100%.
-
-As mentioned before, information sets where the strategy is to check 100% of the time are not recorded, in order to save on storage.
-
-There is also a version of the strategy files with extra, diagnostic columns in a separate folder (e.g. `1_diagnostic` instead of `1`). The diagnostic version:
-
-* contains all infosets, including the ones where we only check;
-* for every infoset, it notes the iterations it was first and last touched and the number of times it was touched; and
-* we include probabilities below 1%, which are reset to 0% in the normal output file.
+The deployment file `strategy.npz` contains only non-checking infosets — at lookup time, a missing key is interpreted as "check 100%". The companion `diagnostic.npz` (always written by `cfr_ai/training.py` alongside `strategy.npz`) contains *every* infoset, including check-only ones, plus the raw regrets, raw `strategy_sum`, and the iteration counters (`first_touched`, `last_touched`, `times_touched`) used by the analysis scripts in `analysis/`.
 
 ## Evaluation & analytics
 
-Evaluation is key to informed development of the algorithm. Usually in the case of CFR, it is done by computing exploitability. We have created optimised tools to compute the exploitability of this AI in the unabstracted game. However, we are unable to run them within 1 core-day beyond the 3rd round. Therefore, we use a suite of other tools to get a rough idea as to the performance of the algorithm. 
+Evaluation is key to informed development of the algorithm. The canonical metric for CFR is **exploitability** — how much an optimal opponent can win against the trained agent. Computing the exact exploitability (full best response) is tractable for the first few rounds but explodes in cost beyond ~round 4, so we use a more scalable proxy.
 
-Along each setup's outputs, there's a training metadata file (`metadata.csv`), which notes: 
+Along each setup's outputs, there's a training metadata file (`metadata.csv`), which notes:
 
 * the time the training finished;
 * training duration (Hours:Minutes);
@@ -254,23 +279,109 @@ Along each setup's outputs, there's a training metadata file (`metadata.csv`), w
 * the number of explored infosets;
 * the number of infosets in which the strategy is not a check with 100% chance;
 * the amount of RAM taken by the training Python process (including the memory claimed by the code that saves the strategies);
-* the game value of each player (e.g. if we're training the 2 cards vs 3 cards case, it's 1. the game value for the starting player when the 2-card player is starting and 2. the game value for the starting player when the 3-card player is starting);
-* the log of utilities along the training run; and
-* exploitability, if applicable.
+* the game value of each player (e.g. if we're training the 2 cards vs 3 cards case, it's 1. the game value for the starting player when the 2-card player is starting and 2. the game value for the starting player when the 3-card player is starting); and
+* the log of utilities along the training run.
+
+### LBR-based exploitability (`lbr.py`)
+
+The exploitability calculation is decoupled from training:
+
+```
+python -m cfr_ai.lbr --hand-sizes 3 3 --depth 2 --update-summary
+```
+
+Key flags:
+
+* `--depth K` — LBR-K (number of LBR-optimised decisions per game before falling back to CFR-vs-CFR rollout). K=1 is the classic [Lisý-Bowling local best response](https://arxiv.org/abs/1612.07547). Default is `INF_DEPTH = 10^6` (effectively infinity), which means LBR plays optimally all the way to terminal — equivalent to **exact best response** when combined with `--n-belief-samples` and `--n-lbr-hand-samples` large enough to enumerate (CLI labels this as `inf (= BR)`). The JIT recursion structurally supports any K; the practical limit is the combinatorial blow-up of ~88^K per LBR-active node, so anything past K=2-3 is infeasible on round-4+ setups.
+* `--n-belief-samples N` (default: 300) — sample N opponent hands without replacement instead of enumerating the whole posterior. Default works on all setups.
+* `--n-lbr-hand-samples K` (default: 500) — sample K LBR hands without replacement instead of enumerating all C(24, h) of them. Unbiased; adds variance.
+* `--starting-player {0,1}` — fix the starting player; default runs both seats for asymmetric setups.
+* `--update-summary` — append/update this setup's LBR cells in `outputs/summary_of_all_runs.csv` (unified training + LBR summary). LBR rows are auto-cleared on a subsequent training run for that setup, so a populated LBR cell always corresponds to the current trained policy.
+
+When opponent hands are enumerated, the result is the exact LBR-K value. When they are sampled, we use a **double-sampling** scheme: an independent belief sample S2 is used to value the action that another sample S1 chose. This produces a conservative *lower bound* on LBR-K — sometimes the chosen action is suboptimal, but its EV is computed without winner's-curse bias. The standard error reported in the summary combines lbr_hand sampling variance and opp belief sampling variance, with a chi-squared upper bound on the std err itself.
+
+LBR-1 captures roughly 85% of full BR on our verified shallow setups; LBR-2 captures ~99% but takes 4× longer per setup, and quickly becomes infeasible past round 3.
+
+### `summary_of_all_runs.csv`
+
+`outputs/summary_of_all_runs.csv` is the unified per-setup summary. One row per setup; training and LBR write disjoint column sets, each writer fully owning its cols.
+
+Training cols (written by `training.py` on save):
+* **Setup**, **Finished**, **Iterations**, **Penalty**, **Min bet**, **Pruning threshold**, **Minimum regret**, **Duration**, **Nodes touched**, **Explored infosets**, **Non-checking infosets**, **RAM (MB)**, **P0 value**, **P1 value**, **Version**.
+
+LBR cols (written by `lbr.py --update-summary`):
+* **LBR-K expl** / **LBR-K duration** / **LBR-K sampling** — one triple per depth K evaluated. *expl* is the point estimate (and `+/- std_err_worst_case` if sampled; ASCII `+/-`, not `±`, so the CSV stays mojibake-free in Excel/cp1252 tools); asymmetric setups join two starting-player results with `|`. Expl is a percentage of game value, duration is seconds.
+* **LBR-K sampling** — the caps used as `(lbr, opp)`, e.g. `(300, 500)` (populations under the cap are enumerated, else sampled without replacement). It is **per-depth** because a cheap LBR-1 can enumerate fully where LBR-2/inf must subsample, so a single shared value would mis-describe the others.
+
+A training save **blanks that row's LBR cols**, so a populated LBR cell always corresponds to the current trained policy. The LBR depth-triple columns grow rightward as more depths get computed.
+
+When LBR runs on a setup with no training row (e.g. an LBR'd archive snapshot), the row is created with empty training cols.
 
 ### Utility logging
 
 To get an approximate idea of whether we are running enough iterations, we are logging utility at equal intervals across the training run. If there is no substantial trend beyond the first 30% of iterations, then the exploitability coming from insufficient iterations is likely to be low (however, exploitability coming from the abstraction may still be high).
 
-There is an `analysis/training_analytics.py` script that makes:
-* a summary table showing key data for each setup trained;
-* charts of utility over time for each setup.
+### Periodic exploitability (optional)
 
-To use it, run `python -m cfr_ai.analysis.training_analytics`.
+Pass `--get-exploitability` to `cfr_ai.training` to compute LBR-K at several evenly-spaced points during training. Each measurement is appended to the setup's `metadata.csv` under a `--- Exploitability Log ---` block as e.g. `LBR-1 expl sp=0 at Iter 4000000, +0.083%`. The utility log gives a stability signal; this gives an actual exploitability trajectory — far more reliable for deciding "how many iterations does this setup need". Flags:
+
+* `--exploitability-points N` (default 5) — number of snapshots, evenly spaced across the run.
+* `--exploitability-depth K` (default 1) — LBR-K used at each snapshot. K=1 is fast and a good convergence proxy.
+* `--exploitability-n-belief 300`, `--exploitability-n-lbr-hand 500` — sampling caps (matching the production LBR defaults).
+
+Cost is modest: a few LBR-1 calls per training run. Off by default to keep the production training command fast.
+
+`analysis/training_analytics.py` is an admin tool for **rebuilding** the unified summary from the per-setup `metadata.csv` files and **regenerating** the per-setup utility chart PNGs. metadata.csv is the source of truth: the rebuild reconstructs both training and LBR cols from each file's FINAL `--- LBR Exploitability ---` block (never the in-training `--- Exploitability Log ---`), so a setup's exploitability always matches its training run (a retrain rewrites metadata.csv, dropping the stale block until LBR is re-run). Day-to-day, `training.py` and `lbr.py` maintain the summary incrementally — this script is for migrations or recovering from a corrupted summary file.
+
+```
+python -m cfr_ai.analysis.training_analytics             # rebuild CSV + regenerate charts
+python -m cfr_ai.analysis.training_analytics --no-charts # only rebuild CSV
+python -m cfr_ai.analysis.training_analytics --only-charts # only regenerate charts
+```
 
 ### Head-to-head comparison
 
-There is a `analysis/head_to_head.py` script that can be used to compare two versions of strategies for a single setup by making them play against each other. Using the Monte Carlo sampling, it takes in the order of 10 minutes to run 10,000 games for most setups. It is the best tool for evaluating modifications to the core algorithm.
+`analysis/head_to_head.py` compares two versions of a strategy for a **single setup** by replaying that setup's deals against each other (Monte Carlo; ~10 minutes for 10,000 deals on most setups), reporting a per-seat advantage. It accepts explicit folder paths (`--model1-folder`, `--model2-folder`) or archive-tag shortcuts (`--model1 <tag>`, `--model2 <tag>`) resolving to `cfr_ai/archive/<tag>/`; the tag `current` (or `.`) refers to the working `cfr_ai/` tree.
+
+Its scope is **non-macro setups** — value-only setups (total ≤ 7) and pre-V3 / V2.1 models. It reads only the concrete probability slice, which is sub-stochastic for an augmenting-action (V3+) model, so it **refuses macro setups** rather than silently comparing a policy the agent never plays. For the current macro methodology the primary version-vs-version signals are the whole-game harnesses — `cfr_vs_cfr_games.py` (CFR-vs-CFR) and `cfr_vs_nfsp_games.py` (CFR-vs-Perun) — and, per setup, `selftest_macros.py` / `lbr_macro.py`, all of which fold the macro masses through the real serving path. `head_to_head.py` nonetheless remains the shared foundation those macro tools build on: its key and legal-action helpers are imported by `selftest_macros.py` and `selftest_bluff.py`, and it is the consumer of the archive-tag snapshots produced by `archive_tool.py`.
+
+### CFR-vs-NFSP benchmark (`analysis/cfr_vs_nfsp.py`)
+
+Benchmarks a CFR model version against the deployed NFSP agent (the 1v1
+deck-24 specialist), broken down by **(starting-player hand size,
+non-starting-player hand size)** with alternating agent roles — so each
+cell's win-rate reflects agent skill at that configuration, not the
+first-mover advantage. Use it to see *where* a CFR version beats NFSP, not
+just the aggregate. Both agents play through the real Blef engine via the
+same `determine_action(game_state)` interface.
+
+```
+python -m cfr_ai.analysis.cfr_vs_nfsp --cfr current                 # auto: setups this version has trained
+python -m cfr_ai.analysis.cfr_vs_nfsp --cfr current --setups all    # full 11x11 matrix (+ --heatmap for a PNG)
+python -m cfr_ai.analysis.cfr_vs_nfsp --cfr-folder cfr_ai/experiments/prune-10 --setups "5,7 6,6"
+```
+
+CFR version selection mirrors `head_to_head.py` (`--cfr <tag>` →
+`cfr_ai/archive/<tag>/outputs`, `--cfr-folder <path>` → `<path>/outputs`,
+`current` → working tree). NFSP is the fixed opponent, playing its average
+policy (`--nfsp-greedy` for argmax). Multiprocess (`--workers`); each worker
+holds one CFR strategy, so keep `--workers` modest when RAM-bound.
+
+Prerequisites (not in git): **PyTorch**, and the NFSP artifacts under
+`nfsp_ai/artifacts/` (`nfsp_inference_24_1v1.pt` + the deck-24
+card/history embeddings) — extracted from the `blef-nfsp-lambda` ECR image.
+Result CSVs / heatmaps are written to `cfr_ai/analysis/cfr_vs_nfsp_<label>.*`
+and are gitignored.
+
+### Strategy archive
+
+Trained strategies can be snapshotted into versioned tags for later head-to-head comparison. Run from the project root:
+
+```
+python -m cfr_ai.archive_tool --tag v0 --note "Pre-Hetzner-retrain baseline"
+```
+
+By default this archives every setup currently in `outputs/` and skips diagnostics (pass `--include-diagnostics` to include them). Each archive is a self-contained model folder containing snapshots of `information_set.py`, `history.csv`, and the relevant `outputs/<setup>/` subtrees (the `strategy.npz` / `strategy.abs.json` per setup, optionally `diagnostic.npz`), directly consumable by `analysis/head_to_head.py` via the tag shortcut. `cfr_ai/archive/` is gitignored — archives are local to each machine.
 
 ### Winning probabilities
 
@@ -278,19 +389,69 @@ Using the game values noted down for each setup in the `summary_of_all_runs.csv`
 
 ## Deployment
 
-The AI is meant to be deployed alongside the [game engine](https://github.com/Blef-team/blef_game_engine). The integration has two components:
-* the dispatcher lambda. The code in dispatcher/lambda_function.py needs to be copied over to the `blef-aiagent-cfr` lambda. This can be done through the UI or by zipping the function and executing `aws lambda update-function-code --function-name blef-aiagent-cfr --zip-file fileb://cfr_ai/dispatcher/lambda_function.zip`; and
-* a collection of agents, each serving a particular setup.
+The AI is deployed as a single Lambda function backed by a container image stored in Amazon ECR. The image bundles `cfr_ai/` (code) and the 66 per-setup strategy payloads in the sparse-mmap layout described in [Strategy storage format](#strategy-storage-format).
 
-To create all necessary worker lambdas for the first time, use the `create_lambas` script in the deployment folder (needs configuring)
+`cfr_ai/agent.py:_get_strategy(hand_sizes)` loads the relevant strategy lazily on first use per warm container, caches it as a `FlatStrategyAgent` (defined in `strategy_io.py`), then resolves every subsequent call by `np.searchsorted` on the sorted-keys array. No numba on the agent path.
 
-To deploy an individual setup, you need to run the `deploy` script. For example, for the 1 vs 1 card setup, run `python -m cfr_ai.deployment.deploy --hand-sizes 1 1`
+`cfr_ai/scripts/stage_for_docker.py` converts each setup's local compressed `strategy.npz` into the sparse-mmap layout at Docker-build time only — the source tree stays compact.
 
-To deploy all setups at once, run `python -m cfr_ai.deployment.deploy_all`
+**Cache policy**: size = 1. Game state progresses linearly through (hand_size_a, hand_size_b) configurations as cards are won/lost; the previous setup is unlikely to be useful again before the next one displaces it. `agent.py` evicts the current strategy BEFORE loading the new one, so peak memory through a setup transition is exactly one loaded strategy plus the base runtime.
+
+Files involved:
+* `cfr_ai/lambda_function.py` — Lambda entry point. Parses the game event, calls `agent.determine_action`, invokes `blef-play` asynchronously.
+* `cfr_ai/deployment/Dockerfile.lambda` — `public.ecr.aws/lambda/python:3.12` base + `cfr_ai/` + `lambda_function.py`.
+* `cfr_ai/deployment/requirements.txt` — `numpy` only.
+* `cfr_ai/scripts/stage_for_docker.py` — assembles the build context (excludes `analysis/`, `archive/`, `deployment/`, `__pycache__`, `diagnostic.npz`, tracking CSVs, visualisation PNGs, `_bench_formats/`) and converts strategies to the sparse-mmap layout. Cross-platform; no rsync needed.
+* `cfr_ai/scripts/deploy_lambda.sh` — orchestrates build → ECR login → ECR push → `update-function-code`. Idempotently creates the ECR repo. Skip the Lambda update with `SKIP_LAMBDA_UPDATE=1`.
+* `cfr_ai/scripts/create_lambda.sh` — first-deploy only; `aws lambda create-function` with the right architecture / memory / timeout. Subsequent updates use `deploy_lambda.sh`.
+
+### First-time setup
+
+```bash
+export ACCT=<account-id> REGION=<region> PROFILE=<aws-cli-profile>
+export ROLE_ARN=<execution-role-arn>
+# Build + push to ECR (creates the repo if missing):
+SKIP_LAMBDA_UPDATE=1 bash cfr_ai/scripts/deploy_lambda.sh
+# Create the function from the pushed image:
+bash cfr_ai/scripts/create_lambda.sh
+```
+
+The ECR repo needs a resource policy granting `lambda.amazonaws.com` permission to pull (`ecr:BatchGetImage`, `ecr:GetDownloadUrlForLayer`) for first-time function creation in the account. This is set once per repo by an admin via the ECR Console or `aws ecr set-repository-policy`.
+
+### Subsequent deploys
+
+```bash
+export ACCT=<account-id> REGION=<region> PROFILE=<aws-cli-profile>
+bash cfr_ai/scripts/deploy_lambda.sh
+```
+
+### Runtime characteristics
+
+Lambda is sized at **1024 MB** — chosen for the vCPU that tier provides, not the resident set, which is far smaller. Cold start total wall is ~3 s on the first invocation (dominated by the image pull) and ~0.7 s thereafter. A decision on an already-loaded setup takes ~30-260 ms; the first decision on a *new* setup costs ~1-2 s, because that setup's `.npy` arrays must be paged in from the container's read-only filesystem — an I/O cost, not computation. Peak resident memory is ~166 MB on the biggest setup, comfortably under the cap.
+
+### Architecture choice
+
+The image is built for `linux/arm64`. On an x86 host this means QEMU emulation during `docker build`, which slows the build but not the runtime.
 
 ## Performance
 
-The core of the program, including `information_set.py`, `get_node_value` and `precompute_set_existence`, have gone through many rounds of optimisation. However, they would probably be much faster if they were written in a language like C++. We have tried using the `numba` package to compile a C++ version of some functions, like `precompute_set_existence`, but this actually worsened the performance. This is likely due to the frequent interface between Python and C++ (at least once per iteration, of which there are usually tens or hundreds in every second).
+Training (`trainer.py`) and exploitability (`lbr.py`) are JIT-compiled with [numba](https://numba.pydata.org/). They use a composite int64 infoset key `[abs_id | h_m2 | h_m1 | last_bet | hand_size]` (replacing per-call string concatenation), store regrets and strategies in flat 2D numpy arrays indexed by row, and recurse inside a single `@njit` function. The Python orchestration around the JIT-ed core is kept minimal (deal cards, build per-iter abstraction-id lookup, drive the iteration loop). Memory is held in fp32 by default.
+
+A previous implementation used a dict of `InformationSet` objects. The table below shows the speedups achieved when we moved to JIT:
+
+| Workload | Setup | Old Python | Current JIT | Speedup |
+|----------|-------|-----------:|------------:|--------:|
+| Training 5M iter | (1,2) | ~63 min† | 6.4 min | **~10×** |
+| Training 5M iter | (3,7) | 10h 3min | 1h 46 min | **~6x** |
+| LBR-1 | (1,3) | 14.7 s | 0.6 s | **24×** |
+| LBR-2 | (1,3) | 152 s | 3.8 s | **40×** |
+| LBR-2 | (3,3) | 519 s | 34 s | **15×** |
+
+†(1,2) old-Python time is extrapolated from the measured 5M-iter steady-state rate (~1,320 it/s). All JIT rows are direct wall-clock measurements.
+
+However, an earlier round of numba experimentation showed that using a dict of `InformationSet` and JIT-ing the inner math regresses performance, as each per-node `info_set.regrets`/`info_set.strategy_sum` access crossed the JIT-Python boundary. The current implementation flattens the entire trainer state into typed numpy arrays + a `numba.typed.Dict[int64, int64]` index, so the JIT-ed recursion never touches Python objects.
+
+`precompute_set_existence` is called once per training iteration to evaluate the truth of all 88 possible bets against the dealt hands. It has been optimised to build value-count and (value, suit)-presence tables in one pass over the deal, then resolve every bet via Python int comparisons. The whole call costs ~15 µs regardless of hand size — small fraction of the per-iteration cost.
 
 ## Other notes
 

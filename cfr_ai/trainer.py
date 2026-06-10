@@ -1,83 +1,639 @@
+"""Numba-jit MCCFR trainer for Blef (ES with `prune_feast` + staircase
+strategy_sum discount), backed by flat numpy arrays and a typed-dict
+infoset index.
+
+Composite infoset key (int64):
+    [abs_id : 36][h_m2 : 8][h_m1 : 8][last_bet : 8][hand_size : 4]
+
+Per-row storage (padded to width 89, legal slice is `[lower:upper+1]`):
+    regrets         fp32 or fp64
+    strategy_sum    fp32
+    lower_action    int16
+    upper_action    int16
+    last_touched    int32      (for same-iter cache)
+    temporary_value fp64       (same-iter cache value)
+
+The Python wrapper grows the flat arrays in constant `GROW_CHUNK`-sized
+chunks whenever the JIT signals overflow, so the caller never has to
+size capacity up front.
+"""
+
 from typing import List, Dict, Any, Tuple
-from cfr_ai.information_set import *
-from cfr_ai.game import *
+import time
+
 import numpy as np
-import random
-from tqdm import trange, tqdm
+from numba import njit, types
+from numba.typed import Dict as NbDict
+from tqdm import trange
 
-class Trainer():
-    def __init__(self, hand_sizes: List[int], min_bet: int, pruning_range: List[int], penalty: float, log_points: int):
-        self.infoset_map: Dict[str, InformationSet] = {}
-        self.hand_sizes = hand_sizes
-        self.nodes_touched = 0
-        self.pruning_threshold = pruning_range[0]
-        self.min_regret = pruning_range[1]
-        self.penalty = penalty
-        self.log_points = log_points
-        self.min_bet = min_bet
+from cfr_ai.game import Game
+from cfr_ai.information_set import get_hand_abstraction, history_codes
 
-    def get_node_value(self, hands: List[np.ndarray], hand_abstractions: List[str], history: List[int], reach_probability: float, active_player: int, traverser: int, prune_feast: bool, existence_array: np.ndarray, iter: int) -> float:
-        if Game.check_finish(history):
-            return 1 if existence_array[history[-2]] else -1
-        
-        key = make_key(hands[active_player], hand_abstractions[active_player], history, self.min_bet)
-        if key not in self.infoset_map:
-            self.infoset_map[key] = InformationSet(history, iter, self.min_bet)
-        info_set = self.infoset_map[key]
 
-        if info_set.last_touched == iter:
-            return info_set.temporary_value
-        else:
-            possible_actions = info_set.possible_actions
-            counterfactual_values = np.zeros(len(possible_actions))
-            opponent = (active_player + 1) % 2
+# Composite-key bit layout + history-code matrix live in `cfr_ai/keys.py`
+# so the deployed agent can import them without pulling numba/llvmlite.
+# Re-export here for backwards-compat callers; new code should import
+# from cfr_ai.keys directly.
+from cfr_ai.keys import (
+    LAST_BET_SHIFT, H_M1_SHIFT, H_M2_SHIFT, ABS_ID_SHIFT,
+    ABSENT_CODE, MAX_DEPTH,
+    _HISTORY_CODE_ID, _HISTORY_CODE_STRS,
+)
 
-            if active_player == traverser:
-                strategy = info_set.get_strategy(reach_probability)
-                for i, action in enumerate(possible_actions):
-                    if info_set.regrets[i] >= self.pruning_threshold or prune_feast:
-                        counterfactual_values[i] = -self.get_node_value(hands, hand_abstractions, history + [action], reach_probability * strategy[i], opponent, traverser, prune_feast, existence_array, iter)
-                node_value = np.dot(counterfactual_values, strategy)
-                if prune_feast:
-                    info_set.regrets = np.maximum(info_set.regrets + counterfactual_values - node_value, self.min_regret)
-                else:
-                    to_update = info_set.regrets >= self.pruning_threshold
-                    info_set.regrets[to_update] += counterfactual_values[to_update] - node_value
 
+# How many rows to add when the flat arrays fill up. 64k rows × ~720 B = ~50 MB.
+GROW_CHUNK = 64_000
+
+
+# ---------------------------------------------------------------------------
+# JIT'd recursive traversal
+# ---------------------------------------------------------------------------
+
+@njit(cache=False)
+def _traverse_jit(
+    history_buf, hist_len, reach, active, traverser, prune_feast,
+    existence, iter_i,
+    regrets, strategy_sum,
+    lower_action, upper_action,
+    last_touched, temporary_value,
+    first_touched, times_touched,
+    key_to_row, state, capacity,
+    abs_ids, hand_sizes, history_code_id,
+    min_bet, pruning_threshold, min_regret, penalty,
+    strategy_buf, cf_buf,
+    use_temp_value,
+):
+    # Terminal
+    if hist_len > 0 and history_buf[hist_len - 1] == 88:
+        return 1.0 if existence[history_buf[hist_len - 2]] else -1.0
+
+    # Capacity exhausted on a sibling — propagate up so Python can grow.
+    if state[1] != 0:
+        return 0.0
+
+    # Composite-key components.
+    if hist_len == 0 or history_buf[hist_len - 1] < min_bet:
+        last_bet = 88
+        h_m1_id = ABSENT_CODE
+        h_m2_id = ABSENT_CODE
+    else:
+        last_bet = history_buf[hist_len - 1]
+        if hist_len > 1 and history_buf[hist_len - 2] >= min_bet:
+            h_m1_id = history_code_id[last_bet, history_buf[hist_len - 2]]
+            if hist_len > 2 and history_buf[hist_len - 3] >= min_bet:
+                h_m2_id = history_code_id[last_bet, history_buf[hist_len - 3]]
             else:
-                strategy = info_set.get_strategy(0.0)
-                action = random.choices(possible_actions, weights=strategy, k=1)[0]
-                node_value = -self.get_node_value(hands, hand_abstractions, history + [action], reach_probability, opponent, traverser, prune_feast, existence_array, iter) + self.penalty
-            info_set.times_touched += 1
-            info_set.last_touched = iter
-            info_set.temporary_value = node_value
-            self.nodes_touched += 1
-            return node_value
+                h_m2_id = ABSENT_CODE
+        else:
+            h_m1_id = ABSENT_CODE
+            h_m2_id = ABSENT_CODE
 
-    def train(self, num_iterations: int) -> Tuple[float, float, Dict[str, Any]]:
-        utils = [0.0, 0.0]
-        last_utils = [0.0, 0.0]
+    hand_size = hand_sizes[active]
+    abs_id = abs_ids[active, last_bet]
+    key = (hand_size
+           | (last_bet << LAST_BET_SHIFT)
+           | (h_m1_id << H_M1_SHIFT)
+           | (h_m2_id << H_M2_SHIFT)
+           | (abs_id << ABS_ID_SHIFT))
+
+    if key in key_to_row:
+        row = key_to_row[key]
+    else:
+        if state[0] >= capacity:
+            state[1] = 1
+            return 0.0
+        row = state[0]
+        state[0] += 1
+        if last_bet == 88:
+            lower_action[row] = min_bet
+            upper_action[row] = 87
+        else:
+            lower_action[row] = last_bet + 1
+            upper_action[row] = 88
+        key_to_row[key] = row
+        first_touched[row] = iter_i
+
+    # Same-iter cache. (Note: iter_i=0 vs default 0 collision is harmless —
+    # the very first iter is wasted, matching the reference trainer's behaviour.)
+    if use_temp_value and last_touched[row] == iter_i:
+        return temporary_value[row]
+    # Cache miss = first visit to this infoset on this iteration.
+    times_touched[row] += 1
+
+    lower = lower_action[row]
+    upper = upper_action[row]
+    width = upper - lower + 1
+    opp = 1 - active
+
+    # Regret matching on legal slice into this depth's slot of strategy_buf.
+    # Single pass: cap negatives at 0 and accumulate pos_sum simultaneously,
+    # then a divide-only pass to normalise. Halves the regret-read count vs
+    # the prior two-pass form.
+    pos_sum = 0.0
+    for i in range(width):
+        r = regrets[row, lower + i]
+        if r > 0.0:
+            strategy_buf[hist_len, i] = r
+            pos_sum += r
+        else:
+            strategy_buf[hist_len, i] = 0.0
+    if pos_sum > 0.0:
+        inv = 1.0 / pos_sum
+        for i in range(width):
+            strategy_buf[hist_len, i] *= inv
+    else:
+        # All regrets <= 0; default to 100% on the last legal action.
+        # strategy_buf was zeroed in the loop above; just flip the last slot.
+        strategy_buf[hist_len, width - 1] = 1.0
+
+    if active == traverser:
+        # strategy_sum update on legal slice; skip the float32 cast + store
+        # when this action's strategy weight is zero, which is the common
+        # case once pruning has driven many regrets to 0.
+        for i in range(width):
+            s = strategy_buf[hist_len, i]
+            if s > 0.0:
+                strategy_sum[row, lower + i] += np.float32(reach * s)
+
+        # Children. cf_buf and strategy_buf are MAX_DEPTH x 89 — children
+        # write into [hist_len+1, :] so our [hist_len, :] is safe.
+        for i in range(width):
+            cf_buf[hist_len, i] = 0.0
+        for i in range(width):
+            if regrets[row, lower + i] >= pruning_threshold or prune_feast:
+                history_buf[hist_len] = lower + i
+                cf_buf[hist_len, i] = -_traverse_jit(
+                    history_buf, hist_len + 1, reach * strategy_buf[hist_len, i],
+                    opp, traverser, prune_feast,
+                    existence, iter_i,
+                    regrets, strategy_sum,
+                    lower_action, upper_action,
+                    last_touched, temporary_value,
+                    first_touched, times_touched,
+                    key_to_row, state, capacity,
+                    abs_ids, hand_sizes, history_code_id,
+                    min_bet, pruning_threshold, min_regret, penalty,
+                    strategy_buf, cf_buf,
+                    use_temp_value,
+                )
+                if state[1] != 0:
+                    return 0.0
+
+        node_value = 0.0
+        for i in range(width):
+            node_value += cf_buf[hist_len, i] * strategy_buf[hist_len, i]
+
+        if prune_feast:
+            for i in range(width):
+                v = regrets[row, lower + i] + cf_buf[hist_len, i] - node_value
+                if v < min_regret:
+                    v = min_regret
+                regrets[row, lower + i] = v
+        else:
+            for i in range(width):
+                if regrets[row, lower + i] >= pruning_threshold:
+                    regrets[row, lower + i] += cf_buf[hist_len, i] - node_value
+    else:
+        # Sample one opponent action.
+        r_uni = np.random.random()
+        acc = 0.0
+        chosen = width - 1
+        for i in range(width):
+            acc += strategy_buf[hist_len, i]
+            if r_uni < acc:
+                chosen = i
+                break
+        history_buf[hist_len] = lower + chosen
+        node_value = -_traverse_jit(
+            history_buf, hist_len + 1, reach,
+            opp, traverser, prune_feast,
+            existence, iter_i,
+            regrets, strategy_sum,
+            lower_action, upper_action,
+            last_touched, temporary_value,
+            first_touched, times_touched,
+            key_to_row, state, capacity,
+            abs_ids, hand_sizes, history_code_id,
+            min_bet, pruning_threshold, min_regret, penalty,
+            strategy_buf, cf_buf,
+            use_temp_value,
+        ) + penalty
+
+    last_touched[row] = iter_i
+    temporary_value[row] = node_value
+    state[2] += 1
+    return node_value
+
+
+# ---------------------------------------------------------------------------
+# Trainer (Python orchestration)
+# ---------------------------------------------------------------------------
+
+class Trainer:
+    def __init__(
+        self,
+        hand_sizes: List[int],
+        min_bet: int,
+        pruning_range: List[int],
+        penalty: float,
+        log_points: int,
+        initial_capacity: int = GROW_CHUNK,
+        numba_seed: int = None,
+        regret_dtype=np.float32,
+        use_temp_value: bool = True,
+    ):
+        """initial_capacity defaults to GROW_CHUNK (64k). Arrays auto-grow by
+        GROW_CHUNK rows on each fill; the user never has to size up front.
+
+        regret_dtype defaults to np.float32 (validated to match fp64 LBR
+        within noise and use ~50 % less RAM on production setups)."""
+        if regret_dtype not in (np.float64, np.float32):
+            raise ValueError("regret_dtype must be np.float64 or np.float32")
+        self.hand_sizes = hand_sizes
+        self.min_bet = int(min_bet)
+        self.pruning_threshold = float(pruning_range[0])
+        self.min_regret = float(pruning_range[1])
+        self.penalty = float(penalty)
+        self.use_temp_value = bool(use_temp_value)
+        self.log_points = log_points
+        self.regret_dtype = regret_dtype
+
+        self.capacity = int(initial_capacity)
+        self._alloc_arrays(self.capacity, fresh=True)
+
+        # state[0]=n_rows, state[1]=overflow flag, state[2]=nodes_touched
+        self.state = np.zeros(3, dtype=np.int64)
+
+        self.key_to_row = NbDict.empty(key_type=types.int64, value_type=types.int64)
+
+        self._abs_to_id: Dict[str, int] = {}
+        self._history_buf = np.zeros(MAX_DEPTH, dtype=np.int64)
+        # Per-iter scratch buffers; slotted by recursion depth so children
+        # can't clobber the parent's strategy/cf values.
+        self._strategy_buf = np.zeros((MAX_DEPTH, 89), dtype=np.float64)
+        self._cf_buf = np.zeros((MAX_DEPTH, 89), dtype=np.float64)
+
+        if numba_seed is not None:
+            _seed_numba(numba_seed)
+
+    @property
+    def n_rows(self) -> int:
+        return int(self.state[0])
+
+    @property
+    def nodes_touched(self) -> int:
+        return int(self.state[2])
+
+    # -- array storage -----------------------------------------------------
+
+    def _alloc_arrays(self, cap: int, fresh: bool):
+        """If fresh, allocate from scratch. Else extend existing arrays.
+        `first_touched` and `times_touched` are diagnostic-only — they don't
+        feed back into training, but they're written into `diagnostic.npz`
+        alongside the strategy and used by the analysis scripts."""
+        if fresh:
+            self.regrets = np.zeros((cap, 89), dtype=self.regret_dtype)
+            self.strategy_sum = np.zeros((cap, 89), dtype=np.float32)
+            self.lower_action = np.zeros(cap, dtype=np.int16)
+            self.upper_action = np.zeros(cap, dtype=np.int16)
+            self.last_touched = np.zeros(cap, dtype=np.int32)
+            self.first_touched = np.zeros(cap, dtype=np.int32)
+            self.times_touched = np.zeros(cap, dtype=np.int32)
+            self.temporary_value = np.zeros(cap, dtype=np.float64)
+            return
+        # Extend: concat with new zero block of size (cap - self.capacity).
+        extra = cap - self.capacity
+        z2_r = np.zeros((extra, 89), dtype=self.regret_dtype)
+        z2_s = np.zeros((extra, 89), dtype=np.float32)
+        z_i16 = np.zeros(extra, dtype=np.int16)
+        z_i32 = np.zeros(extra, dtype=np.int32)
+        z_f64 = np.zeros(extra, dtype=np.float64)
+        self.regrets = np.concatenate([self.regrets, z2_r], axis=0)
+        self.strategy_sum = np.concatenate([self.strategy_sum, z2_s], axis=0)
+        self.lower_action = np.concatenate([self.lower_action, z_i16])
+        self.upper_action = np.concatenate([self.upper_action, z_i16.copy()])
+        self.last_touched = np.concatenate([self.last_touched, z_i32])
+        self.first_touched = np.concatenate([self.first_touched, z_i32.copy()])
+        self.times_touched = np.concatenate([self.times_touched, z_i32.copy()])
+        self.temporary_value = np.concatenate([self.temporary_value, z_f64])
+
+    def _grow(self):
+        new_cap = self.capacity + GROW_CHUNK
+        self._alloc_arrays(new_cap, fresh=False)
+        self.capacity = new_cap
+
+    # -- abstraction interning --------------------------------------------
+
+    def _build_abs_ids_for_iter(self, hands) -> np.ndarray:
+        out = np.empty((2, 89), dtype=np.int64)
+        a2i = self._abs_to_id
+        for p, hand in enumerate(hands):
+            strings = get_hand_abstraction(hand, self.hand_sizes)
+            for lb in range(89):
+                s = strings[lb]
+                i = a2i.get(s)
+                if i is None:
+                    i = len(a2i)
+                    a2i[s] = i
+                out[p, lb] = i
+        return out
+
+    # -- training loop -----------------------------------------------------
+
+    def train(
+        self,
+        num_iterations: int,
+        snapshot_callback=None,
+        snapshot_every_log_points: int = 1,
+    ) -> Tuple[float, float, Dict[str, Any]]:
+        """Run `num_iterations` of MCCFR. `snapshot_callback`, if given, is
+        called with `(iter_num, FlatStrategy)` at every `snapshot_every_log_points`
+        utility-log point — caller uses it to take periodic measurements
+        (e.g. LBR-1 exploitability) on the live averaged strategy without
+        pausing training otherwise. The FlatStrategy passed in is a freshly
+        materialised copy; modifying it does not affect training state."""
+        utils = np.zeros(2, dtype=np.float64)
+        last_utils = np.zeros(2, dtype=np.float64)
         utility_log: Dict[str, Any] = {}
-        for i in trange(num_iterations, desc = "Training"):
-            if i == int(num_iterations * 0.3):
-                for _,v in self.infoset_map.items():
-                    v.strategy_sum *= 0.02
-            for t in range(4, 10):
-                if i == int(t * num_iterations / 10):
-                    for _,v in self.infoset_map.items():
-                        v.strategy_sum *= (t / (t + 1)) # LINEAR MCCFR
-            prune_feast = int(i/4) % 20 == 0
-            traverser = int(i/2) % 2
+        log_point_counter = 0
+
+        hand_sizes_arr = np.asarray(self.hand_sizes, dtype=np.int64)
+
+        train_start = time.time()
+        last_log_time = train_start
+        last_log_iter = 0
+        print(
+            f"[train] hand_sizes={self.hand_sizes} "
+            f"target_iters={num_iterations:,}",
+            flush=True,
+        )
+
+        for i in trange(num_iterations, desc="Training (numba)"):
+            # ES staircase strategy_sum discount, on visited rows only.
+            n = int(self.state[0])
+            if n > 0:
+                if i == int(num_iterations * 0.3):
+                    self.strategy_sum[:n] *= np.float32(0.02)
+                for t in range(4, 10):
+                    if i == int(t * num_iterations / 10):
+                        self.strategy_sum[:n] *= np.float32(t / (t + 1))
+
+            prune_feast = bool(int(i / 4) % 20 == 0)
+            traverser = int(i / 2) % 2
             starting_player = i % 2
             hands = Game.deal_cards(self.hand_sizes)
             existence_array = Game.precompute_set_existence(hands)
-            hand_abstractions = [get_hand_abstraction(hand, self.hand_sizes) for hand in hands]
-            utils[starting_player] += self.get_node_value(hands, hand_abstractions, [], 1.0, starting_player, traverser, prune_feast, existence_array, i)
-            if (self.log_points > 0 and (i + 1) % (num_iterations // self.log_points) == 0):
+            abs_ids = self._build_abs_ids_for_iter(hands)
+
+            # Pre-grow if we're within MAX_NEW_PER_ITER rows of the current
+            # capacity. Cheaper than retrying with partial updates: each iter
+            # discovers at most ~MAX_DEPTH × 89 new infosets in pathological
+            # cases, so a 1000-row safety margin is well over twice the
+            # worst-case per-iter add.
+            MAX_NEW_PER_ITER = 1000
+            if self.state[0] + MAX_NEW_PER_ITER >= self.capacity:
+                self._grow()
+
+            self.state[1] = 0
+            v = _traverse_jit(
+                self._history_buf, 0, 1.0,
+                int(starting_player), int(traverser), prune_feast,
+                existence_array, int(i),
+                self.regrets, self.strategy_sum,
+                self.lower_action, self.upper_action,
+                self.last_touched, self.temporary_value,
+                self.first_touched, self.times_touched,
+                self.key_to_row, self.state, int(self.capacity),
+                abs_ids, hand_sizes_arr, _HISTORY_CODE_ID,
+                int(self.min_bet), float(self.pruning_threshold),
+                float(self.min_regret), float(self.penalty),
+                self._strategy_buf, self._cf_buf,
+                bool(self.use_temp_value),
+            )
+            # The pre-grow above should always keep us under capacity. If a
+            # pathological iter still overflows, surface it loudly — we'd
+            # rather know than silently lose updates.
+            if self.state[1] != 0:
+                raise RuntimeError(
+                    f"Capacity {self.capacity} exhausted mid-iter {i} despite "
+                    f"pre-grow (rows={int(self.state[0])}). Increase MAX_NEW_PER_ITER."
+                )
+
+            utils[starting_player] += v
+
+            if self.log_points > 0 and (i + 1) % max(1, num_iterations // self.log_points) == 0:
+                now = time.time()
+                chunk_iters = (i + 1) - last_log_iter
+                chunk_secs = now - last_log_time
+                overall_secs = now - train_start
+                overall_rate = (i + 1) / overall_secs if overall_secs > 0 else 0.0
+                chunk_rate = chunk_iters / chunk_secs if chunk_secs > 0 else 0.0
+                remaining = num_iterations - (i + 1)
+                eta = remaining / overall_rate if overall_rate > 0 else 0.0
                 util0_chunk = (utils[0] - last_utils[0]) / num_iterations * self.log_points * 2
                 util1_chunk = (utils[1] - last_utils[1]) / num_iterations * self.log_points * 2
-                tqdm.write(f"Iter {i + 1}: P0 Util: {util0_chunk:.4f}, P1 Util: {util1_chunk:.4f}")
+                print(
+                    f"[train] iter {i + 1:>10,}/{num_iterations:,} "
+                    f"({100*(i+1)/num_iterations:>3.0f}%) | "
+                    f"chunk {chunk_rate:>5.0f} it/s | "
+                    f"overall {overall_rate:>5.0f} it/s | "
+                    f"ETA {time.strftime('%H:%M:%S', time.gmtime(eta))} | "
+                    f"cap={self.capacity:,} rows={int(self.state[0]):,} | "
+                    f"P0={util0_chunk:+.4f} P1={util1_chunk:+.4f}",
+                    flush=True,
+                )
                 utility_log[f"P0 Utility at Iter {i + 1}"] = f"{util0_chunk:.4f}"
                 utility_log[f"P1 Utility at Iter {i + 1}"] = f"{util1_chunk:.4f}"
-                last_utils = list(utils)
-        return utils[0] * 2 / num_iterations, utils[1] * 2 / num_iterations, utility_log
+                last_utils = utils.copy()
+                last_log_time = now
+                last_log_iter = i + 1
+                log_point_counter += 1
+
+                if (snapshot_callback is not None
+                        and log_point_counter % snapshot_every_log_points == 0):
+                    snap, _ = self.get_final_flat_strategy(
+                        drop_check_only=True, clear_lows_threshold=0.01)
+                    snapshot_callback(i + 1, snap)
+
+        return (
+            float(utils[0]) * 2 / num_iterations,
+            float(utils[1]) * 2 / num_iterations,
+            utility_log,
+        )
+
+    # -- export -----------------------------------------------------------
+
+    def get_final_strategy_dict(self) -> Dict[str, np.ndarray]:
+        """Returns the averaged strategy as `{make_key-string: np.ndarray}`,
+        ready to feed to lbr.lbr_exploitability or head_to_head."""
+        id_to_abs = [None] * len(self._abs_to_id)
+        for s, i in self._abs_to_id.items():
+            id_to_abs[i] = s
+
+        out: Dict[str, np.ndarray] = {}
+        for key in list(self.key_to_row.keys()):
+            row = int(self.key_to_row[key])
+            hand_size = key & 0xF
+            last_bet = (key >> LAST_BET_SHIFT) & 0xFF
+            h_m1_id = (key >> H_M1_SHIFT) & 0xFF
+            h_m2_id = (key >> H_M2_SHIFT) & 0xFF
+            abs_id = key >> ABS_ID_SHIFT
+
+            key_str = f"{hand_size}-{last_bet}-"
+            if h_m1_id != ABSENT_CODE:
+                key_str += _HISTORY_CODE_STRS[h_m1_id] + "-"
+                if h_m2_id != ABSENT_CODE:
+                    key_str += _HISTORY_CODE_STRS[h_m2_id] + "-"
+            key_str += id_to_abs[abs_id]
+
+            lower = int(self.lower_action[row])
+            upper = int(self.upper_action[row])
+            ssum = self.strategy_sum[row, lower:upper + 1].astype(np.float64)
+            total = ssum.sum()
+            if total > 0:
+                strategy = ssum / total
+            else:
+                strategy = np.zeros(upper - lower + 1, dtype=np.float64)
+                strategy[-1] = 1.0
+            out[key_str] = strategy
+        return out
+
+    def get_final_flat_strategy(self, drop_check_only: bool = True,
+                                clear_lows_threshold: float = 0.01):
+        """Build a `FlatStrategy` (defined in `lbr.py`) from the
+        trainer's averaged strategy arrays. Cheaper than
+        `get_final_strategy_dict()` for the save path because we skip the
+        string-key intermediate. Returns the strategy AND the number of
+        non-check-only rows actually included (useful for metadata).
+
+        Args:
+            drop_check_only: if True (default), rows where the cleaned
+                strategy is 100% check (i.e. all mass on action 88) are
+                NOT stored. Matches the legacy CSV convention; the JIT
+                lookup defaults to check-100% on missing keys.
+            clear_lows_threshold: enable flag only, NOT a tunable cutoff.
+                Any positive value turns cleaning ON; when enabled, any
+                probability below an absolute 0.01 is zeroed and the
+                remainder renormalised (the 0.01 cutoff is hardcoded in
+                `clear_lows`). Set to 0 to skip cleaning entirely.
+        """
+        # Local import: avoids circular dependency at module load time.
+        from cfr_ai.lbr import FlatStrategy
+        from cfr_ai.encoding import clear_lows
+        from numba.typed import Dict as _NbDict
+        from numba import types as _types
+
+        id_to_abs = [None] * len(self._abs_to_id)
+        for s, i in self._abs_to_id.items():
+            id_to_abs[i] = s
+        abs_str_to_id = dict(self._abs_to_id)
+
+        # Pre-scan: count rows we'll keep (after drop_check_only).
+        keep_indices: List[int] = []
+        keep_keys: List[int] = []
+        keep_cleaned: List[np.ndarray] = []
+        for key in list(self.key_to_row.keys()):
+            row = int(self.key_to_row[key])
+            lower = int(self.lower_action[row])
+            upper = int(self.upper_action[row])
+            ssum = self.strategy_sum[row, lower:upper + 1].astype(np.float64)
+            total = ssum.sum()
+            if total > 0:
+                strat = ssum / total
+            else:
+                strat = np.zeros(upper - lower + 1, dtype=np.float64)
+                strat[-1] = 1.0
+            if clear_lows_threshold > 0:
+                strat = clear_lows(strat)
+            if drop_check_only and strat[-1] >= 1.0:
+                continue
+            keep_keys.append(int(key))
+            keep_indices.append(row)
+            keep_cleaned.append(strat.astype(np.float32))
+
+        n = len(keep_keys)
+        keys_arr = np.array(keep_keys, dtype=np.int64)
+        lower_arr = np.empty(n, dtype=np.int16)
+        upper_arr = np.empty(n, dtype=np.int16)
+        probs_arr = np.zeros((n, 89), dtype=np.float32)
+        for i, (row, cleaned) in enumerate(zip(keep_indices, keep_cleaned)):
+            lo = int(self.lower_action[row])
+            hi = int(self.upper_action[row])
+            lower_arr[i] = lo
+            upper_arr[i] = hi
+            probs_arr[i, lo:hi + 1] = cleaned[:hi - lo + 1]
+
+        # Sort by composite key so the on-disk layout matches what
+        # `strategy_io.save_strategy` would write, and the typed.Dict
+        # build order matches future reads. (save_strategy will resort
+        # anyway, but doing it here lets us reuse the keys array.)
+        order = np.argsort(keys_arr, kind="stable")
+        keys_arr = keys_arr[order]
+        lower_arr = lower_arr[order]
+        upper_arr = upper_arr[order]
+        probs_arr = probs_arr[order]
+
+        key_to_row = _NbDict.empty(key_type=_types.int64, value_type=_types.int64)
+        for i in range(n):
+            key_to_row[np.int64(keys_arr[i])] = np.int64(i)
+
+        return FlatStrategy(
+            key_to_row=key_to_row,
+            strategy=probs_arr,
+            lower_action=lower_arr,
+            upper_action=upper_arr,
+            abs_str_to_id=abs_str_to_id,
+            min_bet=int(self.min_bet),
+        ), n
+
+    def get_diagnostic_arrays(self):
+        """Return the per-row diagnostic arrays, sorted by composite key in
+        the canonical order (same ordering `save_strategy` produces, so
+        rows in `diagnostic.npz` align 1-to-1 with the corresponding rows
+        of `strategy.npz` for the SHARED keys).
+
+        Returns a dict with: keys, lower, upper, regrets, strategy_sum,
+        first_touched, last_touched, times_touched.
+
+        Includes ALL infosets (the check-only ones that `strategy.npz` drops
+        are still present here, so the diagnostic file is a superset of the
+        deployment file). Trim with `keep[mask]` if you want only the rows
+        in `strategy.npz`.
+
+        SIDE EFFECT: to release RAM, this nulls `self.regrets` and
+        `self.strategy_sum` as it extracts them. Call this AFTER any
+        `get_final_*` export; calling those afterwards will fail because the
+        underlying arrays are gone."""
+        n = self.n_rows
+        # Snapshot the live row arrays.
+        keys = np.empty(n, dtype=np.int64)
+        for k, row in self.key_to_row.items():
+            keys[int(row)] = int(k)
+        order = np.argsort(keys, kind="stable")
+        keys = keys[order]
+        # Small arrays: index the [:n] view once each (one fresh array apiece).
+        lower = self.lower_action[:n][order]
+        upper = self.upper_action[:n][order]
+        first_touched = self.first_touched[:n][order]
+        last_touched = self.last_touched[:n][order]
+        times_touched = self.times_touched[:n][order]
+        # Reorder each via a single fancy-index then drop trainer's own array to avoid RAM usage spike
+        regrets = self.regrets[:n][order].astype(np.float32, copy=False)
+        self.regrets = None
+        strategy_sum = self.strategy_sum[:n][order]
+        self.strategy_sum = None
+        return {
+            "keys": keys,
+            "lower": lower,
+            "upper": upper,
+            "regrets": regrets,
+            "strategy_sum": strategy_sum,
+            "first_touched": first_touched,
+            "last_touched": last_touched,
+            "times_touched": times_touched,
+        }
+
+
+@njit(cache=False)
+def _seed_numba(seed):
+    np.random.seed(seed)
