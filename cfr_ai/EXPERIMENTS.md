@@ -33,7 +33,7 @@ V1 → V2 → V2.1 → V3 → V3.1 → V3.2; every experiment below is tagged wi
 | **V2.1** | Hyperparameter *consolidation*: penalty **0**, pruning **−10/−12**, the byte-identical fast `get_hand_abstraction`. No structural change. | ≈ V2 strength, **~40% faster** to train and slightly *less* exploitable (penalty removal moved it closer to Nash). | `cfr_ai/outputs` (until V3) |
 | **V3** | V2.1 + two independent additions: **augmenting action macros** (3 per infoset, for total ≥ 7) and **min_bet = 27 for total ≥ 13**. | Beats V2.1 head-to-head (**0.535** whole-game) and **flips greedy Perun from a loss to a win** (0.489 → **0.538**). Anchor for the V3.1 round. | `cfr_ai/outputs` |
 | **V3.1** | V3 + total-7 → **value-only @ 10M** (concrete) + **suits@root for total ≥ 17**; ranks@root dropped, flush-refinement deferred. | Validated no-regression refinement of V3: whole-game vs **greedy Perun 0.550** (V3 0.538), vs **V3 0.507** (no-regression), vs **V1 0.534** (V3 0.525) — **+0.7–1.2 pt over V3 across all three independent yardsticks**. Gains localized to total-7 (value-only) and total-22 / 11,11 (suits@root). **Anchor for the V3.2 round** (since superseded). | `cfr_ai/experiments/v31` (box), with its own info_set snapshot (pre the V3.2 suit-flag drop) |
-| **V3.2** (anchor) | V3.1 + the §5.7/§5.8 ingredients: **11-v-11 opening floor `min_bet = 65`** (last full house) and **dropping the round-6 suit-flag** on the total-7 setups (`1_6`/`2_5`/`3_4` → the plain value multiset; the decompressed-flush-band probe was shelved). V3.2 info_set snapshot (md5 `9595e646`). | Net-neutral-to-positive vs V3.1 on the aggregate while fixing the 11-v-11 endgame. Its iteration-scaled instances keep paying: **V3.2x2** (2×, the deployed model) reached 0.564 vs greedy Perun / 0.541 vs V1; **V3.2x4** (4×: macros 20M, value-only 40M) is the strongest model on every axis — vs greedy Perun **0.572**, vs V3.2x2 **0.518**, vs V3.1 **0.531**, vs V1 **0.554** (§5.10) — deployment pending. **Current anchor.** | box `experiments/v32` (config) / `v32x2` (deployed) / `v32x4` (= local `cfr_ai/outputs`); live on Lambda |
+| **V3.2** (anchor) | V3.1 + the §5.7/§5.8 ingredients: **11-v-11 opening floor `min_bet = 65`** (last full house) and **dropping the round-6 suit-flag** on the total-7 setups (`1_6`/`2_5`/`3_4` → the plain value multiset; the decompressed-flush-band probe was shelved). V3.2 info_set snapshot (md5 `9595e646`). | Net-neutral-to-positive vs V3.1 on the aggregate while fixing the 11-v-11 endgame. Its iteration-scaled instances keep paying: **V3.2x2** (2×) reached 0.564 vs greedy Perun / 0.541 vs V1; **V3.2x4** (4×: macros 20M, value-only 40M) is the strongest model on every axis — vs greedy Perun **0.572**, vs V3.2x2 **0.518**, vs V3.1 **0.531**, vs V1 **0.554** — and is **deployed** (2026-06-11, uint8-quantised serving payload; §5.10). **Current anchor.** | box `experiments/v32` (config) / `v32x2` / `v32x4` (deployed, = local `cfr_ai/outputs`); live on Lambda |
 
 V1 was historically tagged `v0`/`v0_baseline`; the archive is now consolidated to a
 single `v1` snapshot. V2's hyperparameters (pruning −20/−22, per-setup penalty
@@ -681,11 +681,18 @@ also drops 36% more near-zero entries) and the total faulted payload by **56%**,
 shift of only **0.47% total-variation** (vs uint16's 0.003%). The cost is in the tail: ~13% of infosets shift
 > 1% TV, the most-likely action flips in 1.25%, and uint8 truncates the rare-action mass uint16 keeps (mean
 0.15%, up to 8.9% in a few hundred infosets) — a concern for *exploitability* (the rare mixing that resists a
-best-responder) more than for win-rate against greedy Perun. It is held as an option pending a head-to-head
-(uint8 vs uint16, plus a small-setup LBR) before any redeploy. Both the mmap layout and any future
-quantisation matter most for V3.2x4, whose even larger strategies would otherwise load more slowly still.
+best-responder) more than for win-rate against greedy Perun. The head-to-head gate was run on 2026-06-10
+against V3.2x4: a uint8-quantised staging of the model played its uint16 twin over 20k whole games (the
+macro masses rescaled by the same per-row factor, so the serve-time fold stays on one scale) and scored
+**0.5018 ± 0.0035** — statistically dead even, so the quantisation is strength-neutral against a sibling.
+It was adopted for the serving image: `write_mmap_layout` gained a `value_bits` parameter (16 remains the
+full-fidelity default used for evaluation staging; 8 is the serving option) and `stage_for_docker.py` stages
+the image at 8 bits, cutting the payload that first-loads page-fault by ~a third. The one caveat a sibling
+H2H cannot resolve — exploitability risk from the truncated rare mixing — remains open pending an LBR pass
+on a quantised staging. Both the mmap layout and the quantisation matter most for V3.2x4, whose larger
+strategies would otherwise load more slowly still.
 
-## 5.10 V3.2x4 — 4× retrain (validated; deployment pending)
+## 5.10 V3.2x4 — 4× retrain (deployed)
 
 V3.2x4 retrains the same V3.2 abstraction at four times the iterations — 20M for the macro setups
 (total ≥ 8) and 40M for the value-only ones (total ≤ 7) — with the min-bet scheme unchanged (11-v-11 at
@@ -719,6 +726,15 @@ thin (~+0.4–0.6 pp class-wide) but compound over a ~19-round game into the who
 conclusion for any further compute: **the large-total macro setups remain undertrained at 20M iterations**
 — 7_8 absorbed both doublings productively and the totals-18–21 endgame keeps gaining — while the
 value-only band is done; further iteration spend should go to the macro setups only, biggest first.
+
+V3.2x4 was deployed to the production Lambda on 2026-06-11 with the **uint8-quantised** serving payload
+(§5.9's gate having passed at 0.5018 over 20k games). Although the raw training outputs grew ~30% over
+V3.2x2 (almost entirely diagnostics, which never ship), the served payload is capped by `clear_lows` and
+the sparse format — non-checking rows grew only +7% and nonzeros +5% — so at 8 bits the staged payload came
+to **1.68 GB** (vs 2.66 GB for the uint16 V3.2x2 image) and the image *shrank* relative to its predecessor.
+Deployed via the usual cycle (stage → arm64 build → ECR push → digest-pinned cutover with the prior image
+captured as the rollback target); the in-container check confirmed uint8 values/masses, int32 offsets, and
+the x4 row counts on all 66 setups.
 
 ---
 

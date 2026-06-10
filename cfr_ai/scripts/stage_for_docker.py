@@ -115,8 +115,10 @@ def main() -> int:
             continue
         # Write the mmap layout into the SAME setup_dir, then drop the
         # original compressed file (we don't ship it — the agent will
-        # only ever read the split layout).
-        write_mmap_layout(str(setup_dir), str(setup_dir))
+        # only ever read the split layout). The image ships uint8-quantised
+        # probabilities (validated strength-neutral vs uint16, H2H 0.5018
+        # over 20k games): ~34% less payload to page-fault on first load.
+        write_mmap_layout(str(setup_dir), str(setup_dir), value_bits=8)
         (setup_dir / "strategy.npz").unlink()
         n_converted += 1
     print(f"[stage] converted {n_converted} setups to mmap layout", flush=True)
