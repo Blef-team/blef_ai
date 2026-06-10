@@ -1,6 +1,8 @@
 """Parallel CFR retraining + LBR orchestrator for a Hetzner CCX-class box.
 
-Designed for the canonical retrain workflow (16-vCPU dedicated, 64 GB RAM):
+Designed for the canonical retrain workflow on a dedicated CCX-class box
+(validated on a CCX33: 8 vCPU, 30.6 GiB RAM, no swap — size --workers to the
+box's vCPUs and run under a systemd transient unit with a MemoryMax cap):
   Phase 1: train all 66 setups (with periodic LBR-1 snapshots during training).
   Phase 2: production-quality LBR-1 (writes summary + per-setup metadata).
   Phase 3: LBR-2 (run as many setups as the remaining budget allows).
@@ -19,9 +21,11 @@ Resumable: a job whose expected output already exists is skipped. If the
 orchestrator gets SIGTERM'd or the instance reboots, restarting it picks up
 where it left off without re-running completed work.
 
-Usage on the Hetzner box (in tmux):
+Usage on the Hetzner box (as a systemd transient unit — survives SSH drops
+and an OOM kills one child instead of the whole session; see the launch
+template at the end of hetzner_setup.sh):
     python -m cfr_ai.scripts.hetzner_run \\
-        --workers 16 --iter 5000000 --phases train,lbr1,lbr2
+        --workers 8 --iter 5000000 --phases train,lbr1,lbr2
 
 Monitor from outside:
     cat cfr_ai/outputs/_progress.json | python -m json.tool
@@ -338,8 +342,9 @@ class Runner:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--workers", type=int, default=16,
-                    help="Parallel processes (default 16 — match CCX43 vCPUs).")
+    ap.add_argument("--workers", type=int, default=8,
+                    help="Parallel processes — match the box's vCPUs (8 on the "
+                         "CCX33 this workflow is validated on).")
     ap.add_argument("--iter", type=int, default=5_000_000,
                     help="MCCFR iterations per setup (default 5M).")
     ap.add_argument("--log-points", type=int, default=20)

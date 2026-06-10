@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# One-shot setup for a fresh Hetzner CCX43 (Ubuntu) box, intended to be run
+# One-shot setup for a fresh Hetzner CCX-class (Ubuntu) box, intended to be run
 # AFTER the local `cfr_ai/` tree has been rsync'd into ~/blef_ai/ on the box.
 #
 # Installs system deps + Python deps, then runs a 50-iter warmup so the
@@ -57,4 +57,12 @@ fs, _ = t.get_final_flat_strategy(drop_check_only=True, clear_lows_threshold=0.0
 t0 = time.time(); lbr_exploitability([1,1], 0, fs, depth=1, n_belief_samples=50, n_lbr_hand_samples=50, show_progress=False); print(f'  lbr JIT compile + tiny eval: {time.time()-t0:.1f}s')
 "
 
-echo "[setup] done. Next: tmux new -s retrain; python -m cfr_ai.scripts.hetzner_run --workers 16"
+# Run long jobs as systemd transient units, NOT tmux: they survive SSH drops,
+# self-heal on crashes (Restart=on-failure), and MemoryMax caps the cgroup so
+# an OOM kills one process instead of the box (a tmux server dies with the
+# session, and the kernel OOM killer has taken out a whole tmux tree before).
+echo "[setup] done. Next (size --workers to the box's vCPUs, e.g. 8 on a CCX33):"
+echo "  systemd-run --unit=retrain --service-type=exec -p Restart=on-failure \\"
+echo "    -p MemoryMax=28G -p WorkingDirectory=$ROOT \\"
+echo "    -p StandardOutput=append:$ROOT/retrain.log -p StandardError=append:$ROOT/retrain.log \\"
+echo "    $ROOT/.venv/bin/python -m cfr_ai.scripts.hetzner_run --workers 8"
