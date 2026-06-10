@@ -33,7 +33,7 @@ V1 → V2 → V2.1 → V3 → V3.1 → V3.2; every experiment below is tagged wi
 | **V2.1** | Hyperparameter *consolidation*: penalty **0**, pruning **−10/−12**, the byte-identical fast `get_hand_abstraction`. No structural change. | ≈ V2 strength, **~40% faster** to train and slightly *less* exploitable (penalty removal moved it closer to Nash). | `cfr_ai/outputs` (until V3) |
 | **V3** | V2.1 + two independent additions: **augmenting action macros** (3 per infoset, for total ≥ 7) and **min_bet = 27 for total ≥ 13**. | Beats V2.1 head-to-head (**0.535** whole-game) and **flips greedy Perun from a loss to a win** (0.489 → **0.538**). Anchor for the V3.1 round. | `cfr_ai/outputs` |
 | **V3.1** | V3 + total-7 → **value-only @ 10M** (concrete) + **suits@root for total ≥ 17**; ranks@root dropped, flush-refinement deferred. | Validated no-regression refinement of V3: whole-game vs **greedy Perun 0.550** (V3 0.538), vs **V3 0.507** (no-regression), vs **V1 0.534** (V3 0.525) — **+0.7–1.2 pt over V3 across all three independent yardsticks**. Gains localized to total-7 (value-only) and total-22 / 11,11 (suits@root). **Anchor for the V3.2 round** (since superseded). | `cfr_ai/experiments/v31` (box), with its own info_set snapshot (pre the V3.2 suit-flag drop) |
-| **V3.2** (anchor) | V3.1 + the §5.7/§5.8 ingredients: **11-v-11 opening floor `min_bet = 65`** (last full house) and **dropping the round-6 suit-flag** on the total-7 setups (`1_6`/`2_5`/`3_4` → the plain value multiset; the decompressed-flush-band probe was shelved). V3.2 info_set snapshot (md5 `9595e646`). | Net-neutral-to-positive vs V3.1 on the aggregate while fixing the 11-v-11 endgame. **Deployed as V3.2x2** — the same config retrained at 2× iterations (macros 10M, value-only 20M) — the strongest model on every axis: vs greedy Perun **0.564**, vs V3.1 **0.524**, vs V3.2 **0.526**, vs V1 **0.541**. **Current anchor.** V3.2x4 (4×) in progress (§5.10). | box `experiments/v32` (config) / `v32x2` (deployed, = local `cfr_ai/outputs`); live on Lambda |
+| **V3.2** (anchor) | V3.1 + the §5.7/§5.8 ingredients: **11-v-11 opening floor `min_bet = 65`** (last full house) and **dropping the round-6 suit-flag** on the total-7 setups (`1_6`/`2_5`/`3_4` → the plain value multiset; the decompressed-flush-band probe was shelved). V3.2 info_set snapshot (md5 `9595e646`). | Net-neutral-to-positive vs V3.1 on the aggregate while fixing the 11-v-11 endgame. Its iteration-scaled instances keep paying: **V3.2x2** (2×, the deployed model) reached 0.564 vs greedy Perun / 0.541 vs V1; **V3.2x4** (4×: macros 20M, value-only 40M) is the strongest model on every axis — vs greedy Perun **0.572**, vs V3.2x2 **0.518**, vs V3.1 **0.531**, vs V1 **0.554** (§5.10) — deployment pending. **Current anchor.** | box `experiments/v32` (config) / `v32x2` (deployed) / `v32x4` (= local `cfr_ai/outputs`); live on Lambda |
 
 V1 was historically tagged `v0`/`v0_baseline`; the archive is now consolidated to a
 single `v1` snapshot. V2's hyperparameters (pruning −20/−22, per-setup penalty
@@ -685,7 +685,7 @@ best-responder) more than for win-rate against greedy Perun. It is held as an op
 (uint8 vs uint16, plus a small-setup LBR) before any redeploy. Both the mmap layout and any future
 quantisation matter most for V3.2x4, whose even larger strategies would otherwise load more slowly still.
 
-## 5.10 V3.2x4 — 4× retrain (in progress)
+## 5.10 V3.2x4 — 4× retrain (validated; deployment pending)
 
 V3.2x4 retrains the same V3.2 abstraction at four times the iterations — 20M for the macro setups
 (total ≥ 8) and 40M for the value-only ones (total ≤ 7) — with the min-bet scheme unchanged (11-v-11 at
@@ -693,8 +693,32 @@ V3.2x4 retrains the same V3.2 abstraction at four times the iterations — 20M f
 memory per worker than V3.2x2's 10M, so this round trains 6-wide rather than 8-wide to stay under the
 box's 30 GB, with a 28 GiB cgroup backstop. Two transient units drive it: `v32x4` does the training, and
 `v32x4eval` waits for all 66 strategies, mmap-stages every model, then runs the 8-wide whole-game suite —
-against V3.2x2 (the central question of whether 4× beats 2×), V3.1, V1, and greedy Perun. Estimated wall
-time is ~40–50 h. _[results pending]_
+against V3.2x2 (the central question of whether 4× beats 2×), V3.1, V1, and greedy Perun.
+
+**Results (2026-06-10; 20k games per matchup, SE 0.0035).** Training finished after ~40 h wall ≈ 233 CPUh;
+the measured x4/x2 cost ratio is **1.64** CPU-weighted — the same pruning-driven sublinearity as the first
+doubling's 1.66. The eval confirmed V3.2x4 as the strongest model on every axis: **0.5184 vs V3.2x2** (the
+central question — ≈ 5σ), 0.5310 vs V3.1, 0.5544 vs V1, and **0.5716 vs greedy Perun** (V3.2x2 scored
+0.5638). The second doubling bought +1.8 pt directly where the first bought +2.4–2.6: diminishing returns,
+but compute is not exhausted. (Operationally, the eval itself cost ~1 h: once the strategies are mmap-staged
+and cached, the CFR-vs-CFR games run at lookup speed — 20k whole games in ~30–45 s — and only the Perun leg,
+bound by NFSP inference, takes its usual ~hour.)
+
+**Where the gains occur — the undertraining map** (per-setup decomposition of both 20k-game round logs,
+~385k rounds each, rounds pooled by unordered setup; within a cell rounds come from distinct games, so the
+per-cell binomial test is exact). The **value-only setups (total ≤ 7) are statistical zero in both
+doublings** — round-win 0.5012 (z = +0.8) then 0.5018 (z = +1.3) on n = 120k each. They were already
+converged at vanilla V3.2's iteration level, at least as far as head-to-head strength can detect (§4.2's
+LBR view shows exploitability still improving there, but a near-equal sibling cannot punish it). The
+**macro setups (total ≥ 8) carry the entire gain**: 0.5060 (z = +6.2) for the first doubling, 0.5042
+(z = +4.3) for the second, on n ≈ 266k each. Within the macro class the biggest movers shift toward the
+endgame as iterations grow — the first doubling's stars were 7_8 (0.5153, z = 3.4), 11_11 (0.5198, z = 2.9)
+and 10_11 (z = 2.4); the second's were **9_11 (0.5208, z = 3.9** — the one cell that survives a strict ×66
+Bonferroni correction**)**, 10_10 (0.5202, z = 3.0) and again 7_8 (0.5135, z = 3.0). The per-round edges are
+thin (~+0.4–0.6 pp class-wide) but compound over a ~19-round game into the whole-game margins. The
+conclusion for any further compute: **the large-total macro setups remain undertrained at 20M iterations**
+— 7_8 absorbed both doublings productively and the totals-18–21 endgame keeps gaining — while the
+value-only band is done; further iteration spend should go to the macro setups only, biggest first.
 
 ---
 
