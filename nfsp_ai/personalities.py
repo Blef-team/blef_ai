@@ -146,16 +146,16 @@ PERSONALITIES: dict[str, PersonalityConfig] = {
              "real probability-grounded 'reading', not faked adaptivity.",
     ),
     "mokosh": PersonalityConfig(
-        source="pi", risk=-0.4, guard=0.8, susp=0.4, tempo=-1.5, chaos=-0.2,
-        mood="tighten_late", mood_params={"kr": 0.8, "ks": 0.8},
+        source="pi", risk=-0.4, guard=0.8, susp=0.4, tempo=-2.0, chaos=-0.2,
+        mood="tighten_late", mood_params={"kr": 0.8, "ks": 1.2},
         note="Weaver. Measured minimal raises, concealed; tightens and grows "
              "more suspicious as the game deepens (dangerous late).",
     ),
     "triglav": PersonalityConfig(
-        source="pi", risk=0.0, guard=0.3, susp=0.0, tempo=0.0, chaos=0.0,
+        source="pi", risk=0.0, guard=0.3, susp=0.0, tempo=0.0, chaos=0.3,
         mood="phase_ramp",
-        mood_params={"risk_early": -0.8, "risk_late": 1.0,
-                     "tempo_early": -1.0, "tempo_late": 1.0,
+        mood_params={"risk_early": -1.2, "risk_late": 1.5,
+                     "tempo_early": -1.0, "tempo_late": 1.5,
                      "guard_early": 0.5, "guard_late": 0.0},
         note="Strategist. Three modes by game depth: conservative early, "
              "analytical mid, aggressive late ('all paths converge').",

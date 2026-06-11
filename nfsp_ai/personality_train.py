@@ -499,6 +499,15 @@ def resample_to_honest(
         return a
 
 
+def _legal_bet_ids(legal_mask, check_action_id: int) -> list:
+    """Return the sorted list of legal BET action ids (CHECK excluded)."""
+    if hasattr(legal_mask, "detach"):
+        mask_arr = legal_mask.detach().cpu().numpy()
+    else:
+        mask_arr = np.asarray(legal_mask)
+    return [aid for aid in range(int(check_action_id)) if mask_arr[aid] > 0]
+
+
 def resample_to_aggressive(
     intended_action: int,
     legal_mask,
@@ -508,17 +517,29 @@ def resample_to_aggressive(
     rng,
 ) -> int:
     """With probability ``aggression_bias``, replace the opponent's intended
-    action with the HIGHEST legal bet (max-escalation). CHECK is never
-    overridden (CHECK is the round-ending signal, not an escalation choice).
+    action with a uniform pick from the **top quartile** of legal bets.
+    CHECK is never overridden (CHECK is the round-ending signal, not an
+    escalation choice).
 
-    Used in mechanism E to train a bot against an always-escalating
+    Earlier versions of this resampler picked the single MAX legal bet,
+    which collapsed the opponent's action distribution to a deterministic
+    point and overfit the trained policy off-distribution (POC 2026-06-09:
+    mokosh CHK 0.066, bluff 0.877, wr 0.054). Quartile sampling preserves
+    the diversity the trained policy needs to generalise while still
+    pushing the opponent's distribution clearly upward.
+
+    Used in mechanism E to train a bot against an always-aggressive
     opponent — the bot's optimal response is patient defence (CHECK more
     often, don't overcommit, let escalators tire themselves out). At
-    inference vs an actual passive / Conservative opponent, this trait
-    presents as the bot being measurably more defensive than baseline.
+    inference vs an actual non-aggressive opponent, the trait presents as
+    the bot being measurably more defensive than baseline.
 
-    If the intended action is already the max legal bet (or if no bets are
-    legal at all, only CHECK), the intended action is returned unchanged.
+    Boundary behaviour:
+      - If fewer than 4 legal bets exist, the "top quartile" is taken to
+        be all legal bets at or above the median index — this preserves
+        the upward shift even when the action space is small.
+      - If no legal bets exist (only CHECK), the intended action is
+        returned unchanged.
     """
     a = int(intended_action)
     if aggression_bias <= 0.0 or a == int(check_action_id):
@@ -528,18 +549,22 @@ def resample_to_aggressive(
             return a
     except Exception:
         return a
-    if hasattr(legal_mask, "detach"):
-        mask_arr = legal_mask.detach().cpu().numpy()
-    else:
-        mask_arr = np.asarray(legal_mask)
-    max_bet = -1
-    for aid in range(int(check_action_id) - 1, -1, -1):
-        if mask_arr[aid] > 0:
-            max_bet = aid
-            break
-    if max_bet < 0 or max_bet == a:
+    legal = _legal_bet_ids(legal_mask, check_action_id)
+    if not legal:
         return a
-    return int(max_bet)
+    # Top quartile: indices in [3/4 * n, n). When n < 4 this collapses to
+    # the upper half; when n == 1 it's that single bet.
+    n = len(legal)
+    cutoff = max(0, (3 * n) // 4)
+    upper = legal[cutoff:]
+    if not upper:
+        upper = legal[len(legal) // 2:]   # defensive fallback
+    if not upper:
+        return a
+    try:
+        return int(rng.choice(upper))
+    except Exception:
+        return int(upper[-1])
 
 
 def resample_to_passive(
@@ -551,17 +576,27 @@ def resample_to_passive(
     rng,
 ) -> int:
     """With probability ``passivity_bias``, replace the opponent's intended
-    action with CHECK if legal, else with the LOWEST legal bet.
+    action with a passive choice — either CHECK (if legal) or a uniform
+    pick from the **bottom quartile** of legal bets. When CHECK is legal,
+    we pick it 50% of the time and bottom-quartile-bet the other 50%; when
+    CHECK is illegal, we always pick from the bottom quartile.
+
+    Earlier versions deterministically returned CHECK (or the single MIN
+    legal bet when CHECK was illegal), which collapsed the opponent's
+    action distribution and overfit the trained policy off-distribution
+    (POC 2026-06-09: triglav CHK 0.525, bluff 0.179, wr 0.244 — trait
+    inverted). The 50/50 mix + quartile sampling preserves diversity.
 
     Used in mechanism E to train a bot against a perpetually-passive
     opponent — the bot's optimal response is to press hard: open
     aggressively, escalate, treat opponents as foldable. At inference
-    against an actual non-passive opponent, this trait presents as the bot
-    being measurably more aggressive than baseline (higher opening bets,
-    lower CHECK rate, more bluffs).
+    against an actual non-passive opponent, the trait presents as the bot
+    being measurably more aggressive than baseline.
 
-    If the intended action is already CHECK (or CHECK is legal and that's
-    what we'd resample to), returns the intended action unchanged.
+    Boundary behaviour:
+      - If fewer than 4 legal bets exist, the "bottom quartile" is taken
+        to be all legal bets at or below the median index.
+      - If no legal bets exist (only CHECK is legal), CHECK is returned.
     """
     a = int(intended_action)
     if passivity_bias <= 0.0 or a == int(check_action_id):
@@ -575,14 +610,31 @@ def resample_to_passive(
         mask_arr = legal_mask.detach().cpu().numpy()
     else:
         mask_arr = np.asarray(legal_mask)
-    # Prefer CHECK if legal.
-    if mask_arr[int(check_action_id)] > 0:
+    check_legal = bool(mask_arr[int(check_action_id)] > 0)
+    legal = _legal_bet_ids(legal_mask, check_action_id)
+    if check_legal and (not legal):
         return int(check_action_id)
-    # Else lowest legal bet.
-    for aid in range(int(check_action_id)):
-        if mask_arr[aid] > 0:
-            return int(aid)
-    return a
+    # Choose between CHECK (50%) and a bottom-quartile bet (50%) when both
+    # are available. When CHECK is illegal, always sample a bottom-quartile
+    # bet.
+    if check_legal:
+        try:
+            if rng.random() < 0.5:
+                return int(check_action_id)
+        except Exception:
+            return int(check_action_id)
+    if not legal:
+        # CHECK was the only legal action (handled above) — defensive.
+        return a
+    n = len(legal)
+    cutoff = max(1, (n + 3) // 4)   # ceil(n/4)
+    lower = legal[:cutoff]
+    if not lower:
+        lower = legal[: max(1, n // 2)]   # defensive fallback
+    try:
+        return int(rng.choice(lower))
+    except Exception:
+        return int(lower[0])
 
 
 # ---------------------------------------------------------------------------

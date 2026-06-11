@@ -1,0 +1,7 @@
+{
+  "name": "triglav",
+  "obs_blind_spots": ["private_priors"],
+  "forbid_hand_types": ["High card"],
+  "greedy": false,
+  "head": "pi"
+}

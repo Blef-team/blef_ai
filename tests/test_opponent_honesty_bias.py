@@ -213,6 +213,9 @@ class HookTest(unittest.TestCase):
 
 
 class AggressionResamplerTest(unittest.TestCase):
+    """Quartile-sample redesign (2026-06-09). At full bias, output lands
+    uniformly in the top quartile of legal bets — not a single point —
+    preserving the diversity the trained policy needs to generalise."""
 
     def test_zero_bias_passthrough(self):
         mask = _legal_all(check_id=88)
@@ -222,16 +225,40 @@ class AggressionResamplerTest(unittest.TestCase):
         )
         self.assertEqual(out, 10)
 
-    def test_full_bias_picks_max_legal(self):
+    def test_full_bias_stays_in_top_quartile(self):
+        # 88 legal bets [0..87]; top quartile cutoff = floor(3*88/4) = 66.
+        # All resampled actions must land in [66, 87].
         mask = _legal_all(check_id=88)
-        # Forbid action ids 80..87, so max legal bet is 79.
-        for aid in range(80, 88):
-            mask[aid] = 0.0
-        out = resample_to_aggressive(
-            intended_action=10, legal_mask=mask, check_action_id=88,
-            aggression_bias=1.0, rng=random.Random(0),
-        )
-        self.assertEqual(out, 79)
+        seen = set()
+        rng = random.Random(0)
+        for _ in range(400):
+            out = resample_to_aggressive(
+                intended_action=10, legal_mask=mask, check_action_id=88,
+                aggression_bias=1.0, rng=rng,
+            )
+            seen.add(out)
+        # All outputs in the upper quartile.
+        self.assertTrue(seen.issubset(set(range(66, 88))), msg=f"out: {seen}")
+        # And there's genuine spread (not a single point).
+        self.assertGreaterEqual(len(seen), 5,
+            msg=f"quartile sampling collapsed to {seen}")
+
+    def test_full_bias_partial_legal(self):
+        # Legal bets [10..29] (20 bets). Top quartile cutoff = 15 -> [25..29]
+        # (positions 15..19 in `legal` list, which are bets 25..29).
+        mask = np.zeros(89, dtype=np.float32)
+        for aid in range(10, 30):
+            mask[aid] = 1.0
+        seen = set()
+        rng = random.Random(7)
+        for _ in range(200):
+            out = resample_to_aggressive(
+                intended_action=10, legal_mask=mask, check_action_id=88,
+                aggression_bias=1.0, rng=rng,
+            )
+            seen.add(out)
+        self.assertTrue(seen.issubset({25, 26, 27, 28, 29}), msg=f"out: {seen}")
+        self.assertGreaterEqual(len(seen), 3)
 
     def test_check_never_overridden(self):
         mask = _legal_all(check_id=88)
@@ -244,15 +271,28 @@ class AggressionResamplerTest(unittest.TestCase):
     def test_no_legal_bets_passthrough(self):
         # Only CHECK is legal.
         mask = np.zeros(89, dtype=np.float32); mask[88] = 1.0
-        # Intended is a bet that's illegal — function should not crash.
         out = resample_to_aggressive(
             intended_action=10, legal_mask=mask, check_action_id=88,
             aggression_bias=1.0, rng=random.Random(0),
         )
         self.assertEqual(out, 10)
 
+    def test_single_legal_bet(self):
+        # Only one bet (id 5) and CHECK legal. Quartile collapses to the
+        # one bet.
+        mask = np.zeros(89, dtype=np.float32); mask[5] = 1.0; mask[88] = 1.0
+        out = resample_to_aggressive(
+            intended_action=5, legal_mask=mask, check_action_id=88,
+            aggression_bias=1.0, rng=random.Random(0),
+        )
+        # The only top-quartile pick is the single legal bet itself.
+        self.assertEqual(out, 5)
+
 
 class PassivityResamplerTest(unittest.TestCase):
+    """Quartile-sample redesign (2026-06-09). At full bias, 50/50 split
+    between CHECK (when legal) and a uniform pick from the bottom quartile
+    of legal bets."""
 
     def test_zero_bias_passthrough(self):
         mask = _legal_all(check_id=88)
@@ -262,24 +302,56 @@ class PassivityResamplerTest(unittest.TestCase):
         )
         self.assertEqual(out, 20)
 
-    def test_full_bias_picks_check_if_legal(self):
+    def test_full_bias_50_50_check_and_bottom_quartile(self):
+        # 88 legal bets [0..87] + CHECK. Bottom quartile bets are [0..21]
+        # (ceil(88/4) = 22 entries). At full bias we should see ~50% CHECK
+        # and ~50% bottom-quartile bets.
         mask = _legal_all(check_id=88)
-        out = resample_to_passive(
-            intended_action=20, legal_mask=mask, check_action_id=88,
-            passivity_bias=1.0, rng=random.Random(0),
-        )
-        self.assertEqual(out, 88)
+        rng = random.Random(0)
+        n = 800
+        n_check = 0
+        n_other = 0
+        bet_seen = set()
+        for _ in range(n):
+            out = resample_to_passive(
+                intended_action=50, legal_mask=mask, check_action_id=88,
+                passivity_bias=1.0, rng=rng,
+            )
+            if out == 88:
+                n_check += 1
+            else:
+                n_other += 1
+                bet_seen.add(out)
+        # CHECK fraction roughly 50%.
+        frac = n_check / n
+        self.assertGreater(frac, 0.40, msg=f"CHECK frac {frac:.2f}")
+        self.assertLess(frac, 0.60, msg=f"CHECK frac {frac:.2f}")
+        # All non-CHECK outputs in bottom quartile.
+        self.assertTrue(bet_seen.issubset(set(range(0, 22))),
+            msg=f"non-quartile: {bet_seen}")
+        # And spread across that quartile.
+        self.assertGreaterEqual(len(bet_seen), 5)
 
-    def test_check_illegal_falls_back_to_lowest_bet(self):
-        # CHECK illegal; only bets in [5, 10] legal.
+    def test_check_illegal_picks_bottom_quartile_only(self):
+        # CHECK illegal; only bets [5..29] legal (25 bets). Bottom quartile
+        # = first ceil(25/4) = 7 -> bets {5,6,7,8,9,10,11}.
         mask = np.zeros(89, dtype=np.float32)
-        for aid in range(5, 11):
+        for aid in range(5, 30):
             mask[aid] = 1.0
-        out = resample_to_passive(
-            intended_action=10, legal_mask=mask, check_action_id=88,
-            passivity_bias=1.0, rng=random.Random(0),
-        )
-        self.assertEqual(out, 5)
+        rng = random.Random(11)
+        seen = set()
+        n_check = 0
+        for _ in range(200):
+            out = resample_to_passive(
+                intended_action=25, legal_mask=mask, check_action_id=88,
+                passivity_bias=1.0, rng=rng,
+            )
+            if out == 88:
+                n_check += 1
+            else:
+                seen.add(out)
+        self.assertEqual(n_check, 0, msg="CHECK was illegal; never pick it")
+        self.assertTrue(seen.issubset(set(range(5, 12))), msg=f"out: {seen}")
 
     def test_already_check_unchanged(self):
         mask = _legal_all(check_id=88)
@@ -290,6 +362,7 @@ class PassivityResamplerTest(unittest.TestCase):
         self.assertEqual(out, 88)
 
     def test_partial_bias_split(self):
+        # At 0.5 bias: ~50% stay at 20, ~50% resample. Wide CI.
         mask = _legal_all(check_id=88)
         kept = 0; n = 400
         rng = random.Random(13)
@@ -301,8 +374,8 @@ class PassivityResamplerTest(unittest.TestCase):
             if out == 20:
                 kept += 1
         frac = kept / n
-        self.assertGreater(frac, 0.25)
-        self.assertLess(frac, 0.75)
+        self.assertGreater(frac, 0.30)
+        self.assertLess(frac, 0.70)
 
 
 class SpecValidationTest(unittest.TestCase):
@@ -349,20 +422,36 @@ class HookDispatchTest(unittest.TestCase):
             self.check_action_id = 88
             self.personality_spec = spec
 
-    def test_aggression_routes_to_max(self):
+    def test_aggression_routes_to_top_quartile(self):
         spec = PersonalityTrainSpec(name="x", opponent_aggression_bias=1.0)
         env = self._StubEnv("L", "O", self._StubDeckSpec(spec))
         mask = _legal_all(check_id=88)
-        # Max legal bet is 87 when full mask.
+        # 88 legal bets; top quartile = [66..87]. Output must land there.
         out = maybe_apply_opponent_honesty_bias(env, mask, 10, random.Random(0))
-        self.assertEqual(out, 87)
+        self.assertGreaterEqual(out, 66)
+        self.assertLessEqual(out, 87)
 
-    def test_passivity_routes_to_check(self):
+    def test_passivity_routes_to_check_or_bottom_quartile(self):
+        # Post-quartile-redesign: at full bias, passivity 50/50s between
+        # CHECK and a uniform pick from the bottom quartile of legal bets.
+        # Run many trials, confirm both CHECK and at least one bottom-
+        # quartile bet appear in the output set, and nothing outside.
         spec = PersonalityTrainSpec(name="x", opponent_passivity_bias=1.0)
         env = self._StubEnv("L", "O", self._StubDeckSpec(spec))
         mask = _legal_all(check_id=88)
-        out = maybe_apply_opponent_honesty_bias(env, mask, 10, random.Random(0))
-        self.assertEqual(out, 88)
+        seen = set()
+        rng = random.Random(0)
+        for _ in range(200):
+            out = maybe_apply_opponent_honesty_bias(env, mask, 50, rng)
+            seen.add(out)
+        # Allowed: CHECK (88) or bottom-quartile bets [0..21].
+        allowed = set(range(0, 22)) | {88}
+        self.assertTrue(seen.issubset(allowed), msg=f"out: {seen}")
+        # Both modes should appear.
+        self.assertIn(88, seen, msg="CHECK never picked")
+        self.assertTrue(
+            any(0 <= a < 22 for a in seen),
+            msg="bottom-quartile bet never picked")
 
     def test_learner_action_never_modified_by_any_knob(self):
         for field_name in ("opponent_honesty_bias",
