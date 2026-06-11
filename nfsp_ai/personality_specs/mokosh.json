@@ -1,0 +1,7 @@
+{
+  "name": "mokosh",
+  "forbid_hand_types": ["Full house", "Four of a kind", "Straight flush"],
+  "loss_multiplier": 0.8,
+  "greedy": false,
+  "head": "pi"
+}
