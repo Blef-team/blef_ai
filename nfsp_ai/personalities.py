@@ -235,13 +235,13 @@ PERSONALITIES: dict[str, PersonalityConfig] = {
     ),
     # --- Caretaker (TRAINED NFSP, replaces the conservative_crawling delegate) - #
     "domovoi": PersonalityConfig(
-        source="pi",
-        note="Caretaker. Trained NFSP biased toward loss-aversion + honest "
-             "simple claims (high card, pair, two pairs) + bluff-call bonus. "
-             "Replaces the previous conservative_crawling delegate. The "
-             "sculpt knobs are zero (no overlay); the trained-personality "
-             "checkpoint (artifacts/nfsp_inference_24_1v1_domovoi.pt) drives "
-             "the behavior. 'A quiet house hides many things.'",
+        source="pi", risk=0.5, guard=-0.5, susp=-0.4, tempo=0.8, chaos=1.8,
+        note="House spirit. Sculpt-only silly: high chaos (erratic but "
+             "in-distribution moves), readable (negative guard), gullible "
+             "(negative susp), overexcited raises (tempo). Trained ckpts "
+             "retired 2026-06-13 (runs/.bog_program/retired_domovoi/) — the "
+             "honesty-trained caretaker was too strong for the laughing "
+             "house-spirit art. 'The house laughs with you.'",
     ),
 }
 

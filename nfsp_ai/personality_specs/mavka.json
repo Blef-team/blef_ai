@@ -1,8 +1,8 @@
 {
   "name": "mavka",
-  "win_multiplier": 0.8,
-  "loss_multiplier": 2.5,
-  "bluff_caught_penalty": 0.5,
+  "win_multiplier": 0.9,
+  "loss_multiplier": 1.0,
+  "bluff_caught_penalty": 0.4,
   "greedy": false,
   "head": "pi"
 }

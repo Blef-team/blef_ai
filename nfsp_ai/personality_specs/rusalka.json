@@ -1,8 +1,7 @@
 {
   "name": "rusalka",
-  "hand_type_bias": {"Pair": 0.4, "Straight flush": 0.7, "Four of a kind": 0.5},
-  "bluff_caught_penalty": 0.2,
-  "opponent_honesty_bias": 0.3,
+  "obs_blind_spots": ["public_priors"],
+  "bluff_call_bonus": 0.2,
   "greedy": false,
   "head": "pi"
 }
