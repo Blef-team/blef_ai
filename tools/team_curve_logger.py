@@ -48,8 +48,8 @@ def main():
     poll = 120  # seconds; checkpoint saves usually less frequent than this
 
     ckpt = os.path.join(run, "checkpoints", "nfsp_blef.pt")
-    card = f"/Users/adriangolian/work/blef_ai/artifacts/card_embedding_pretrain_{deck}.pt"
-    hist = f"/Users/adriangolian/work/blef_ai/artifacts/history_embedding_pretrain_{deck}.pt"
+    card = os.path.join(_ROOT, "artifacts", f"card_embedding_pretrain_{deck}.pt")
+    hist = os.path.join(_ROOT, "artifacts", f"history_embedding_pretrain_{deck}.pt")
 
     print(f"[{label}] team-curve armed; ckpt={ckpt} games={games} seeds={seeds} poll={poll}s")
     sys.stdout.flush()

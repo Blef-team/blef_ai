@@ -233,15 +233,15 @@ PERSONALITIES: dict[str, PersonalityConfig] = {
         note="Trickster. Per-move chaos swings between genius and nonsense; "
              "self-destructive randomness ('lost already?'). Easiest NFSP god.",
     ),
-    # --- Caretaker (TRAINED NFSP, replaces the conservative_crawling delegate) - #
+    # --- House spirit (sculpt-only overlay on the baseline NFSP policy) ------- #
     "domovoi": PersonalityConfig(
         source="pi", risk=0.5, guard=-0.5, susp=-0.4, tempo=0.8, chaos=1.8,
         note="House spirit. Sculpt-only silly: high chaos (erratic but "
              "in-distribution moves), readable (negative guard), gullible "
-             "(negative susp), overexcited raises (tempo). Trained ckpts "
-             "retired 2026-06-13 (runs/.bog_program/retired_domovoi/) — the "
-             "honesty-trained caretaker was too strong for the laughing "
-             "house-spirit art. 'The house laughs with you.'",
+             "(negative susp), overexcited raises (tempo). Deliberately not a "
+             "trained personality — a strong honesty-trained caretaker plays "
+             "against the laughing house-spirit character. 'The house laughs "
+             "with you.'",
     ),
 }
 

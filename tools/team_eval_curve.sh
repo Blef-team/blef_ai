@@ -11,11 +11,12 @@ set -euo pipefail
 DECK="${1:?deck size required}"
 shift
 RUNS=("$@")
-PY="${PY:-/Users/adriangolian/work/blef_ai/venv_nfsp/bin/python}"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PY="${PY:-${REPO_ROOT}/venv_nfsp/bin/python}"
 ROOT="${ROOT:-/tmp/blef_train2}"
 
-CARD="/Users/adriangolian/work/blef_ai/artifacts/card_embedding_pretrain_${DECK}.pt"
-HIST="/Users/adriangolian/work/blef_ai/artifacts/history_embedding_pretrain_${DECK}.pt"
+CARD="${REPO_ROOT}/artifacts/card_embedding_pretrain_${DECK}.pt"
+HIST="${REPO_ROOT}/artifacts/history_embedding_pretrain_${DECK}.pt"
 
 GAMES=400
 SEEDS=3

@@ -17,7 +17,7 @@ Run from repo root:
   python -m tools.diagnose_buffer \\
     --checkpoint runs/<id>/checkpoints/nfsp_blef_NM.pt \\
     --metrics runs/<id>/metrics.csv \\
-    --output runs/.claude_overnight/diagnose_<id>.json
+    --output runs/diagnose_<id>.json
 """
 
 from __future__ import annotations
