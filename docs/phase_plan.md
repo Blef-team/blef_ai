@@ -2,7 +2,7 @@
 
 ## Context
 
-The user runs a Blef AI project at `/Users/adriangolian/work/blef_ai`, with NFSP (Heinrich & Silver 2016) as the active learning approach. They asked for a no-flattery deep dive: what's actually wrong, which choices were made by intuition rather than evidence, and what concretely makes this bot strong.
+This Blef AI project uses NFSP (Heinrich & Silver 2016) as the active learning approach. This document is a no-flattery deep dive: what's actually wrong, which choices were made by intuition rather than evidence, and what concretely makes this bot strong.
 
 Blef is a Polish set-claiming card game (rules in `Blef_game_readme_rules.md`). Each round, players take turns making a **bet** (a claim that a particular **set** — pair / two pair / straight / full house / flush / etc. — exists in the *union* of all players' cards), strictly more **senior** than the previous bet. The only round-ending action is **check**: the checker calls out the previous bettor's claim. If the pool satisfies the last bet, the checker loses; otherwise the bettor loses. Loser gains a card next round and starts it. A player at the card cap who loses is eliminated. Game ends with one survivor. 24-card deck has 88 sets (89 actions including CHECK); 32-card deck has 160 sets (161 actions). Variants: jokers, blanks, common cards.
 
@@ -156,11 +156,11 @@ After Phase 0 you will know which of these actually moves exploitability. Apply 
 
 ## Critical files
 
-- `/Users/adriangolian/work/blef_ai/nfsp_ai/agent.py` — 1862 lines; SL/RL gating, Q-loss, `ReplayBuffer.gpow`, `_flush_nstep`, schedules.
-- `/Users/adriangolian/work/blef_ai/nfsp_ai/nfsp_run_local.py` — env wrapper, observation encoding, `_legal_action_mask` (line 431, public-prior hard-mask), terminal reward (line 1009), round-end-as-done (line 1023).
-- `/Users/adriangolian/work/blef_ai/cfr_ai/agent.py` + `cfr_ai/outputs/*.csv` — *NOTE: `cfr_ai/outputs/` does not exist locally.* CFR strategies are referenced by the agent at `cfr_ai/agent.py:28` (`'cfr_ai/outputs/<hand_sizes>/<key>/<key>.csv'`), but the data lives elsewhere — likely S3 or production storage given the project has Lambda dispatch infrastructure. **Phase 0 precondition:** locate or regenerate CFR strategies, at minimum for 1v1 24-card-deck no-jokers. Without this, the "head-to-head vs CFR" metric is unreachable and the ladder degrades to {random_legal, ConservativeAgent, snapshot-pool}.
-- `/Users/adriangolian/work/blef_ai/shared/probabilities/dynamic_probabilities.py` — calculator whose bugs currently propagate into the action mask via `_legal_action_mask`.
-- `/Users/adriangolian/work/blef_ai/nfsp_ai/embedding/{encoder.py,history.py}` — pretrained artifacts ready for Phase 2.2 integration.
+- `nfsp_ai/agent.py` — 1862 lines; SL/RL gating, Q-loss, `ReplayBuffer.gpow`, `_flush_nstep`, schedules.
+- `nfsp_ai/nfsp_run_local.py` — env wrapper, observation encoding, `_legal_action_mask` (line 431, public-prior hard-mask), terminal reward (line 1009), round-end-as-done (line 1023).
+- `cfr_ai/agent.py` + `cfr_ai/outputs/*.csv` — *NOTE: `cfr_ai/outputs/` does not exist locally.* CFR strategies are referenced by the agent at `cfr_ai/agent.py:28` (`'cfr_ai/outputs/<hand_sizes>/<key>/<key>.csv'`), but the data lives elsewhere — likely S3 or production storage given the project has Lambda dispatch infrastructure. **Phase 0 precondition:** locate or regenerate CFR strategies, at minimum for 1v1 24-card-deck no-jokers. Without this, the "head-to-head vs CFR" metric is unreachable and the ladder degrades to {random_legal, ConservativeAgent, snapshot-pool}.
+- `shared/probabilities/dynamic_probabilities.py` — calculator whose bugs currently propagate into the action mask via `_legal_action_mask`.
+- `nfsp_ai/embedding/{encoder.py,history.py}` — pretrained artifacts ready for Phase 2.2 integration.
 
 ---
 

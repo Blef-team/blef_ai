@@ -1,17 +1,20 @@
 #!/usr/bin/env bash
-# Watch /Users disk free space; emit one line on threshold crossings.
+# Watch disk free space; emit one line on threshold crossings.
 # Auto-clears intermediate checkpoints (nfsp_blef_*M.pt, NOT the latest
 # nfsp_blef.pt) from the OLDEST training run dir if free < hard limit.
 #
 # Usage: disk_watcher.sh [WARN_GB] [HARD_GB] [POLL_SEC]
+#   RUNS_DIR env var overrides the runs/ location (default: repo runs/).
 set -euo pipefail
 WARN_GB="${1:-50}"
 HARD_GB="${2:-20}"
 POLL="${3:-300}"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+RUNS_DIR="${RUNS_DIR:-${REPO_ROOT}/runs}"
 
 free_gb() {
   # macOS-portable: -g reports in 1G blocks.
-  df -g /Users/adriangolian | awk 'NR==2 {print $4}'
+  df -g "${REPO_ROOT}" | awk 'NR==2 {print $4}'
 }
 
 last_state=""
@@ -25,7 +28,7 @@ while true; do
   fi
   if [ "$state" = "hard" ]; then
     # Find the run dir with the most intermediate ckpts and free one.
-    target=$(find /Users/adriangolian/work/blef_ai/runs -maxdepth 3 -name 'nfsp_blef_*M.pt' -type f 2>/dev/null | head -1)
+    target=$(find "${RUNS_DIR}" -maxdepth 3 -name 'nfsp_blef_*M.pt' -type f 2>/dev/null | head -1)
     if [ -n "$target" ]; then
       sz=$(du -h "$target" | cut -f1)
       rm -f "$target"

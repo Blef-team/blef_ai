@@ -187,3 +187,4 @@ cfr_ai/analysis/data/
 
 # Isolated experiment out-roots (strategies live on the box; local pulls are scratch)
 cfr_ai/exp_*/
+TrialRules.swift
