@@ -3,11 +3,11 @@ from shared.ai import agent
 from shared.probabilities import dynamic_probabilities
 from shared.game_utils import GameRules
 
-LAM_OPP = 0.0     # trust in the opponent's last bet (blends in the opponent-conditional vector)
-ALPHA = 3.0        # exponent on blended existence in the sampling weights
+LAM_OPP = 0.75     # trust in the opponent's last bet (blends in the opponent-conditional vector)
+ALPHA = 4.0        # exponent on blended existence in the sampling weights
 BETA = 2.0         # exponent on the generic (hand-unaware) plausibility prior
-CHECK_MULT = 1.2   # bet-vs-check aggression (higher -> check less)
-CHECK_EXP = 3.0    # exponent sharpening the check-vs-bet choice (was a cube back when it was 3)
+CHECK_MULT = 1.5   # bet-vs-check aggression (higher -> check less)
+CHECK_EXP = 4.0    # exponent sharpening the check-vs-bet choice (was a cube back when it was 3)
 
 def normalise(arr):
     sum_arr = sum(arr)
