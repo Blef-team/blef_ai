@@ -113,13 +113,14 @@ class ConservativeCrawlingAgent(agent.Agent):
         if cp_team is not None:
             team_nicks |= {p.get("nickname") for p in active_players if p.get("team") == cp_team}
         team_of = {p.get("nickname"): p.get("team") for p in active_players}
+        ncards_of = {p.get("nickname"): p.get("n_cards", 0) for p in active_players}
 
         def _teammates(a, b):
             ta, tb = team_of.get(a), team_of.get(b)
             return ta is not None and ta == tb
 
         _hist = game_state.get("history", [])
-        _meaningful = []  # (action_id, is_own), most-recent-first
+        _meaningful = []  # (action_id, is_own, bettor_n_cards), most-recent-first
         for _i in range(len(_hist) - 1, -1, -1):
             _h = _hist[_i]
             _aid = _h.get("action_id", check_action_id)
@@ -128,9 +129,14 @@ class ConservativeCrawlingAgent(agent.Agent):
             _nxt = _hist[_i + 1] if _i + 1 < len(_hist) else None
             if _nxt is not None and _teammates(_h.get("player"), _nxt.get("player")):
                 continue                        # teed-up team raise -> not a standalone signal
-            _meaningful.append((_aid, _h.get("player") in team_nicks))
-        opp_bet = next((aid for aid, own in _meaningful if not own), None)
-        second_bet, second_is_own = _meaningful[1] if len(_meaningful) > 1 else (None, False)
+            _player = _h.get("player")
+            _meaningful.append((_aid, _player in team_nicks, ncards_of.get(_player, 0)))
+        _opp = next(((aid, nc) for aid, own, nc in _meaningful if not own), None)
+        opp_bet, opp_n = _opp if _opp is not None else (None, None)
+        if len(_meaningful) > 1:
+            second_bet, second_is_own, second_n = _meaningful[1]
+        else:
+            second_bet, second_is_own, second_n = None, False, None
 
         # Extract Generic Probabilities and Bet Floor
         bet_probs_generic = dynamic_probabilities.get_generic_bet_probabilities(game_state, last_bet=last_bet)
@@ -158,11 +164,14 @@ class ConservativeCrawlingAgent(agent.Agent):
             cond_probs = None
             if lam > 0 and opp_bet is not None:
                 cond_probs = dynamic_probabilities.conditional_bet_probabilities(
-                    game_state, conditioning_action_id=opp_bet, last_bet=effective_last_bet)
+                    game_state, conditioning_action_id=opp_bet, last_bet=effective_last_bet,
+                    bettor_n_cards=opp_n)
             cond_second = None
             if lam2 > 0 and second_bet is not None:
                 cond_second = dynamic_probabilities.conditional_bet_probabilities(
-                    game_state, conditioning_action_id=second_bet, last_bet=effective_last_bet, conditioning_is_own=second_is_own)
+                    game_state, conditioning_action_id=second_bet, last_bet=effective_last_bet,
+                    conditioning_is_own=second_is_own,
+                    bettor_n_cards=(None if second_is_own else second_n))
             game_state["cp_nickname"] = original_cp_nickname
             # C4: fill the self slice with belief in the second-last meaningful bet (own in 1v1, an opponent in 3+).
             self_term = blend_existence(bet_probs_betting, cond_second, lam2)
@@ -176,11 +185,14 @@ class ConservativeCrawlingAgent(agent.Agent):
             cond_probs = None
             if lam > 0 and opp_bet is not None:
                 cond_probs = dynamic_probabilities.conditional_bet_probabilities(
-                    game_state, conditioning_action_id=opp_bet, last_bet=effective_last_bet)
+                    game_state, conditioning_action_id=opp_bet, last_bet=effective_last_bet,
+                    bettor_n_cards=opp_n)
             cond_second = None
             if lam2 > 0 and second_bet is not None:
                 cond_second = dynamic_probabilities.conditional_bet_probabilities(
-                    game_state, conditioning_action_id=second_bet, last_bet=effective_last_bet, conditioning_is_own=second_is_own)
+                    game_state, conditioning_action_id=second_bet, last_bet=effective_last_bet,
+                    conditioning_is_own=second_is_own,
+                    bettor_n_cards=(None if second_is_own else second_n))
             # C4: fill the self slice with belief in the second-last meaningful bet (own in 1v1, an opponent in 3+).
             self_term = blend_existence(bet_probs_betting, cond_second, lam2)
             blended = blend_existence(self_term, cond_probs, lam)

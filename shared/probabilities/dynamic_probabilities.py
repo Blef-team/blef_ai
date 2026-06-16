@@ -489,10 +489,11 @@ def get_generic_bet_probabilities(game_state, last_bet=None):
 #                                or N2 raw draws; < N3 kept -> return None = fall back)
 #
 # Joker attribution follows the rules: only the BETTOR's jokers fill a set. For B
-# (an opponent's bet) the wilds are the jokers drawn into the opponent pool + common;
-# for each candidate s (our prospective bet) the wilds are our jokers + common.
-# (Single-opponent-bettor assumption; exact for heads-up, approximate for >2 players
-# with jokers, irrelevant for the jokers=0 default.)
+# (an opponent's bet) the wilds are the bettor's OWN jokers + common; for each candidate
+# s (our prospective bet) the wilds are our jokers + common. The draw pools all opponents'
+# unknown cards, so the bettor's share of any pooled jokers is marginalised analytically
+# (hypergeometric over which n_b of the k pooled cards are the bettor's) -- exact and
+# zero-variance. With one opponent (heads-up) or no jokers this reduces to a plain count.
 # ---------------------------------------------------------------------------
 
 @lru_cache(maxsize=4)
@@ -573,12 +574,56 @@ def _exist_all(presence, vc, sc, wild, specs):
     return out
 
 
-def _process_chunk(dv, ds, V, n, known_present, known_vc, known_sc, jok_s, common_jokers, B_aid, specs, deck_size, b_wild=None):
-    """Tally one chunk of opponent hands: returns (#B-true, per-set #(B and s) true).
+def _b_deficit(action_id, presence, vc, sc, deck_size):
+    """Wilds the conditioning bet B needs (before any common/bettor jokers), per hand.
+    Mirrors _exist_single's set shapes but returns the integer shortfall (>= 0)."""
+    d = get_set_details_from_action_id(action_id, deck_size)
+    st = d["set_type"]
+    needed_map = {"High card": 1, "Pair": 2, "Three of a kind": 3, "Four of a kind": 4}
+    if st in needed_map:
+        return np.maximum(0, needed_map[st] - vc[:, d["detail_1"]])
+    if st == "Two pairs":
+        return np.maximum(0, 2 - vc[:, d["detail_1"]]) + np.maximum(0, 2 - vc[:, d["detail_2"]])
+    if st == "Full house":
+        return np.maximum(0, 3 - vc[:, d["detail_1"]]) + np.maximum(0, 2 - vc[:, d["detail_2"]])
+    if st == "Flush":
+        return np.maximum(0, 5 - sc[:, d["detail_1"]])
+    if "Straight flush" in st:
+        suit, vals = d["detail_1"], d["details"]
+        present = sum(presence[:, v, suit].astype(np.int64) for v in vals)
+        return len(vals) - present
+    if "straight" in st.lower():
+        vals = d["details"]
+        return sum((vc[:, v] == 0).astype(np.int64) for v in vals)
+    raise ValueError(f"Unhandled set type: {st}")  # pragma: no cover
 
-    b_wild = wilds usable by the conditioning bet B. None => B is an OPPONENT's bet, so its
-    wilds are the opponent's DRAWN jokers + common (per-hand). A scalar => B is OUR/teammate's
-    bet (C2), whose wilds are fixed and known (our jokers + common), independent of the draw."""
+
+def _hyge_survival_table(k, n_b, total_jokers):
+    """W[d, sh] = P(the bettor holds >= sh of the d pooled jokers), given the bettor holds a
+    uniform n_b-subset of the k pooled cards -> X ~ Hypergeometric(N=k, K=d, n=n_b). sh=0 -> 1.
+    n_b == k (single opponent) gives W[d, sh<=d] = 1 (the bettor holds every pooled joker)."""
+    TJ = int(total_jokers)
+    W = np.zeros((TJ + 1, TJ + 1), dtype=np.float64)
+    denom = math.comb(k, n_b) if 0 <= n_b <= k else 0
+    for d in range(TJ + 1):
+        W[d, 0] = 1.0
+        if denom == 0:
+            continue
+        for sh in range(1, TJ + 1):
+            W[d, sh] = sum(math.comb(d, x) * math.comb(k - d, n_b - x)
+                           for x in range(sh, min(d, n_b) + 1)) / denom
+    return W
+
+
+def _process_chunk(dv, ds, V, n, known_present, known_vc, known_sc, jok_s, common_jokers,
+                   B_aid, specs, deck_size, b_wild=None, weight_table=None):
+    """Tally one chunk of opponent hands: returns (sum of B-weight, per-set sum of B-weight*1(s)).
+
+    Opponent bet (b_wild is None): B may use only the BETTOR's jokers + common. The bettor holds
+    an unknown n_b of the k pooled cards, so the number of pooled jokers that are the bettor's is
+    hypergeometric; weight_table[dj, short] = P(bettor has >= short jokers), short = deficit -
+    common, gives the exact (Rao-Blackwellised) per-hand weight. Own/teammate bet (b_wild scalar):
+    wilds are known exactly -> hard 0/1 weight."""
     M, k = dv.shape
     if k:
         real = (dv >= 0).ravel()
@@ -597,13 +642,22 @@ def _process_chunk(dv, ds, V, n, known_present, known_vc, known_sc, jok_s, commo
     vc = vsc.sum(axis=2) + known_vc[None, :]               # (M, V) value counts (known + drawn)
     sc = vsc.sum(axis=1) + known_sc[None, :]               # (M, 4) suit counts
     presence = (vsc > 0) | known_present[None, :, :]       # (M, V, 4) for straight-flush tests
-    b_wild_eff = (dj + common_jokers) if b_wild is None else b_wild
-    bmask = _exist_single(B_aid, presence, vc, sc, b_wild_eff, deck_size)
-    idx = np.nonzero(bmask)[0]
+    if b_wild is None:
+        # opponent bet: attribute pooled jokers to the bettor hypergeometrically
+        TJ = weight_table.shape[1] - 1
+        short = _b_deficit(B_aid, presence, vc, sc, deck_size) - common_jokers
+        weight = weight_table[np.clip(dj, 0, TJ), np.clip(short, 0, TJ)]
+        weight = np.where(short > TJ, 0.0, weight)         # needs more wilds than any bettor holds
+    else:
+        # own/teammate bet: wilds fixed and known -> hard existence
+        weight = _exist_single(B_aid, presence, vc, sc, b_wild, deck_size).astype(np.float64)
+    idx = np.nonzero(weight)[0]
     if idx.size == 0:
-        return 0, np.zeros(n, dtype=np.int64)
+        return 0.0, np.zeros(n, dtype=np.float64), 0
     se = _exist_all(presence[idx], vc[idx], sc[idx], jok_s, specs)
-    return int(idx.size), se.sum(axis=0).astype(np.int64)
+    # support count (#hands with weight>0) drives the sampler's stop rule, matching the old
+    # integer B-true count; the fractional weight sum only refines the estimate.
+    return float(weight.sum()), (se * weight[idx, None]).sum(axis=0), int(idx.size)
 
 
 def conditional_bet_probabilities(
@@ -616,6 +670,7 @@ def conditional_bet_probabilities(
     batch=5_000,
     seed=None,
     conditioning_is_own=False,
+    bettor_n_cards=None,
 ):
     """P(s exists | bet B=conditioning_action_id is true) for every set s.
 
@@ -626,7 +681,12 @@ def conditional_bet_probabilities(
 
     conditioning_is_own: True when B is OUR (or a teammate's) bet rather than an
     opponent's. Then only OUR jokers (jok_s = my + common) fill B, not the opponent's
-    drawn jokers -- we condition the unknown opponent draws on our own claim holding."""
+    drawn jokers -- we condition the unknown opponent draws on our own claim holding.
+
+    bettor_n_cards: how many cards the opponent who made B holds (ignored when
+    conditioning_is_own). B may use only that bettor's jokers + common, so its share of
+    the pooled jokers is marginalised hypergeometrically. None -> assume the bettor is the
+    sole opponent (n_b = k), which reproduces the simple pooled count (exact for heads-up)."""
     if np is None:
         # numpy absent (e.g. a Lambda deployed without the numpy layer): degrade to
         # baseline rather than crash -- caller treats None as "no opponent signal".
@@ -693,18 +753,27 @@ def conditional_bet_probabilities(
     k = max(0, min(k, R))
 
     specs = _action_specs(deck_size)
-    b_count = 0
-    bs = np.zeros(n, dtype=np.int64)
+    b_count = 0.0      # sum of per-hand B-weights (expected B-true count) -> normalises the estimate
+    b_support = 0      # #hands with weight>0 (pooled-B-true) -> drives the sampler's stop rule
+    bs = np.zeros(n, dtype=np.float64)
 
-    # Our own bet's wilds are fixed (our jokers + common = jok_s); an opponent's bet
-    # (b_wild=None) draws its wilds from the sampled opponent hand inside _process_chunk.
-    b_wild = jok_s if conditioning_is_own else None
+    # Own/teammate bet: wilds are our known jokers + common (jok_s), a fixed scalar.
+    # Opponent bet: B may use only the bettor's own jokers + common; the bettor holds n_b of
+    # the k pooled cards, so _process_chunk weights each hand by the hypergeometric P(the
+    # bettor holds enough of the pooled jokers). n_b defaults to k (single-opponent/heads-up).
+    if conditioning_is_own:
+        b_wild, weight_table = jok_s, None
+    else:
+        n_b = k if bettor_n_cards is None else max(0, min(int(bettor_n_cards), k))
+        b_wild, weight_table = None, _hyge_survival_table(k, n_b, total_jokers)
 
     def add(dv, ds):
-        nonlocal b_count, bs
-        cnt, s = _process_chunk(dv, ds, V, n, known_present, known_vc, known_sc, jok_s,
-                                common_jokers, conditioning_action_id, specs, deck_size, b_wild)
+        nonlocal b_count, b_support, bs
+        cnt, s, sup = _process_chunk(dv, ds, V, n, known_present, known_vc, known_sc, jok_s,
+                                     common_jokers, conditioning_action_id, specs, deck_size,
+                                     b_wild, weight_table)
         b_count += cnt
+        b_support += sup
         bs += s
 
     CRk = math.comb(R, k) if 0 <= k <= R else 0
@@ -731,15 +800,15 @@ def conditional_bet_probabilities(
     else:
         rng = np.random.default_rng(seed)
         drawn = 0
-        while b_count < n_target and drawn < draw_cap:
+        while b_support < n_target and drawn < draw_cap:
             m = min(batch, draw_cap - drawn)
             idx = np.argpartition(rng.random((m, R)), k - 1, axis=1)[:, :k]
             add(res_v[idx], res_c[idx])
             drawn += m
-        if b_count < min_positives:
+        if b_support < min_positives:
             return None
 
-    if b_count == 0:
+    if b_count <= 0:
         return None
 
     vec = (bs / b_count).tolist()
