@@ -3,11 +3,14 @@ from shared.ai import agent
 from shared.probabilities import dynamic_probabilities
 from shared.game_utils import GameRules
 
-LAM_OPP = 0.75     # trust in the opponent's last bet (blends in the opponent-conditional vector)
+LAM_OPP = 0.75     # weight on the conditional for the opponent's LAST bet (C1)
+LAM_SECOND = 1.0   # weight on the conditional for the SECOND-last meaningful bet (C4), inside the
+                   # 1-LAM_OPP self slice: 1.0 => the slice is fully that conditional, 0 => pure hand-aware.
+                   # In 1v1 the second-last meaningful bet is our own; in 3+ player games it's another opponent.
 ALPHA = 4.0        # exponent on blended existence in the sampling weights
 BETA = 2.0         # exponent on the generic (hand-unaware) plausibility prior
 CHECK_MULT = 1.5   # bet-vs-check aggression (higher -> check less)
-CHECK_EXP = 4.0    # exponent sharpening the check-vs-bet choice (was a cube back when it was 3)
+CHECK_EXP = 4.0    # exponent sharpening the check-vs-bet choice
 
 def normalise(arr):
     sum_arr = sum(arr)
@@ -25,10 +28,11 @@ def blend_existence(bet_probs, cond_probs, lam_opp):
     return [(1.0 - lam_opp) * bet_probs[i] + lam_opp * cond_probs[i] for i in range(len(bet_probs))]
 
 def compute_sampling_weights(blended, bet_probs_generic, alpha=3.0, beta=2.0):
-    if len(blended) != len(bet_probs_generic):
+    n = len(blended)
+    if len(bet_probs_generic) != n:
         raise ValueError("Bet probability arrays are not of equal length")
-    # p_generic stays a multiplicative plausibility prior over the blended existence.
-    return normalise([blended[i] ** alpha * bet_probs_generic[i] ** beta for i in range(len(blended))])
+    # blended existence sharpened by alpha, weighted by the generic (hand-unaware) plausibility prior.
+    return normalise([blended[i] ** alpha * bet_probs_generic[i] ** beta for i in range(n)])
 
 class ConservativeCrawlingAgent(agent.Agent):
     """
@@ -40,9 +44,11 @@ class ConservativeCrawlingAgent(agent.Agent):
         self.nickname = "Porevit"
 
     @staticmethod
-    def determine_action(game_state, lam_opp=None, alpha=None, beta=None, check_mult=None, check_exp=None):
+    def determine_action(game_state, lam_opp=None, lam_second=None, alpha=None, beta=None,
+                         check_mult=None, check_exp=None):
         # None -> module default (evals override per call to pit configs in one process).
         lam = LAM_OPP if lam_opp is None else lam_opp
+        lam2 = LAM_SECOND if lam_second is None else lam_second
         a_exp = ALPHA if alpha is None else alpha
         b_exp = BETA if beta is None else beta
         c_mult = CHECK_MULT if check_mult is None else check_mult
@@ -50,7 +56,7 @@ class ConservativeCrawlingAgent(agent.Agent):
         rules = game_state.get("rules", {})
         game_rules = GameRules(rules.get("deck_size", 24))
         check_action_id = game_rules.check_action_id
-        
+
         last_bet = None
         if game_state.get("history"):
             last_bet = game_state.get("history")[-1]["action_id"]
@@ -98,14 +104,33 @@ class ConservativeCrawlingAgent(agent.Agent):
                 else:
                     role = "middle"
 
-        # Opponent signal to condition on = most recent bet by a NON-teammate.
-        # Solo / FFA -> that's just the last bet; team play -> skip our own and allies' bets.
+        # Meaningful bets to condition on, most-recent-first, each tagged own-or-opponent. A bet is
+        # "meaningful" unless it was immediately followed by the better's own teammate. We condition on:
+        #   opp_bet = the last meaningful OPPONENT bet.
+        #   (second_bet, second_is_own) = the SECOND-last meaningful bet by anyone: in 1v1 that's
+        #   our own previous bet, in 3+ player games it's another opponent unless they're all on one team
         team_nicks = {cp_nickname}
         if cp_team is not None:
             team_nicks |= {p.get("nickname") for p in active_players if p.get("team") == cp_team}
-        opp_bet = next((h["action_id"] for h in reversed(game_state.get("history", []))
-                        if h.get("player") not in team_nicks
-                        and h.get("action_id", check_action_id) < check_action_id), None)
+        team_of = {p.get("nickname"): p.get("team") for p in active_players}
+
+        def _teammates(a, b):
+            ta, tb = team_of.get(a), team_of.get(b)
+            return ta is not None and ta == tb
+
+        _hist = game_state.get("history", [])
+        _meaningful = []  # (action_id, is_own), most-recent-first
+        for _i in range(len(_hist) - 1, -1, -1):
+            _h = _hist[_i]
+            _aid = _h.get("action_id", check_action_id)
+            if _aid >= check_action_id:        # a check, not a bet
+                continue
+            _nxt = _hist[_i + 1] if _i + 1 < len(_hist) else None
+            if _nxt is not None and _teammates(_h.get("player"), _nxt.get("player")):
+                continue                        # teed-up team raise -> not a standalone signal
+            _meaningful.append((_aid, _h.get("player") in team_nicks))
+        opp_bet = next((aid for aid, own in _meaningful if not own), None)
+        second_bet, second_is_own = _meaningful[1] if len(_meaningful) > 1 else (None, False)
 
         # Extract Generic Probabilities and Bet Floor
         bet_probs_generic = dynamic_probabilities.get_generic_bet_probabilities(game_state, last_bet=last_bet)
@@ -134,8 +159,14 @@ class ConservativeCrawlingAgent(agent.Agent):
             if lam > 0 and opp_bet is not None:
                 cond_probs = dynamic_probabilities.conditional_bet_probabilities(
                     game_state, conditioning_action_id=opp_bet, last_bet=effective_last_bet)
+            cond_second = None
+            if lam2 > 0 and second_bet is not None:
+                cond_second = dynamic_probabilities.conditional_bet_probabilities(
+                    game_state, conditioning_action_id=second_bet, last_bet=effective_last_bet, conditioning_is_own=second_is_own)
             game_state["cp_nickname"] = original_cp_nickname
-            blended = blend_existence(bet_probs_betting, cond_probs, lam)
+            # C4: fill the self slice with belief in the second-last meaningful bet (own in 1v1, an opponent in 3+).
+            self_term = blend_existence(bet_probs_betting, cond_second, lam2)
+            blended = blend_existence(self_term, cond_probs, lam)
             sampling_weights = compute_sampling_weights(blended, bet_probs_generic, a_exp, b_exp)
 
         else:
@@ -146,7 +177,13 @@ class ConservativeCrawlingAgent(agent.Agent):
             if lam > 0 and opp_bet is not None:
                 cond_probs = dynamic_probabilities.conditional_bet_probabilities(
                     game_state, conditioning_action_id=opp_bet, last_bet=effective_last_bet)
-            blended = blend_existence(bet_probs_betting, cond_probs, lam)
+            cond_second = None
+            if lam2 > 0 and second_bet is not None:
+                cond_second = dynamic_probabilities.conditional_bet_probabilities(
+                    game_state, conditioning_action_id=second_bet, last_bet=effective_last_bet, conditioning_is_own=second_is_own)
+            # C4: fill the self slice with belief in the second-last meaningful bet (own in 1v1, an opponent in 3+).
+            self_term = blend_existence(bet_probs_betting, cond_second, lam2)
+            blended = blend_existence(self_term, cond_probs, lam)
             sampling_weights = compute_sampling_weights(blended, bet_probs_generic, a_exp, b_exp)
 
         # Check/Bet Evaluation (alone and first can check; last cannot)

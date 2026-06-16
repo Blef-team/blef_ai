@@ -573,8 +573,12 @@ def _exist_all(presence, vc, sc, wild, specs):
     return out
 
 
-def _process_chunk(dv, ds, V, n, known_present, known_vc, known_sc, jok_s, common_jokers, B_aid, specs, deck_size):
-    """Tally one chunk of opponent hands: returns (#B-true, per-set #(B and s) true)."""
+def _process_chunk(dv, ds, V, n, known_present, known_vc, known_sc, jok_s, common_jokers, B_aid, specs, deck_size, b_wild=None):
+    """Tally one chunk of opponent hands: returns (#B-true, per-set #(B and s) true).
+
+    b_wild = wilds usable by the conditioning bet B. None => B is an OPPONENT's bet, so its
+    wilds are the opponent's DRAWN jokers + common (per-hand). A scalar => B is OUR/teammate's
+    bet (C2), whose wilds are fixed and known (our jokers + common), independent of the draw."""
     M, k = dv.shape
     if k:
         real = (dv >= 0).ravel()
@@ -593,7 +597,8 @@ def _process_chunk(dv, ds, V, n, known_present, known_vc, known_sc, jok_s, commo
     vc = vsc.sum(axis=2) + known_vc[None, :]               # (M, V) value counts (known + drawn)
     sc = vsc.sum(axis=1) + known_sc[None, :]               # (M, 4) suit counts
     presence = (vsc > 0) | known_present[None, :, :]       # (M, V, 4) for straight-flush tests
-    bmask = _exist_single(B_aid, presence, vc, sc, dj + common_jokers, deck_size)
+    b_wild_eff = (dj + common_jokers) if b_wild is None else b_wild
+    bmask = _exist_single(B_aid, presence, vc, sc, b_wild_eff, deck_size)
     idx = np.nonzero(bmask)[0]
     if idx.size == 0:
         return 0, np.zeros(n, dtype=np.int64)
@@ -610,13 +615,18 @@ def conditional_bet_probabilities(
     min_positives=100,
     batch=5_000,
     seed=None,
+    conditioning_is_own=False,
 ):
     """P(s exists | bet B=conditioning_action_id is true) for every set s.
 
     Returns a list aligned to the bet action_id space (entries <= last_bet zeroed),
     or None if the conditioning is unusable: B is impossible (P(B)=0), or sampling
     collected fewer than `min_positives` B-true hands (a near-certain bluff) -> the
-    caller should treat the opponent signal as absent (lambda_opp = 0)."""
+    caller should treat the opponent signal as absent (lambda_opp = 0).
+
+    conditioning_is_own: True when B is OUR (or a teammate's) bet rather than an
+    opponent's. Then only OUR jokers (jok_s = my + common) fill B, not the opponent's
+    drawn jokers -- we condition the unknown opponent draws on our own claim holding."""
     if np is None:
         # numpy absent (e.g. a Lambda deployed without the numpy layer): degrade to
         # baseline rather than crash -- caller treats None as "no opponent signal".
@@ -686,10 +696,14 @@ def conditional_bet_probabilities(
     b_count = 0
     bs = np.zeros(n, dtype=np.int64)
 
+    # Our own bet's wilds are fixed (our jokers + common = jok_s); an opponent's bet
+    # (b_wild=None) draws its wilds from the sampled opponent hand inside _process_chunk.
+    b_wild = jok_s if conditioning_is_own else None
+
     def add(dv, ds):
         nonlocal b_count, bs
         cnt, s = _process_chunk(dv, ds, V, n, known_present, known_vc, known_sc, jok_s,
-                                common_jokers, conditioning_action_id, specs, deck_size)
+                                common_jokers, conditioning_action_id, specs, deck_size, b_wild)
         b_count += cnt
         bs += s
 
