@@ -155,7 +155,53 @@ The current agent beats the original 72.0% head-to-head in 24-card 1v1. The cons
 largest single contributor, the opponent-conditional adds a clear ≈ 5 points, and the second conditional
 is neutral in 1v1 (consistent with its gain being confined to 4-player FFA).
 
-### 1.6 Computational cost
+### 1.6 Parameter re-sweep and exploitability consideration
+
+After the changes above, the five tunable constants were re-swept one at a time around the current
+configuration (`LAM_OPP 0.75`, `alpha 4`, `beta 2`, `check_mult 1.5`, `check_exp 4`, `LAM_SECOND 1.0`).
+Each deviation was tested in 1v1 standard play both against the current configuration (self-play,
+n = 4000) and against CFR (n = 4000); the two non-negative candidates were then confirmed against NFSP
+across all four standard/pro setups (n = 3000). Significance of a difference is quoted in σ (SE of a
+difference ≈ 0.011–0.013).
+
+**vs CFR (1v1).** No deviation beat the current configuration. The best were `alpha 4.5` (exactly
+neutral) and `check_mult 1.6` (+0.4σ); every other deviation was neutral-to-worse, and `LAM_OPP 1.0`
+was −2.0σ.
+
+**Self-play (vs current, 1v1).** Several deviations beat the current configuration — `alpha 4.5` (+3.0σ),
+`check_mult 1.6` (+2.4σ), `check_exp 4.5` (+2.2σ), `LAM_OPP 1.0` (+1.9σ) — but every winner is a *more
+aggressive/decisive* setting and every less-aggressive setting lost. This monotonic pattern indicates a
+"decisiveness against a fixed opponent" artifact rather than genuine skill; `LAM_OPP 1.0` is the clearest
+case, at +1.9σ in self-play but −2.0σ vs CFR.
+
+**NFSP confirmation of the two non-negative candidates** (win-rate in 1v1, type-share in 4p; Δ in σ vs
+the current config):
+
+| setup | current | alpha 4.5 | check_mult 1.6 |
+|---|---|---|---|
+| std 1v1 | 0.385 | 0.389 (+0.3σ) | 0.386 (0σ) |
+| std 4p | 0.392 | 0.414 (+1.7σ) | 0.401 (+0.8σ) |
+| pro 1v1 | 0.497 | 0.544 (+3.7σ) | 0.504 (+0.5σ) |
+| pro 4p | 0.402 | 0.436 (+2.7σ) | 0.408 (+0.5σ) |
+
+`check_mult 1.6` was neutral against both trained opponents; its only positive signal was self-play (the
+artifact), so it is not a real improvement. `alpha 4.5` was a genuine mild improvement against NFSP —
+significant in three of four setups (up to +3.7σ) and never negative — while remaining neutral vs CFR,
+reproducing an earlier finding that had flagged it as a mild but consistent keeper.
+
+**Exploitability caveat and decision.** All three benchmark opponents (self, CFR, NFSP) are *fixed*
+strategies and therefore cannot penalize information leakage. Both candidates — checking less
+(`check_mult` up) and betting more sharply (`alpha` up) — tighten the correlation between the agent's
+actions and its hand, revealing more about its cards over a round. Against an adaptive human who learns
+the agent's tells over repeated play, that leakage is itself a cost the fixed-opponent evaluations cannot
+measure; notably, `alpha 4.5`'s gain comes precisely from the sharper, more revealing play that would be
+exploitable. The current configuration was therefore retained unchanged: `check_mult 1.6` shows no real
+gain, and `alpha 4.5`'s small fixed-opponent edge is outweighed by its likely exploitability against the
+intended opponents (humans). More generally, parameter changes that improve fixed-opponent win-rate by
+making play sharper or less cautious should be treated with suspicion, as the benchmarks price only their
+upside.
+
+### 1.7 Computational cost
 
 Per-decision cost is dominated by the conditional estimate, which is bounded by a draw cap of ≈ 100k
 hands on both the exact-enumeration and sampling paths. Worst-case multiplayer cost is ≈ 140–180 ms
