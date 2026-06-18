@@ -11,7 +11,8 @@ The repository includes several agent implementations with different learning an
 - **[cfr_ai/](cfr_ai)** – Counterfactual Regret Minimization (CFR) agent designed to approximate a Nash equilibrium through iterative self-play.
 - **[nfsp_ai/](nfsp_ai)** – Neural Fictitious Self-Play agent (NFSP), combining reinforcement and supervised learning for Nash-style convergence.
 - **[conservative_ai/](conservative_ai)** – Rule-based baseline using set probability computations for cautious play.
-- **[conservative_crawling_ai/](conservative_crawling_ai)** – A variant of the conservative agent.
+- **[conservative_crawling_ai/](conservative_crawling_ai)** – The conservative agent with a generic (hand-unaware) plausibility prior folded into bet selection.
+- **[conservative_bayesian_ai/](conservative_bayesian_ai)** – The conservative agent extended to condition on opponents' bets via Bayesian set-existence probabilities (the strongest rule-based agent).
 
 ---
 

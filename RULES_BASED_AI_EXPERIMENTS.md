@@ -6,13 +6,21 @@ mechanism only.
 
 ## Agents and methodology
 
-**Agents under study.** Two heuristic agents share a common probability layer:
+**Agents under study.** Three heuristic agents share a common probability layer, in increasing
+sophistication:
 
-- the **conservative agent** (`conservative_ai`), a simple agent that bets and checks using only its
-  own-hand set-existence probabilities;
-- the **conservative-crawling agent** (`conservative_crawling_ai`), which additionally conditions on
+- the **conservative agent** (`conservative_ai`), which bets and checks using only its own-hand
+  set-existence probabilities;
+- the **conservative-crawling agent** (`conservative_crawling_ai`), the conservative agent with a
+  generic (hand-unaware) plausibility prior folded into bet selection;
+- the **conservative-Bayesian agent** (`conservative_bayesian_ai`), which additionally conditions on
   opponents' bets by estimating P(set *s* exists | an opponent's bet *B* is true) and blending that
   estimate into bet selection.
+
+Section 1 studies the conservative-Bayesian agent; it was named "conservative-crawling" while these
+experiments were run, before being renamed to reflect the opponent-conditioning it had grown. Section 2
+covers the conservative agent. The revived conservative-crawling agent above has not been separately
+evaluated here.
 
 **Reference opponents.** Two trained agents serve as fixed benchmarks: a **CFR** agent
 (counterfactual-regret model, checkpoint v32x4) and an **NFSP** agent (neural fictitious self-play,
@@ -26,14 +34,14 @@ given as ±SE or in units of σ.
 **Rule sets.** "Standard" = 24-card deck, no jokers. "Pro" = 32-card deck with one joker, four blanks,
 and common cards (approximated as a fixed two).
 
-**Eval harnesses** (in `scratch/`, gitignored): `config_eval.py` (crawling configs vs self or CFR, 1v1),
-`perun_eval.py` (crawling vs NFSP across standard/pro × 1v1/4p), `dazhbog_eval.py` (conservative agent
-vs self/CFR/crawling), `opening_profile.py` and `cliff_probe.py` (descriptive opening profiles),
+**Eval harnesses** (in `scratch/`, gitignored): `config_eval.py` (Bayesian-agent configs vs self or CFR, 1v1),
+`perun_eval.py` (Bayesian agent vs NFSP across standard/pro × 1v1/4p), `dazhbog_eval.py` (conservative agent
+vs self/CFR/Bayesian agent), `opening_profile.py` and `cliff_probe.py` (descriptive opening profiles),
 `joker_attr_probe.py` and `validate_conditional.py` (probability-layer validation).
 
 ---
 
-## 1. Conservative-crawling agent
+## 1. Conservative-Bayesian agent
 
 ### 1.1 Opponent-conditional probabilities and constant tuning
 
@@ -75,9 +83,9 @@ Conclusion: neutral in 1v1, a real gain in standard 4-player FFA. Adopted (`LAM_
 
 ### 1.3 Opening-shape investigation (negative result)
 
-**Motivation.** Descriptively, the crawling agent spreads its opening bet across many sets, whereas both
+**Motivation.** Descriptively, the Bayesian agent spreads its opening bet across many sets, whereas both
 equilibrium reference agents concentrate on the highest *safe, non-signaling* set, walking a ladder
-Ace-high → great straight (mid-game 60–80% for the references vs ≈ 2% for the crawling agent) → full
+Ace-high → great straight (mid-game 60–80% for the references vs ≈ 2% for the Bayesian agent) → full
 house → flush → straight flush (measured with `opening_profile.py`).
 
 **Method.** We added a "frontier/cliff" term that boosts sets sitting far above the opponent's best
@@ -217,16 +225,16 @@ that returns no estimate — degrading to hand-only play — before approaching 
 
 ### 2.1 Check-aggression constant
 
-The conservative agent is intentionally simpler and weaker than the crawling agent. We tested making it
+The conservative agent is intentionally simpler and weaker than the Bayesian agent. We tested making it
 check less by raising its bet-vs-check multiplier `check_mult`:
 
-| check_mult | self vs 1.2 | vs CFR | vs crawling agent |
+| check_mult | self vs 1.2 | vs CFR | vs Bayesian agent |
 |---|---|---|---|
 | 1.2 | 0.498 | 0.288 | 0.274 |
 | 1.35 | 0.524 | 0.290 | 0.325 |
 | 1.5 | 0.535 | 0.306 | 0.354 |
 
 1.5 was chosen: it is a clean modest gain (1.35 barely moved the result vs CFR), and the agent remains
-distinctly weaker than the crawling agent (0.354 ≪ 0.5), as intended. Its sampling exponent `ALPHA` (= 3)
-and check exponent `CHECK_EXP` (= 3) were also exposed as parameters for symmetry with the crawling
+distinctly weaker than the Bayesian agent (0.354 ≪ 0.5), as intended. Its sampling exponent `ALPHA` (= 3)
+and check exponent `CHECK_EXP` (= 3) were also exposed as parameters for symmetry with the Bayesian
 agent, without changing their values.

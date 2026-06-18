@@ -693,8 +693,8 @@ def conditional_bet_probabilities(
         global _NUMPY_WARNED
         if not _NUMPY_WARNED:
             import sys
-            print("WARNING: numpy unavailable; conditional_bet_probabilities disabled, "
-                  "conservative_crawling falls back to hand-only play", file=sys.stderr)
+            print("WARNING: numpy unavailable; conditional_bet_probabilities disabled "
+                  "(returns None so callers fall back to hand-only play)", file=sys.stderr)
             _NUMPY_WARNED = True
         return None
 
