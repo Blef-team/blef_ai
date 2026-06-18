@@ -300,7 +300,7 @@ Key flags:
 
 When opponent hands are enumerated, the result is the exact LBR-K value. When they are sampled, we use a **double-sampling** scheme: an independent belief sample S2 is used to value the action that another sample S1 chose. This produces a conservative *lower bound* on LBR-K — sometimes the chosen action is suboptimal, but its EV is computed without winner's-curse bias. The standard error reported in the summary combines lbr_hand sampling variance and opp belief sampling variance, with a chi-squared upper bound on the std err itself.
 
-LBR-1 captures roughly 85% of full BR on our verified shallow setups; LBR-2 captures ~99% but takes 4× longer per setup, and quickly becomes infeasible past round 3.
+On Blef, LBR-1 is a *loose* lower bound, not a near-tight one: measured against LBR-2 on the V3.2x4 value-only setups, the second best-response move multiplies the recovered exploitability by **2–25×** (e.g. 3,3 reads −0.004% at depth-1 — apparently Nash — but +2.43% at depth-2; 2,5 goes 0.10% → 6.27%). An LBR-1 figure can therefore understate true exploitability by an order of magnitude and must be read as a floor; LBR-2 (itself still a lower bound) is run wherever affordable. LBR-2 costs ~4× LBR-1 per setup and becomes infeasible beyond the value-only band (total ≥ 8).
 
 ### `summary_of_all_runs.csv`
 

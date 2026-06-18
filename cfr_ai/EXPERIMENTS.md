@@ -754,6 +754,13 @@ the x4 row counts on all 66 setups.
   enumeration and are the reusable cheap probe. Cost = (LBR hands) × (beliefs), linear
   in both; per-(hand,belief) cost varies ~5×, so the cheapest *exact* setup is 3,3, not
   the fewest-deals 1,5 — a clean combinatorial argument that inverted once measured.
+  **Caveat (measured on V3.2x4, 2026-06): LBR-1 is a *loose* floor on Blef — depth-1→2
+  multiplies the recovered exploitability by 2–25× (3,3: −0.004% → +2.43%; 2,5: 0.10% →
+  6.27%), so an LBR-1 value can understate by an order of magnitude.** The duration wall
+  is also steeper than "< 1 h": at lbr-hands 500 / beliefs 1000, near-symmetric total-9
+  setups take 1.5–3 days each (4,5 = 43 h, 3,6 = 73 h) and total-10+ is days→weeks, so a
+  full LBR-1 sweep is infeasible; LBR-2 reaches the whole value-only band (total ≤ 7, max
+  ~2.8 h), not just sums ≤ 6.
 - **NFSP / Perun yardstick.** Perun is the deployed NFSP agent. Its **greedy** mode
   (argmax of the average policy) is a *pure*, non-Nash-approximating strategy but the
   only *competitive* yardstick (~0.50 vs near-Nash CFR, matching the friend's even
