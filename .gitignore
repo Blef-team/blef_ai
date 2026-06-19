@@ -188,3 +188,50 @@ cfr_ai/analysis/data/
 # Isolated experiment out-roots (strategies live on the box; local pulls are scratch)
 cfr_ai/exp_*/
 TrialRules.swift
+
+# ──────────────────────────────────────────────────────────────────────────
+# Local cruft / scratch / generated outputs — keep `git status` usable and
+# keep internal/agent notes out of the (public-bound) repo.
+# ──────────────────────────────────────────────────────────────────────────
+
+# macOS Finder cruft
+.DS_Store
+
+# Claude Code / agent scaffolding (local; CLAUDE.md embeds internal prod notes)
+/CLAUDE.md
+/AGENTS.md
+/.claude-plans/
+
+# Local working notes / handovers (distilled content belongs in real docs)
+/GPT_handover*.txt
+/GPT_improvement_advice*.txt
+/DOCS_STATUS.txt
+
+# Virtualenvs (venv/ already covered above; this catches the suffixed one)
+venv_prof/
+
+# Profiling output
+*.prof
+
+# Build artifacts
+/lambda-layer.zip
+/lambda_function.zip
+
+# Local scratch files / dirs
+/tmpfile
+/remove_files_list.txt
+/out/
+/tempt/
+
+# Local CFR strategy backup (swapped-out May-8 set; live set lives elsewhere)
+cfr_ai/outputs_may8_backup/
+
+# Generated data / eval output (regenerate locally)
+/eval_results/
+/bet_probabilities.csv
+/metadata.csv
+
+# Control-plane local/test files (one per training, never shared)
+/control_plane_*.csv
+/control_plane_test.json
+/control_test.json
