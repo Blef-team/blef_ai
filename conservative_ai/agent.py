@@ -3,6 +3,10 @@ from shared.ai import agent
 from shared.probabilities import dynamic_probabilities
 from shared.game_utils import GameRules
 
+CHECK_MULT = 1.5   # bet-vs-check aggression (higher -> check less)
+ALPHA = 3.0        # exponent sharpening the bet-selection weights (higher = more conservative/peaked)
+CHECK_EXP = 3.0    # exponent sharpening the check-vs-bet choice
+
 def normalise(arr):
     sum_arr = sum(arr)
     if sum_arr:
@@ -12,8 +16,8 @@ def normalise(arr):
 def elementwise_mul(first_array, second_array):
     return [a*b for a, b in zip(first_array, second_array)]
 
-def compute_sampling_weights(bet_probs):
-    return normalise([i ** 3 for i in bet_probs]) # Be conservative
+def compute_sampling_weights(bet_probs, alpha=3.0):
+    return normalise([i ** alpha for i in bet_probs])  # conservative: peak on the most plausible bets
 
 class ConservativeAgent(agent.Agent):
     """
@@ -25,7 +29,10 @@ class ConservativeAgent(agent.Agent):
         self.nickname = "Dazhbog"
 
     @staticmethod
-    def determine_action(game_state):
+    def determine_action(game_state, check_mult=None, alpha=None, check_exp=None):
+        cm = CHECK_MULT if check_mult is None else check_mult
+        a_exp = ALPHA if alpha is None else alpha
+        c_exp = CHECK_EXP if check_exp is None else check_exp
         rules = game_state.get("rules", {})
         game_rules = GameRules(rules.get("deck_size", 24))
         check_action_id = game_rules.check_action_id
@@ -102,13 +109,13 @@ class ConservativeAgent(agent.Agent):
             game_state["cp_nickname"] = last_ally_nickname
             bet_probs_betting = dynamic_probabilities.get_bet_probabilities(game_state, for_betting=True, last_bet=effective_last_bet)
             game_state["cp_nickname"] = original_cp_nickname
-            sampling_weights = compute_sampling_weights(bet_probs_betting)
+            sampling_weights = compute_sampling_weights(bet_probs_betting, a_exp)
             
         else:
             # role is "alone" or "last" -> Their immediate bet is strictly bound by the bet floor
             effective_last_bet = max(last_bet, bet_floor - 1)
             bet_probs_betting = dynamic_probabilities.get_bet_probabilities(game_state, for_betting=True, last_bet=effective_last_bet)
-            sampling_weights = compute_sampling_weights(bet_probs_betting)
+            sampling_weights = compute_sampling_weights(bet_probs_betting, a_exp)
 
         # Check/Bet Evaluation (alone and first can check; last cannot)
         if role in {"alone", "first"} and last_bet > -1 and last_bet < check_action_id:
@@ -122,8 +129,8 @@ class ConservativeAgent(agent.Agent):
             weighted_probs = elementwise_mul(sampling_weights, bet_probs_betting)
             success_prob_of_bet = sum(weighted_probs)
 
-            check_vs_bet_probs = [success_prob_of_check, success_prob_of_bet * 1.2]
-            check_vs_bet_probs = [i ** 3 for i in check_vs_bet_probs]  # Be conservative
+            check_vs_bet_probs = [success_prob_of_check, success_prob_of_bet * cm]
+            check_vs_bet_probs = [i ** c_exp for i in check_vs_bet_probs]  # sharpen toward the better option
             if sum(check_vs_bet_probs) == 0:
                 return check_action_id
 

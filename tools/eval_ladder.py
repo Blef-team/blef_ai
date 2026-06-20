@@ -40,6 +40,7 @@ import torch
 # Project imports — assume repo root is on sys.path (run as `python -m tools.eval_ladder`).
 from conservative_ai.agent import ConservativeAgent
 from conservative_crawling_ai.agent import ConservativeCrawlingAgent
+from conservative_bayesian_ai.agent import ConservativeBayesianAgent
 from nfsp_ai.agent import NFSPAgent, NFSPConfig
 from nfsp_ai.nfsp_run_local import MyEnv, _compute_obs_dim
 
@@ -94,14 +95,27 @@ class ConservativeOpponent(Opponent):
 class ConservativeCrawlingOpponent(Opponent):
     """Pure-Python heuristic that escalates along high-probability bets
     (uses BOTH private and generic priors, unlike `conservative`). Distinct
-    from `ConservativeOpponent` — different action selection rule. Used by
-    the existing `domovoi` sculpted personality as its delegated source."""
+    from `ConservativeOpponent` — different action selection rule."""
 
     name = "conservative_crawling"
 
     def act(self, game_state, obs, mask):
         try:
             a = ConservativeCrawlingAgent.determine_action(game_state)
+        except Exception:
+            a = None
+        return _legal_or_random(a, mask)
+
+
+class ConservativeBayesianOpponent(Opponent):
+    """Heuristic that additionally conditions on opponents' bets via Bayesian
+    set-existence probabilities — the strongest of the heuristic engines."""
+
+    name = "conservative_bayesian"
+
+    def act(self, game_state, obs, mask):
+        try:
+            a = ConservativeBayesianAgent.determine_action(game_state)
         except Exception:
             a = None
         return _legal_or_random(a, mask)
@@ -530,6 +544,7 @@ OPPONENT_REGISTRY: Dict[str, Callable[[int, int], Opponent]] = {
     "random": lambda obs_dim, act_dim: RandomOpponent(),
     "conservative": lambda obs_dim, act_dim: ConservativeOpponent(),
     "conservative_crawling": lambda obs_dim, act_dim: ConservativeCrawlingOpponent(),
+    "conservative_bayesian": lambda obs_dim, act_dim: ConservativeBayesianOpponent(),
     "simple": lambda obs_dim, act_dim: SimpleOpponent(),
     "check_always": lambda obs_dim, act_dim: CheckAlwaysOpponent(),
     "cfr": lambda obs_dim, act_dim: CFROpponent(),
