@@ -133,10 +133,39 @@ def _no_policy_fallback(history_len: int) -> int:
     return 88
 
 
+def _directed_setup(game_state) -> Tuple[int, ...]:
+    """Hand sizes in PLAY ORDER starting from the acting seat, canonicalised to
+    the min-rotation (= the trained directory name). For 3+ players the cyclic
+    order matters — who answers whose bet — so unlike the order-independent
+    2-player setup we do NOT sort.
+
+    Uses the players-list order as the seating/turn order and locates the actor
+    by nickname (robust to non-numeric production nicknames). Eliminated
+    (0-card) seats are skipped, so the caller only routes here while 3+ players
+    are still active; a game that has dropped to two falls back to the sorted
+    2-player path (which serves the 1v1 endgame from the 2-player strategies)."""
+    active = [p for p in game_state.get("players", [])
+              if int(p.get("n_cards", 0)) > 0]
+    cp = game_state["cp_nickname"]
+    idx = next((i for i, p in enumerate(active) if p.get("nickname") == cp), 0)
+    n = len(active)
+    order = tuple(int(active[(idx + i) % n].get("n_cards", 0)) for i in range(n))
+    return min(order[i:] + order[:i] for i in range(n))
+
+
 def determine_action(game_state):
     agent_nickname = game_state["cp_nickname"]
     players = game_state.get("players", [])
-    hand_sizes = tuple(sorted(player.get("n_cards") for player in players))
+    # Route by active (non-eliminated) player count. 3+ active -> directed
+    # cyclic order (play direction matters in multiplayer); 2 active -> the
+    # order-independent sorted pair (a normal 1v1, OR the 1v1 endgame of a
+    # 3-player game once one seat is eliminated). For a plain 2-player game both
+    # players are always active, so this is identical to the old behaviour.
+    active = [p for p in players if int(p.get("n_cards", 0)) > 0]
+    if len(active) >= 3:
+        hand_sizes = _directed_setup(game_state)
+    else:
+        hand_sizes = tuple(sorted(int(p.get("n_cards", 0)) for p in active))
     history = []
     if game_state.get("history"):
         history = [action["action_id"] for action in game_state.get("history")]

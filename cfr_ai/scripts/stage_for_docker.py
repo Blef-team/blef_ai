@@ -32,6 +32,9 @@ EXCLUDE_DIRS = {
     "deployment",
     "scripts",
     "_bench_formats",  # ~1.9 GB of strategy-format benchmark artifacts
+    "p3",              # 3-player raw outputs; staged explicitly (mmap-quantised) below
+    "outputs",         # 2-player raw outputs; staged explicitly (mmap-quantised) into a
+                       # fresh dest dir below, so stale in-place mmap files don't tag along
 }
 EXCLUDE_FILE_NAMES = {
     "diagnostic.npz",
@@ -49,7 +52,14 @@ EXCLUDE_FILE_SUFFIXES = (".pyc", ".png")
 
 
 def _should_skip_dir(name: str) -> bool:
-    return name in EXCLUDE_DIRS
+    if name in EXCLUDE_DIRS:
+        return True
+    # Skip data/experiment trees that aren't part of the runtime package — only
+    # cfr_ai code + outputs/ (quantised in place) belong in the image. This covers
+    # training-box cruft (experiments/, v2.1/, exp_*/, scratch_*/, grouped_*/) and
+    # the raw 3-player runs (p3, p3_2x — staged separately, mmap-quantised below).
+    # outputs/, abstraction/, etc. don't match these prefixes and are kept.
+    return name.startswith(("p3", "exp", "v2", "scratch", "grouped"))
 
 
 def _should_skip_file(name: str) -> bool:
@@ -104,24 +114,44 @@ def main() -> int:
     # + small strategy_meta.npz + the abs.json companion). The agent's
     # load_strategy_for_agent prefers this layout and mmap's the sparse probs
     # files → ~50 MB peak resident regardless of strategy size.
+    # Stage every setup OUT-OF-PLACE: read its compressed strategy.npz from the
+    # source and write the mmap-friendly split layout (uncompressed sparse probs +
+    # small strategy_meta.npz + the abs.json companion) into a FRESH dest dir. The
+    # agent's load_strategy_for_agent prefers this layout and mmap's the sparse
+    # probs → ~50 MB peak resident regardless of strategy size. uint8 quantised
+    # (strength-neutral vs uint16, H2H 0.5018 over 20k games). Out-of-place means a
+    # cluttered source setup dir (stale mmap files, diagnostics) can't tag along.
     print("[stage] converting strategies to mmap-friendly layout...", flush=True)
     from cfr_ai.strategy_io import write_mmap_layout
     outputs = dest / "cfr_ai" / "outputs"
+    outputs.mkdir(parents=True, exist_ok=True)
     n_converted = 0
-    for setup_dir in sorted(outputs.iterdir()):
-        if not setup_dir.is_dir():
+    for setup_dir in sorted((cfr_src / "outputs").iterdir()):
+        if not setup_dir.is_dir() or not (setup_dir / "strategy.npz").exists():
             continue
-        if not (setup_dir / "strategy.npz").exists():
-            continue
-        # Write the mmap layout into the SAME setup_dir, then drop the
-        # original compressed file (we don't ship it — the agent will
-        # only ever read the split layout). The image ships uint8-quantised
-        # probabilities (validated strength-neutral vs uint16, H2H 0.5018
-        # over 20k games): ~34% less payload to page-fault on first load.
-        write_mmap_layout(str(setup_dir), str(setup_dir), value_bits=8)
-        (setup_dir / "strategy.npz").unlink()
+        dst = outputs / setup_dir.name
+        dst.mkdir(parents=True, exist_ok=True)
+        write_mmap_layout(str(setup_dir), str(dst), value_bits=8)
         n_converted += 1
-    print(f"[stage] converted {n_converted} setups to mmap layout", flush=True)
+    print(f"[stage] converted {n_converted} two-player setups to mmap layout", flush=True)
+
+    # Also stage the 176 directed 3-player setups into the SAME image outputs/ dir
+    # as the two-player ones — no name collision (2-part "a_b" vs 3-part "a_b_c"),
+    # so the agent's player-count routing + setup-string resolution finds either.
+    # write_mmap_layout reads strategy.npz from the source and copies
+    # strategy.abs.json into the destination itself. CFR_3P_SUBDIR selects which
+    # 3-player run to ship (default "p3"; set "p3_2x" to ship the 2x-iters run).
+    p3_src = root / "cfr_ai" / os.environ.get("CFR_3P_SUBDIR", "p3") / "outputs"
+    n_p3 = 0
+    if p3_src.is_dir():
+        for setup_dir in sorted(p3_src.iterdir()):
+            if not setup_dir.is_dir() or not (setup_dir / "strategy.npz").exists():
+                continue
+            dst = outputs / setup_dir.name
+            dst.mkdir(parents=True, exist_ok=True)
+            write_mmap_layout(str(setup_dir), str(dst), value_bits=8)
+            n_p3 += 1
+    print(f"[stage] converted {n_p3} three-player setups to mmap layout", flush=True)
 
     # Quick sanity report.
     n_idx = sum(1 for _ in (dest / "cfr_ai" / "outputs").rglob("probs_sparse_indices.npy"))
@@ -135,10 +165,11 @@ def main() -> int:
         f"total {total_bytes / 1e6:.1f} MB",
         flush=True,
     )
-    if n_idx != 66 or n_val != 66 or n_meta != 66:
+    EXPECTED = 66 + 176  # 66 two-player + 176 directed three-player setups
+    if n_idx != EXPECTED or n_val != EXPECTED or n_meta != EXPECTED:
         print(
-            f"[warn] expected 66 strategies, got {n_idx} indices / {n_val} values / "
-            f"{n_meta} meta. Continuing, but the image will be incomplete.",
+            f"[warn] expected {EXPECTED} strategies, got {n_idx} indices / {n_val} values "
+            f"/ {n_meta} meta. Continuing, but the image will be incomplete.",
             file=sys.stderr,
         )
     return 0

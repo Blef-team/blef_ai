@@ -161,6 +161,7 @@ cfr_ai/archive/subgame/*
 !cfr_ai/archive/subgame/analysis/
 cfr_ai/archive/subgame/analysis/*
 !cfr_ai/archive/subgame/analysis/*.py
+cfr_ai/p3*
 
 # local working notes — distilled content lives in README + appendices
 cfr_ai/SESSION_NOTES.md

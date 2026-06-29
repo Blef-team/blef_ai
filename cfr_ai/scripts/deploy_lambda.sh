@@ -56,22 +56,13 @@ if ! command -v docker >/dev/null 2>&1; then
   exit 1
 fi
 
-# Sanity: every (x, y) for 1 <= x <= y <= 11 must have a strategy.npz.
-echo "[check] Verifying all 66 strategy.npz files are present..."
-MISSING=0
-for x in 1 2 3 4 5 6 7 8 9 10 11; do
-  for y in 1 2 3 4 5 6 7 8 9 10 11; do
-    if [[ $y -ge $x ]]; then
-      setup="${x}_${y}"
-      if [[ ! -f "${CFR_DIR}/outputs/${setup}/strategy.npz" ]]; then
-        echo "[error] missing cfr_ai/outputs/${setup}/strategy.npz" >&2
-        MISSING=$((MISSING+1))
-      fi
-    fi
-  done
-done
-if [[ $MISSING -gt 0 ]]; then
-  echo "[error] ${MISSING} strategy file(s) missing; aborting" >&2
+# Sanity: 66 two-player + 176 directed three-player strategy.npz must be present.
+echo "[check] Verifying strategy.npz files (66 two-player + 176 three-player)..."
+N2P=$(ls "${CFR_DIR}"/outputs/*/strategy.npz 2>/dev/null | wc -l)
+N3P=$(ls "${CFR_DIR}"/p3/outputs/*/strategy.npz 2>/dev/null | wc -l)
+echo "[check] found ${N2P}/66 two-player, ${N3P}/176 three-player"
+if [[ "${N2P}" -ne 66 || "${N3P}" -ne 176 ]]; then
+  echo "[error] expected 66 two-player + 176 three-player strategy.npz; aborting" >&2
   exit 1
 fi
 

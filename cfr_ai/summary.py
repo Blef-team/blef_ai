@@ -6,7 +6,7 @@ LBR own disjoint column sets:
   Training cols  (written by `cfr_ai/training.py` on save):
     Setup, Finished, Iterations, Penalty, Min bet, Pruning threshold,
     Minimum regret, Duration, Nodes touched, Explored infosets,
-    Non-checking infosets, RAM (MB), P0 value, P1 value, Version
+    Non-checking infosets, RAM (MB), one P{i} value per player, Version
 
   LBR cols       (written by `cfr_ai/lbr.py` on `--update-summary`):
     LBR-<d> expl, LBR-<d> duration, LBR-<d> sampling  (one triple per depth d)
@@ -37,7 +37,11 @@ from typing import Dict, List, Optional, Tuple
 SUMMARY_PATH = os.path.join("cfr_ai", "outputs", "summary_of_all_runs.csv")
 
 
-TRAINING_COLS: List[str] = [
+# Fixed training columns. The per-player value columns ("P0 value", "P1 value",
+# ...) are DYNAMIC — one per "Player K game value" in the metadata — inserted
+# between RAM (MB) and Version, so the schema adapts to the player count (two for
+# 1v1, three for 1v1v1) without a 3p-only column leaking into a 2p summary.
+TRAINING_COLS_HEAD: List[str] = [
     "Finished",
     "Iterations",
     "Penalty",
@@ -50,10 +54,11 @@ TRAINING_COLS: List[str] = [
     "Explored infosets",
     "Non-checking infosets",
     "RAM (MB)",
-    "P0 value",
-    "P1 value",
-    "Version",
 ]
+TRAINING_COLS_TAIL: List[str] = ["Version"]
+
+# Detects per-player value columns like "P0 value", "P1 value", "P2 value".
+_PLAYER_VALUE_RE = re.compile(r"^P(\d+) value$")
 
 # Detects LBR depth columns like "LBR-1 expl", "LBR-2 duration", "LBR-1 sampling".
 _LBR_DEPTH_RE = re.compile(r"^LBR-(\d+|inf) (expl|duration|sampling)$")
@@ -102,18 +107,34 @@ def _depth_labels_in_rows(rows: Dict[str, Dict[str, str]]) -> List[str]:
     return sorted(labels, key=_depth_sort_key)
 
 
+def _player_value_cols_in_rows(rows: Dict[str, Dict[str, str]]) -> List[str]:
+    """Per-player value columns present in `rows`, ordered P0, P1, P2, ...
+    Defaults to the 1v1 pair when none are present yet (e.g. an empty summary)."""
+    idxs = set()
+    for r in rows.values():
+        for col in r.keys():
+            m = _PLAYER_VALUE_RE.match(col)
+            if m:
+                idxs.add(int(m.group(1)))
+    if not idxs:
+        return ["P0 value", "P1 value"]
+    return [f"P{i} value" for i in sorted(idxs)]
+
+
 def _build_fields(rows: Dict[str, Dict[str, str]],
                   extra_depth_labels: Optional[List[str]] = None) -> List[str]:
     """Construct the full ordered field list given the rows currently in the
-    file plus any depth labels we're about to add. Training cols come first,
-    then the per-depth LBR triples (expl/duration/sampling)."""
+    file plus any depth labels we're about to add. Training head cols, then the
+    per-player value cols (count adapts to the rows), then Version, then the
+    per-depth LBR triples (expl/duration/sampling)."""
     labels = set(_depth_labels_in_rows(rows))
     if extra_depth_labels:
         labels.update(extra_depth_labels)
     depth_cols: List[str] = []
     for label in sorted(labels, key=_depth_sort_key):
         depth_cols.extend(_depth_cols(label))
-    return ["Setup"] + TRAINING_COLS + depth_cols
+    pv_cols = _player_value_cols_in_rows(rows)
+    return ["Setup"] + TRAINING_COLS_HEAD + pv_cols + TRAINING_COLS_TAIL + depth_cols
 
 
 def _all_lbr_cols(fields: List[str]) -> List[str]:
@@ -166,13 +187,18 @@ def update_training_row(hand_sizes, training_data: Dict[str, object],
                         path: str = SUMMARY_PATH) -> None:
     """Replace this setup's training cols and blank its LBR cols.
 
-    `training_data` should provide string-or-stringifiable values for keys in
-    `TRAINING_COLS`. Missing keys are written as empty strings.
+    `training_data` should provide string-or-stringifiable values for the head
+    cols, "Version", and one "P{i} value" per player. Missing keys are written
+    as empty strings.
     """
     key = setup_key(hand_sizes)
     rows, _ = read_summary(path)
     row = rows.get(key, {"Setup": key})
-    for col in TRAINING_COLS:
+    value_cols = sorted(
+        (c for c in training_data if _PLAYER_VALUE_RE.match(c)),
+        key=lambda c: int(_PLAYER_VALUE_RE.match(c).group(1)),
+    )
+    for col in TRAINING_COLS_HEAD + value_cols + TRAINING_COLS_TAIL:
         row[col] = "" if training_data.get(col) is None else str(training_data[col])
     # Blank ALL existing LBR cols — new training invalidates exploitability.
     fields_so_far = _build_fields(rows)
@@ -354,7 +380,7 @@ def metadata_to_training_cols(meta: Dict[str, str]) -> Dict[str, str]:
             return datetime.strptime(s, "%Y-%m-%d, %H:%M:%S").strftime("%Y-%m-%d")
         except ValueError:
             return s
-    return {
+    out = {
         "Finished": _short_finished(meta.get("Time finished", "")),
         "Iterations": meta.get("Iterations", ""),
         "Penalty": meta.get("Penalty", ""),
@@ -367,10 +393,14 @@ def metadata_to_training_cols(meta: Dict[str, str]) -> Dict[str, str]:
         "Explored infosets": meta.get("Explored infosets", ""),
         "Non-checking infosets": meta.get("Non-checking infosets", ""),
         "RAM (MB)": _round_ram(meta.get("RAM taken (MB)", "")),
-        "P0 value": _fmt_value(meta.get("Player 1 game value", "")),
-        "P1 value": _fmt_value(meta.get("Player 2 game value", "")),
         "Version": meta.get("Version code", ""),
     }
+    # One "P{i} value" per "Player {i+1} game value" present (2 for 1v1, 3 for 1v1v1).
+    i = 0
+    while f"Player {i + 1} game value" in meta:
+        out[f"P{i} value"] = _fmt_value(meta[f"Player {i + 1} game value"])
+        i += 1
+    return out
 
 
 def _round_ram(s: str) -> str:
