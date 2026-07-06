@@ -56,6 +56,7 @@ def _traverse_jit_macros(
     strategy_buf, cf_buf,
     use_temp_value,
     scores, n_macros, bstar_buf, mcf_buf,
+    history_depth,
 ):
     # Traverser-centric (see trainer.py): values are always the TRAVERSER's, so
     # they flow up with no sign flip. Terminal: a check ends the round; loser
@@ -82,7 +83,7 @@ def _traverse_jit_macros(
         last_bet = history_buf[hist_len - 1]
         if hist_len > 1 and history_buf[hist_len - 2] >= min_bet:
             h_m1_id = history_code_id[last_bet, history_buf[hist_len - 2]]
-            if hist_len > 2 and history_buf[hist_len - 3] >= min_bet:
+            if history_depth >= 3 and hist_len > 2 and history_buf[hist_len - 3] >= min_bet:
                 h_m2_id = history_code_id[last_bet, history_buf[hist_len - 3]]
             else:
                 h_m2_id = ABSENT_CODE
@@ -215,6 +216,7 @@ def _traverse_jit_macros(
                     strategy_buf, cf_buf,
                     use_temp_value,
                     scores, n_macros, bstar_buf, mcf_buf,
+                    history_depth,
                 )
                 if state[1] != 0:
                     return 0.0
@@ -290,6 +292,7 @@ def _traverse_jit_macros(
             strategy_buf, cf_buf,
             use_temp_value,
             scores, n_macros, bstar_buf, mcf_buf,
+            history_depth,
         ) + penalty
 
     last_touched[row] = iter_i
@@ -417,6 +420,7 @@ class TrainerMacros(Trainer):
                 self._strategy_buf, self._cf_buf,
                 bool(self.use_temp_value),
                 scores, int(self.n_macros), self._bstar_buf, self._mcf_buf,
+                int(self.history_depth),
             )
             if self.state[1] != 0:
                 raise RuntimeError(f"Capacity {self.capacity} exhausted mid-iter {i}.")

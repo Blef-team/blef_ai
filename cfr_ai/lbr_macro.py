@@ -28,7 +28,7 @@ from tqdm import tqdm
 from cfr_ai.game import Game
 from cfr_ai.keys import (
     LAST_BET_SHIFT, H_M1_SHIFT, H_M2_SHIFT, ABS_ID_SHIFT, MAX_DEPTH,
-    _HISTORY_CODE_ID,
+    ABSENT_CODE, _HISTORY_CODE_ID,
 )
 from cfr_ai import lbr as _lbr
 from cfr_ai.lbr import (
@@ -550,6 +550,14 @@ def lbr_exploitability_macro(
     masses = np.ascontiguousarray(flat_strategy.masses, dtype=np.float64)
     total_cards = int(sum(hand_sizes))
 
+    # Stacked history-code table (see lbr._history_to_key_parts): layer 1 (h_m2)
+    # is ABSENT-filled for a depth-2 strategy so composed keys match storage.
+    if flat_strategy.history_depth >= 3:
+        hm2_layer = _HISTORY_CODE_ID
+    else:
+        hm2_layer = np.full_like(_HISTORY_CODE_ID, ABSENT_CODE)
+    history_code_id = np.ascontiguousarray(np.stack((_HISTORY_CODE_ID, hm2_layer)))
+
     def run_seat(lbr_player, seat_seed):
         opp_player = 1 - lbr_player
         lbr_hand_size = hand_sizes[lbr_player]
@@ -616,7 +624,7 @@ def lbr_exploitability_macro(
                 opp_abs_S2, reach_S2, exist_S2,
                 flat_strategy.key_to_row, flat_strategy.strategy,
                 flat_strategy.lower_action, flat_strategy.upper_action,
-                _HISTORY_CODE_ID, flat_strategy.min_bet,
+                history_code_id, flat_strategy.min_bet,
                 lbr_is_active, depth,
                 pd_S1, pd_S2, marg_S1, marg_S2, nr_S1, nr_S2,
                 masses, n_macros, lbr_scores, scores_S1, scores_S2,

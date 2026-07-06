@@ -180,7 +180,8 @@ def determine_action(game_state):
     fs = _current_strategy
     min_bet = fs.min_bet
     hand_abstraction = get_hand_abstraction(my_cards, list(hand_sizes))
-    key = make_key(my_cards, hand_abstraction, history, min_bet)
+    key = make_key(my_cards, hand_abstraction, history, min_bet,
+                   history_depth=fs.history_depth)
     split_key = key.split('-')
     hand_size = int(split_key[0])
     last_bet = int(split_key[1])

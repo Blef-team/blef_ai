@@ -56,6 +56,7 @@ def save_strategy(
     compressed: bool = True,
     masses: Optional[np.ndarray] = None,
     kinds: Optional[List[str]] = None,
+    history_depth: int = 3,
 ) -> str:
     """Write the deployment-ready strategy.npz + strategy.abs.json under
     `setup_dir`. Returns the path of the .npz.
@@ -99,6 +100,7 @@ def save_strategy(
         upper=upper_sorted,
         probs=probs_sorted,
         min_bet=np.int32(flat_strategy.min_bet),
+        history_depth=np.int32(history_depth),
         **extra,
     )
 
@@ -213,6 +215,10 @@ class FlatStrategyAgent:
     # folds its mass there at serve. `None` for plain concrete strategies.
     masses: Optional[np.ndarray] = None  # [N, n_macros]
     kinds: Optional[List[str]] = None
+    # Betting-history depth this strategy was trained with: 3 (last_bet + h_m1 +
+    # h_m2) or 2 (h_m2 dropped). The agent builds query keys to match. Defaults
+    # to 3 so strategies saved before this field load unchanged.
+    history_depth: int = 3
 
     def lookup(self, comp_key: int) -> Optional[int]:
         """O(log N) binary search. Returns row index or None if absent."""
@@ -271,6 +277,7 @@ def _read_npz_arrays(setup_dir: str):
         upper=data["upper"],
         probs=data["probs"],
         min_bet=int(data["min_bet"]),
+        history_depth=int(data["history_depth"]) if "history_depth" in data.files else 3,
         masses=data["masses"] if "masses" in data.files else None,
         kinds=([str(x) for x in data["kinds"]] if "kinds" in data.files else None),
     )
@@ -319,6 +326,7 @@ def load_strategy_for_agent(setup_dir: str) -> FlatStrategyAgent:
         min_bet=a["min_bet"],
         masses=a["masses"],
         kinds=a["kinds"],
+        history_depth=a["history_depth"],
     )
 
 
@@ -371,6 +379,7 @@ def _load_mmap(setup_dir: str) -> FlatStrategyAgent:
         _probs_offset=probs_offset,
         masses=masses,
         kinds=([str(x) for x in meta["kinds"]] if "kinds" in meta.files else None),
+        history_depth=int(meta["history_depth"]) if "history_depth" in meta.files else 3,
     )
 
 
@@ -474,7 +483,8 @@ def write_mmap_layout(setup_dir_src: str, setup_dir_dst: str, *,
             np.ascontiguousarray(upper, dtype=np.int16))
     if has_macros:
         np.save(os.path.join(setup_dir_dst, "meta_masses.npy"), masses_out)      # uint16[N,k]
-    small = dict(version=np.int32(STRATEGY_NPZ_VERSION), min_bet=np.int32(a["min_bet"]))
+    small = dict(version=np.int32(STRATEGY_NPZ_VERSION), min_bet=np.int32(a["min_bet"]),
+                 history_depth=np.int32(a["history_depth"]))
     if has_macros:
         small["kinds"] = np.array(kinds, dtype=object)
     np.savez_compressed(os.path.join(setup_dir_dst, "strategy_meta.npz"), **small)
@@ -491,7 +501,7 @@ def write_mmap_layout(setup_dir_src: str, setup_dir_dst: str, *,
 
 
 def save_macro_strategy(setup_dir: str, *, keys, lower, upper, probs,
-                        masses, kinds, min_bet) -> str:
+                        masses, kinds, min_bet, history_depth: int = 3) -> str:
     """Write the unified deployment `strategy.npz` for a MACRO model directly
     from arrays: int64 composite `keys`, the concrete `c/T` `probs` (padded
     [N,89]), per-row macro `masses` ([N,n_macros], on the same scale as the
@@ -509,6 +519,7 @@ def save_macro_strategy(setup_dir: str, *, keys, lower, upper, probs,
         upper=np.asarray(upper, np.int16)[order],
         probs=np.asarray(probs, np.float32)[order],
         min_bet=np.int32(min_bet),
+        history_depth=np.int32(history_depth),
         masses=np.asarray(masses, np.float32)[order],
         kinds=np.array(list(kinds), dtype=object),
     )
@@ -541,6 +552,7 @@ def load_strategy(setup_dir: str):
         upper_action=a["upper"],
         abs_str_to_id=a["abs_str_to_id"],
         min_bet=a["min_bet"],
+        history_depth=a["history_depth"],
     )
 
 

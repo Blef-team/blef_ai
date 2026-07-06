@@ -90,7 +90,8 @@ VERSION = "V3.2"  # Shows up in metadata
 def save_strategies(trainer: Trainer, out_root: str, hand_sizes,
                     iter_count, penalty, training_seconds, peak_ram_mb,
                     min_bet, pruning_threshold, min_regret,
-                    values, utility_log, exploitability_log):
+                    values, utility_log, exploitability_log,
+                    skip_diagnostic: bool = False):
     """Save the trained strategy as `<out_root>/outputs/<setup>/strategy.npz`
     (+ abs.json), the diagnostic data as `diagnostic.npz`, plus a
     human-readable `metadata.csv` with training parameters. `out_root` is
@@ -104,23 +105,25 @@ def save_strategies(trainer: Trainer, out_root: str, hand_sizes,
     setup_dir = os.path.join(out_root, "outputs", setup)
     os.makedirs(setup_dir, exist_ok=True)
 
+    history_depth = int(getattr(trainer, "history_depth", 3))
     fs, meaningful_policies = trainer.get_final_flat_strategy(
         drop_check_only=True, clear_lows_threshold=0.01)
-    save_strategy(fs, setup_dir, compressed=True)
+    save_strategy(fs, setup_dir, compressed=True, history_depth=history_depth)
     del fs # Drop to avoid RAM usage spike during save
 
-    diag = trainer.get_diagnostic_arrays()
-    save_diagnostic(
-        setup_dir,
-        keys=diag["keys"], lower=diag["lower"], upper=diag["upper"],
-        first_touched=diag["first_touched"],
-        last_touched=diag["last_touched"],
-        times_touched=diag["times_touched"],
-        regrets=diag["regrets"],
-        strategy_sum=diag["strategy_sum"],
-        compressed=True,
-    )
-    del diag # Drop to avoid RAM usage spike during save
+    if not skip_diagnostic:
+        diag = trainer.get_diagnostic_arrays()
+        save_diagnostic(
+            setup_dir,
+            keys=diag["keys"], lower=diag["lower"], upper=diag["upper"],
+            first_touched=diag["first_touched"],
+            last_touched=diag["last_touched"],
+            times_touched=diag["times_touched"],
+            regrets=diag["regrets"],
+            strategy_sum=diag["strategy_sum"],
+            compressed=True,
+        )
+        del diag # Drop to avoid RAM usage spike during save
 
     duration_hhmm = time.strftime('%H:%M', time.gmtime(training_seconds))
     md_path = os.path.join(setup_dir, "metadata.csv")
@@ -131,6 +134,7 @@ def save_strategies(trainer: Trainer, out_root: str, hand_sizes,
         w.writerow({"k": "Training duration", "v": duration_hhmm})
         w.writerow({"k": "Iterations", "v": iter_count})
         w.writerow({"k": "Minimum bet", "v": min_bet})
+        w.writerow({"k": "History depth", "v": history_depth})
         w.writerow({"k": "Pruning threshold", "v": pruning_threshold})
         w.writerow({"k": "Minimum regret", "v": min_regret})
         w.writerow({"k": "Penalty", "v": penalty})
@@ -161,6 +165,7 @@ def save_strategies(trainer: Trainer, out_root: str, hand_sizes,
             "Iterations": iter_count,
             "Penalty": penalty,
             "Min bet": min_bet,
+            "Hist depth": history_depth,
             "Macro kinds": ",".join(getattr(trainer, "macro_kinds", []) or []),
             "Pruning threshold": pruning_threshold,
             "Minimum regret": min_regret,
@@ -227,6 +232,14 @@ def main():
                          "regret. Theoretically cleaner (no stale cross-reach "
                          "value reuse) but much slower and spikier on "
                          "transposition-heavy setups; experimental.")
+    ap.add_argument("--history-depth", type=int, default=3, choices=[2, 3],
+                    help="Betting-history items in the infoset key: 3 (default; "
+                         "last_bet + h_m1 + h_m2 codes) or 2 (drop h_m2 -> coarser "
+                         "history, fewer infosets). Stored per-model and applied "
+                         "at serve time.")
+    ap.add_argument("--no-diagnostic", action="store_true",
+                    help="Skip writing diagnostic.npz (the large regret/ssum "
+                         "dump); keep strategy.npz + metadata.csv only.")
     args = ap.parse_args()
     if len(args.hand_sizes) < 2:
         ap.error("--hand-sizes needs at least 2 values (one per player)")
@@ -266,7 +279,8 @@ def main():
     warm = Trainer([1, 1], 0,
                    [DEFAULT_PRUNING_THRESHOLD, DEFAULT_MIN_REGRET], 0.0, 0,
                         initial_capacity=2000,
-                        numba_seed=0, regret_dtype=regret_dtype)
+                        numba_seed=0, regret_dtype=regret_dtype,
+                        history_depth=args.history_depth)
     warm.train(50)
     del warm
 
@@ -281,6 +295,7 @@ def main():
         args.log_points, initial_capacity=args.capacity,
         numba_seed=args.seed, regret_dtype=regret_dtype,
         use_temp_value=not args.no_temporary_value,
+        history_depth=args.history_depth,
     )
     after_alloc = proc.memory_info().rss / 1024 / 1024
     print(f"  RSS after alloc: {after_alloc:.1f} MB", flush=True)
@@ -322,6 +337,7 @@ def main():
         args.iter, args.penalty, training_seconds, peak_ram, args.min_bet,
         args.pruning_range[0], args.pruning_range[1],
         values, utility_log, exploitability_log,
+        skip_diagnostic=args.no_diagnostic,
     )
     save_seconds = time.time() - save_start
     print(f"  save done in {save_seconds:.1f}s; "

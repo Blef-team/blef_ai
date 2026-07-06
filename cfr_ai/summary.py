@@ -4,9 +4,10 @@ One row per setup at `cfr_ai/outputs/summary_of_all_runs.csv`. Training and
 LBR own disjoint column sets:
 
   Training cols  (written by `cfr_ai/training.py` on save):
-    Setup, Finished, Iterations, Penalty, Min bet, Pruning threshold,
-    Minimum regret, Duration, Nodes touched, Explored infosets,
-    Non-checking infosets, RAM (MB), one P{i} value per player, Version
+    Setup, Finished, Iterations, Penalty, Min bet, Hist depth,
+    Pruning threshold, Minimum regret, Duration, Nodes touched,
+    Explored infosets, Non-checking infosets, RAM (MB),
+    one P{i} value per player, Version
 
   LBR cols       (written by `cfr_ai/lbr.py` on `--update-summary`):
     LBR-<d> expl, LBR-<d> duration, LBR-<d> sampling  (one triple per depth d)
@@ -46,6 +47,7 @@ TRAINING_COLS_HEAD: List[str] = [
     "Iterations",
     "Penalty",
     "Min bet",
+    "Hist depth",
     "Macro kinds",
     "Pruning threshold",
     "Minimum regret",
@@ -385,6 +387,8 @@ def metadata_to_training_cols(meta: Dict[str, str]) -> Dict[str, str]:
         "Iterations": meta.get("Iterations", ""),
         "Penalty": meta.get("Penalty", ""),
         "Min bet": meta.get("Minimum bet", ""),
+        # Absent = trained before the knob existed; behaviour was depth-3.
+        "Hist depth": meta.get("History depth", "") or "3",
         "Macro kinds": meta.get("Macro kinds", ""),
         "Pruning threshold": meta.get("Pruning threshold", ""),
         "Minimum regret": meta.get("Minimum regret", ""),

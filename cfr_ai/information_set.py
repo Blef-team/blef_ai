@@ -101,15 +101,15 @@ def get_hand_abstraction(hand: List[int], hand_sizes: List[int]) -> List[str]:
     return out
 
 
-def make_key(hand: List[int], hand_abstractions: List[str], history: List[int], min_bet: int) -> str:
+def make_key(hand: List[int], hand_abstractions: List[str], history: List[int], min_bet: int, history_depth: int = 3) -> str:
     key = str(len(hand))
-    
+
     # History abstraction
     last_bet = 88 if len(history) == 0 or history[-1] < min_bet else history[-1]
     key += '-' + str(last_bet) + '-'
     if len(history) > 1 and history[-2] >= min_bet:
         key += history_codes[last_bet, history[-2]] + '-'
-        if len(history) > 2 and history[-3] >= min_bet:
+        if history_depth >= 3 and len(history) > 2 and history[-3] >= min_bet:
             key += history_codes[last_bet, history[-3]] + '-'
     
     # Hand abstraction

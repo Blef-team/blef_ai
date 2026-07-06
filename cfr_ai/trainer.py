@@ -62,6 +62,7 @@ def _traverse_jit(
     min_bet, pruning_threshold, min_regret, penalty,
     strategy_buf, cf_buf,
     use_temp_value,
+    history_depth,
 ):
     # Values returned by this function are always from the TRAVERSER's
     # perspective (not the active player's), so they flow up the tree with no
@@ -98,7 +99,7 @@ def _traverse_jit(
         last_bet = history_buf[hist_len - 1]
         if hist_len > 1 and history_buf[hist_len - 2] >= min_bet:
             h_m1_id = history_code_id[last_bet, history_buf[hist_len - 2]]
-            if hist_len > 2 and history_buf[hist_len - 3] >= min_bet:
+            if history_depth >= 3 and hist_len > 2 and history_buf[hist_len - 3] >= min_bet:
                 h_m2_id = history_code_id[last_bet, history_buf[hist_len - 3]]
             else:
                 h_m2_id = ABSENT_CODE
@@ -193,6 +194,7 @@ def _traverse_jit(
                     min_bet, pruning_threshold, min_regret, penalty,
                     strategy_buf, cf_buf,
                     use_temp_value,
+                    history_depth,
                 )
                 if state[1] != 0:
                     return 0.0
@@ -235,6 +237,7 @@ def _traverse_jit(
             min_bet, pruning_threshold, min_regret, penalty,
             strategy_buf, cf_buf,
             use_temp_value,
+            history_depth,
         ) + penalty
 
     last_touched[row] = iter_i
@@ -259,6 +262,7 @@ class Trainer:
         numba_seed: int = None,
         regret_dtype=np.float32,
         use_temp_value: bool = True,
+        history_depth: int = 3,
     ):
         """initial_capacity defaults to GROW_CHUNK (64k). Arrays auto-grow by
         GROW_CHUNK rows on each fill; the user never has to size up front.
@@ -274,6 +278,9 @@ class Trainer:
         self.min_regret = float(pruning_range[1])
         self.penalty = float(penalty)
         self.use_temp_value = bool(use_temp_value)
+        if int(history_depth) not in (2, 3):
+            raise ValueError("history_depth must be 2 or 3")
+        self.history_depth = int(history_depth)
         self.log_points = log_points
         self.regret_dtype = regret_dtype
 
@@ -435,6 +442,7 @@ class Trainer:
                 float(self.min_regret), float(self.penalty),
                 self._strategy_buf, self._cf_buf,
                 bool(self.use_temp_value),
+                int(self.history_depth),
             )
             # The pre-grow above should always keep us under capacity. If a
             # pathological iter still overflows, surface it loudly — we'd

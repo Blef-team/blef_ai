@@ -23,7 +23,8 @@ def _save_unified(trainer, out_root, hand_sizes, *a, **k):
     try:
         save_macro_strategy(setup_dir, keys=d["keys"], lower=d["lower"], upper=d["upper"],
                             probs=d["probs"], masses=d["masses"], kinds=d["kinds"],
-                            min_bet=d["min_bet"])
+                            min_bet=d["min_bet"],
+                            history_depth=getattr(trainer, "history_depth", 3))
         nm = int((d["masses"].sum(axis=1) > 0).sum()) if len(d["keys"]) else 0
         print(f"  [macros] wrote {len(d['keys']):,} infosets -> {setup_dir}/strategy.npz "
               f"(kinds={d['kinds']}, {nm:,} with macro mass)", flush=True)
