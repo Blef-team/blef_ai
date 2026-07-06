@@ -51,7 +51,7 @@ GROW_CHUNK = 64_000
 
 @njit(cache=False)
 def _traverse_jit(
-    history_buf, hist_len, reach, active, traverser, prune_feast,
+    history_buf, hist_len, reach, active, traverser, n_players, prune_feast,
     existence, iter_i,
     regrets, strategy_sum,
     lower_action, upper_action,
@@ -62,10 +62,29 @@ def _traverse_jit(
     min_bet, pruning_threshold, min_regret, penalty,
     strategy_buf, cf_buf,
     use_temp_value,
+    history_depth,
 ):
-    # Terminal
+    # Values returned by this function are always from the TRAVERSER's
+    # perspective (not the active player's), so they flow up the tree with no
+    # sign flip — this is what generalises the 2-player negation trick to N
+    # players. For n_players == 2 the rewards below reduce to the classic
+    # +1/-1, so 2-player training is byte-for-byte unchanged.
+
+    # Terminal: a check (88) ends the round and challenges the last bettor.
+    # The loser (who gains a card) is the checker if the claimed set exists,
+    # else the bettor. Players act in strict rotation, so the action at history
+    # index j was made by (starting_player + j) % n_players; at this terminal
+    # frame `active` is whoever would act next, i.e. checker + 1.
     if hist_len > 0 and history_buf[hist_len - 1] == 88:
-        return 1.0 if existence[history_buf[hist_len - 2]] else -1.0
+        checker = (active + n_players - 1) % n_players
+        last_bettor = (active + n_players - 2) % n_players
+        if existence[history_buf[hist_len - 2]]:
+            loser = checker
+        else:
+            loser = last_bettor
+        if traverser == loser:
+            return -1.0
+        return 1.0 / (n_players - 1)
 
     # Capacity exhausted on a sibling — propagate up so Python can grow.
     if state[1] != 0:
@@ -80,7 +99,7 @@ def _traverse_jit(
         last_bet = history_buf[hist_len - 1]
         if hist_len > 1 and history_buf[hist_len - 2] >= min_bet:
             h_m1_id = history_code_id[last_bet, history_buf[hist_len - 2]]
-            if hist_len > 2 and history_buf[hist_len - 3] >= min_bet:
+            if history_depth >= 3 and hist_len > 2 and history_buf[hist_len - 3] >= min_bet:
                 h_m2_id = history_code_id[last_bet, history_buf[hist_len - 3]]
             else:
                 h_m2_id = ABSENT_CODE
@@ -123,7 +142,7 @@ def _traverse_jit(
     lower = lower_action[row]
     upper = upper_action[row]
     width = upper - lower + 1
-    opp = 1 - active
+    nxt = (active + 1) % n_players
 
     # Regret matching on legal slice into this depth's slot of strategy_buf.
     # Single pass: cap negatives at 0 and accumulate pos_sum simultaneously,
@@ -162,9 +181,9 @@ def _traverse_jit(
         for i in range(width):
             if regrets[row, lower + i] >= pruning_threshold or prune_feast:
                 history_buf[hist_len] = lower + i
-                cf_buf[hist_len, i] = -_traverse_jit(
+                cf_buf[hist_len, i] = _traverse_jit(
                     history_buf, hist_len + 1, reach * strategy_buf[hist_len, i],
-                    opp, traverser, prune_feast,
+                    nxt, traverser, n_players, prune_feast,
                     existence, iter_i,
                     regrets, strategy_sum,
                     lower_action, upper_action,
@@ -175,6 +194,7 @@ def _traverse_jit(
                     min_bet, pruning_threshold, min_regret, penalty,
                     strategy_buf, cf_buf,
                     use_temp_value,
+                    history_depth,
                 )
                 if state[1] != 0:
                     return 0.0
@@ -204,9 +224,9 @@ def _traverse_jit(
                 chosen = i
                 break
         history_buf[hist_len] = lower + chosen
-        node_value = -_traverse_jit(
+        node_value = _traverse_jit(
             history_buf, hist_len + 1, reach,
-            opp, traverser, prune_feast,
+            nxt, traverser, n_players, prune_feast,
             existence, iter_i,
             regrets, strategy_sum,
             lower_action, upper_action,
@@ -217,6 +237,7 @@ def _traverse_jit(
             min_bet, pruning_threshold, min_regret, penalty,
             strategy_buf, cf_buf,
             use_temp_value,
+            history_depth,
         ) + penalty
 
     last_touched[row] = iter_i
@@ -241,6 +262,7 @@ class Trainer:
         numba_seed: int = None,
         regret_dtype=np.float32,
         use_temp_value: bool = True,
+        history_depth: int = 3,
     ):
         """initial_capacity defaults to GROW_CHUNK (64k). Arrays auto-grow by
         GROW_CHUNK rows on each fill; the user never has to size up front.
@@ -250,11 +272,15 @@ class Trainer:
         if regret_dtype not in (np.float64, np.float32):
             raise ValueError("regret_dtype must be np.float64 or np.float32")
         self.hand_sizes = hand_sizes
+        self.n_players = len(hand_sizes)
         self.min_bet = int(min_bet)
         self.pruning_threshold = float(pruning_range[0])
         self.min_regret = float(pruning_range[1])
         self.penalty = float(penalty)
         self.use_temp_value = bool(use_temp_value)
+        if int(history_depth) not in (2, 3):
+            raise ValueError("history_depth must be 2 or 3")
+        self.history_depth = int(history_depth)
         self.log_points = log_points
         self.regret_dtype = regret_dtype
 
@@ -325,7 +351,7 @@ class Trainer:
     # -- abstraction interning --------------------------------------------
 
     def _build_abs_ids_for_iter(self, hands) -> np.ndarray:
-        out = np.empty((2, 89), dtype=np.int64)
+        out = np.empty((self.n_players, 89), dtype=np.int64)
         a2i = self._abs_to_id
         for p, hand in enumerate(hands):
             strings = get_hand_abstraction(hand, self.hand_sizes)
@@ -345,15 +371,19 @@ class Trainer:
         num_iterations: int,
         snapshot_callback=None,
         snapshot_every_log_points: int = 1,
-    ) -> Tuple[float, float, Dict[str, Any]]:
-        """Run `num_iterations` of MCCFR. `snapshot_callback`, if given, is
-        called with `(iter_num, FlatStrategy)` at every `snapshot_every_log_points`
-        utility-log point — caller uses it to take periodic measurements
-        (e.g. LBR-1 exploitability) on the live averaged strategy without
-        pausing training otherwise. The FlatStrategy passed in is a freshly
-        materialised copy; modifying it does not affect training state."""
-        utils = np.zeros(2, dtype=np.float64)
-        last_utils = np.zeros(2, dtype=np.float64)
+    ) -> Tuple[List[float], Dict[str, Any]]:
+        """Run `num_iterations` of MCCFR. Returns a list of per-player opener
+        game values (each player's value when it opens, length n_players) and the
+        utility log. `snapshot_callback`,
+        if given, is called with `(iter_num, FlatStrategy)` at every
+        `snapshot_every_log_points` utility-log point — caller uses it to take
+        periodic measurements (e.g. LBR-1 exploitability) on the live averaged
+        strategy without pausing training otherwise. The FlatStrategy passed in
+        is a freshly materialised copy; modifying it does not affect training
+        state."""
+        npl = self.n_players
+        utils = np.zeros(npl, dtype=np.float64)
+        last_utils = np.zeros(npl, dtype=np.float64)
         utility_log: Dict[str, Any] = {}
         log_point_counter = 0
 
@@ -379,8 +409,11 @@ class Trainer:
                         self.strategy_sum[:n] *= np.float32(t / (t + 1))
 
             prune_feast = bool(int(i / 4) % 20 == 0)
-            traverser = int(i / 2) % 2
-            starting_player = i % 2
+            # Decouple traverser from opener so the traverser is exercised in
+            # every seat position; over npl^2 iters all (traverser, opener)
+            # pairs appear equally. For npl == 2 this is (i//2)%2 and i%2.
+            traverser = (i // npl) % npl
+            starting_player = i % npl
             hands = Game.deal_cards(self.hand_sizes)
             existence_array = Game.precompute_set_existence(hands)
             abs_ids = self._build_abs_ids_for_iter(hands)
@@ -397,7 +430,7 @@ class Trainer:
             self.state[1] = 0
             v = _traverse_jit(
                 self._history_buf, 0, 1.0,
-                int(starting_player), int(traverser), prune_feast,
+                int(starting_player), int(traverser), int(npl), prune_feast,
                 existence_array, int(i),
                 self.regrets, self.strategy_sum,
                 self.lower_action, self.upper_action,
@@ -409,6 +442,7 @@ class Trainer:
                 float(self.min_regret), float(self.penalty),
                 self._strategy_buf, self._cf_buf,
                 bool(self.use_temp_value),
+                int(self.history_depth),
             )
             # The pre-grow above should always keep us under capacity. If a
             # pathological iter still overflows, surface it loudly — we'd
@@ -419,7 +453,13 @@ class Trainer:
                     f"pre-grow (rows={int(self.state[0])}). Increase MAX_NEW_PER_ITER."
                 )
 
-            utils[starting_player] += v
+            # Record the OPENER value: a player's payoff in the iters where it is
+            # both the traverser and the opener (traverser == starting_player) —
+            # 1/npl^2 of iters per player, so the average is utils[p] * npl^2 /
+            # num_iterations (chunk + return below). The traversal runs every
+            # iter regardless, so the trained strategy is unaffected.
+            if traverser == starting_player:
+                utils[traverser] += v
 
             if self.log_points > 0 and (i + 1) % max(1, num_iterations // self.log_points) == 0:
                 now = time.time()
@@ -430,8 +470,9 @@ class Trainer:
                 chunk_rate = chunk_iters / chunk_secs if chunk_secs > 0 else 0.0
                 remaining = num_iterations - (i + 1)
                 eta = remaining / overall_rate if overall_rate > 0 else 0.0
-                util0_chunk = (utils[0] - last_utils[0]) / num_iterations * self.log_points * 2
-                util1_chunk = (utils[1] - last_utils[1]) / num_iterations * self.log_points * 2
+                chunk = [(utils[p] - last_utils[p]) / num_iterations * self.log_points * npl * npl
+                         for p in range(npl)]
+                util_str = " ".join(f"P{p}={chunk[p]:+.4f}" for p in range(npl))
                 print(
                     f"[train] iter {i + 1:>10,}/{num_iterations:,} "
                     f"({100*(i+1)/num_iterations:>3.0f}%) | "
@@ -439,11 +480,11 @@ class Trainer:
                     f"overall {overall_rate:>5.0f} it/s | "
                     f"ETA {time.strftime('%H:%M:%S', time.gmtime(eta))} | "
                     f"cap={self.capacity:,} rows={int(self.state[0]):,} | "
-                    f"P0={util0_chunk:+.4f} P1={util1_chunk:+.4f}",
+                    f"{util_str}",
                     flush=True,
                 )
-                utility_log[f"P0 Utility at Iter {i + 1}"] = f"{util0_chunk:.4f}"
-                utility_log[f"P1 Utility at Iter {i + 1}"] = f"{util1_chunk:.4f}"
+                for p in range(npl):
+                    utility_log[f"P{p} Utility at Iter {i + 1}"] = f"{chunk[p]:.4f}"
                 last_utils = utils.copy()
                 last_log_time = now
                 last_log_iter = i + 1
@@ -456,8 +497,7 @@ class Trainer:
                     snapshot_callback(i + 1, snap)
 
         return (
-            float(utils[0]) * 2 / num_iterations,
-            float(utils[1]) * 2 / num_iterations,
+            [float(utils[p]) * npl * npl / num_iterations for p in range(npl)],
             utility_log,
         )
 

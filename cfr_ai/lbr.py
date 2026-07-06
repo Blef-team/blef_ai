@@ -55,6 +55,10 @@ class FlatStrategy:
     # Left None here; the non-macro JIT path never reads them.
     masses: Optional[np.ndarray] = None        # float64[N, n_macros]
     macro_kinds: Optional[List[str]] = None    # e.g. ["value", "difftruthy", "bluff"]
+    # Betting-history depth the strategy was trained at (2 = h_m2 always ABSENT).
+    # The wrapper builds the stacked history-code table from this so lookups
+    # compose the same keys the trainer stored.
+    history_depth: int = 3
 
 
 # ---------------------------------------------------------------------------
@@ -151,14 +155,17 @@ def _composite_key(hand_size, last_bet, h_m1_id, h_m2_id, abs_id):
 
 @njit(cache=False)
 def _history_to_key_parts(history_buf, hist_len, min_bet, history_code_id):
-    """Return (last_bet, h_m1_id, h_m2_id) for the current history."""
+    """Return (last_bet, h_m1_id, h_m2_id) for the current history.
+    `history_code_id` is stacked [2, 89, 89]: layer 0 codes h_m1, layer 1
+    codes h_m2 (ABSENT_CODE-filled for a depth-2 strategy, so h_m2 composes
+    to ABSENT exactly as the trainer stored it)."""
     if hist_len == 0 or history_buf[hist_len - 1] < min_bet:
         return 88, ABSENT_CODE, ABSENT_CODE
     last_bet = history_buf[hist_len - 1]
     if hist_len > 1 and history_buf[hist_len - 2] >= min_bet:
-        h_m1_id = history_code_id[last_bet, history_buf[hist_len - 2]]
+        h_m1_id = history_code_id[0, last_bet, history_buf[hist_len - 2]]
         if hist_len > 2 and history_buf[hist_len - 3] >= min_bet:
-            h_m2_id = history_code_id[last_bet, history_buf[hist_len - 3]]
+            h_m2_id = history_code_id[1, last_bet, history_buf[hist_len - 3]]
         else:
             h_m2_id = ABSENT_CODE
     else:
@@ -633,6 +640,14 @@ def lbr_exploitability(
     """JIT-backed drop-in for `lbr.lbr_exploitability`. Returns
     {expl, se_worst, K_lbr_hand}."""
 
+    # Stacked history-code table (see _history_to_key_parts): layer 1 (h_m2)
+    # is ABSENT-filled for a depth-2 strategy so composed keys match storage.
+    if flat_strategy.history_depth >= 3:
+        hm2_layer = _HISTORY_CODE_ID
+    else:
+        hm2_layer = np.full_like(_HISTORY_CODE_ID, ABSENT_CODE)
+    history_code_id = np.ascontiguousarray(np.stack((_HISTORY_CODE_ID, hm2_layer)))
+
     def run_seat(lbr_player, seat_seed):
         opp_player = 1 - lbr_player
         lbr_hand_size = hand_sizes[lbr_player]
@@ -697,7 +712,7 @@ def lbr_exploitability(
                 opp_abs_S2, reach_S2, exist_S2,
                 flat_strategy.key_to_row, flat_strategy.strategy,
                 flat_strategy.lower_action, flat_strategy.upper_action,
-                _HISTORY_CODE_ID, flat_strategy.min_bet,
+                history_code_id, flat_strategy.min_bet,
                 lbr_is_active, depth,
                 pd_S1, pd_S2,
                 marg_S1, marg_S2,

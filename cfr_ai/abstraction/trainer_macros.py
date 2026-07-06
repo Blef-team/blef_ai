@@ -44,7 +44,7 @@ VALID_KINDS = ("value", "difftruthy", "bluff")
 
 @njit(cache=False)
 def _traverse_jit_macros(
-    history_buf, hist_len, reach, active, traverser, prune_feast,
+    history_buf, hist_len, reach, active, traverser, n_players, prune_feast,
     existence, iter_i,
     regrets, strategy_sum,
     lower_action, upper_action,
@@ -56,9 +56,22 @@ def _traverse_jit_macros(
     strategy_buf, cf_buf,
     use_temp_value,
     scores, n_macros, bstar_buf, mcf_buf,
+    history_depth,
 ):
+    # Traverser-centric (see trainer.py): values are always the TRAVERSER's, so
+    # they flow up with no sign flip. Terminal: a check ends the round; loser
+    # (gains a card) = checker if the set exists else the bettor; -1 loser,
+    # 1/(n-1) others. Reduces to +1/-1 for n_players == 2.
     if hist_len > 0 and history_buf[hist_len - 1] == 88:
-        return 1.0 if existence[history_buf[hist_len - 2]] else -1.0
+        checker = (active + n_players - 1) % n_players
+        last_bettor = (active + n_players - 2) % n_players
+        if existence[history_buf[hist_len - 2]]:
+            loser = checker
+        else:
+            loser = last_bettor
+        if traverser == loser:
+            return -1.0
+        return 1.0 / (n_players - 1)
     if state[1] != 0:
         return 0.0
 
@@ -70,7 +83,7 @@ def _traverse_jit_macros(
         last_bet = history_buf[hist_len - 1]
         if hist_len > 1 and history_buf[hist_len - 2] >= min_bet:
             h_m1_id = history_code_id[last_bet, history_buf[hist_len - 2]]
-            if hist_len > 2 and history_buf[hist_len - 3] >= min_bet:
+            if history_depth >= 3 and hist_len > 2 and history_buf[hist_len - 3] >= min_bet:
                 h_m2_id = history_code_id[last_bet, history_buf[hist_len - 3]]
             else:
                 h_m2_id = ABSENT_CODE
@@ -110,7 +123,7 @@ def _traverse_jit_macros(
     lower = lower_action[row]
     upper = upper_action[row]
     width = upper - lower + 1
-    opp = 1 - active
+    nxt = (active + 1) % n_players
 
     # --- macros: b*[k] = argmax(scores[k]) over legal bets, random tie-break -
     bet_hi = upper
@@ -189,9 +202,9 @@ def _traverse_jit_macros(
                         break
             if do:
                 history_buf[hist_len] = lower + i
-                cf_buf[hist_len, i] = -_traverse_jit_macros(
+                cf_buf[hist_len, i] = _traverse_jit_macros(
                     history_buf, hist_len + 1, reach * strategy_buf[hist_len, i],
-                    opp, traverser, prune_feast,
+                    nxt, traverser, n_players, prune_feast,
                     existence, iter_i,
                     regrets, strategy_sum,
                     lower_action, upper_action,
@@ -203,6 +216,7 @@ def _traverse_jit_macros(
                     strategy_buf, cf_buf,
                     use_temp_value,
                     scores, n_macros, bstar_buf, mcf_buf,
+                    history_depth,
                 )
                 if state[1] != 0:
                     return 0.0
@@ -264,9 +278,9 @@ def _traverse_jit_macros(
             history_buf[hist_len] = bstar_buf[hist_len, chosen_macro]
         else:
             history_buf[hist_len] = lower + chosen
-        node_value = -_traverse_jit_macros(
+        node_value = _traverse_jit_macros(
             history_buf, hist_len + 1, reach,
-            opp, traverser, prune_feast,
+            nxt, traverser, n_players, prune_feast,
             existence, iter_i,
             regrets, strategy_sum,
             lower_action, upper_action,
@@ -278,6 +292,7 @@ def _traverse_jit_macros(
             strategy_buf, cf_buf,
             use_temp_value,
             scores, n_macros, bstar_buf, mcf_buf,
+            history_depth,
         ) + penalty
 
     last_touched[row] = iter_i
@@ -348,7 +363,7 @@ class TrainerMacros(Trainer):
         return out
 
     def _build_scores_for_iter(self, hands) -> np.ndarray:
-        scores = np.empty((self.n_macros, 2, 88), dtype=np.float64)
+        scores = np.empty((self.n_macros, self.n_players, 88), dtype=np.float64)
         for p, hand in enumerate(hands):
             pv = p_vector_fast(hand, self._n_total - len(hand))
             s = self._score_one(pv)
@@ -357,8 +372,9 @@ class TrainerMacros(Trainer):
         return scores
 
     def train(self, num_iterations, snapshot_callback=None, snapshot_every_log_points=1):
-        utils = np.zeros(2, dtype=np.float64)
-        last_utils = np.zeros(2, dtype=np.float64)
+        npl = self.n_players
+        utils = np.zeros(npl, dtype=np.float64)
+        last_utils = np.zeros(npl, dtype=np.float64)
         utility_log: Dict[str, Any] = {}
         log_point_counter = 0
         hand_sizes_arr = np.asarray(self.hand_sizes, dtype=np.int64)
@@ -378,8 +394,8 @@ class TrainerMacros(Trainer):
                         self.strategy_sum[:n] *= np.float32(t / (t + 1))
 
             prune_feast = bool(int(i / 4) % 20 == 0)
-            traverser = int(i / 2) % 2
-            starting_player = i % 2
+            traverser = (i // npl) % npl
+            starting_player = i % npl
             hands = Game.deal_cards(self.hand_sizes)
             existence_array = Game.precompute_set_existence(hands)
             abs_ids = self._build_abs_ids_for_iter(hands)
@@ -391,7 +407,7 @@ class TrainerMacros(Trainer):
             self.state[1] = 0
             v = _traverse_jit_macros(
                 self._history_buf, 0, 1.0,
-                int(starting_player), int(traverser), prune_feast,
+                int(starting_player), int(traverser), int(npl), prune_feast,
                 existence_array, int(i),
                 self.regrets, self.strategy_sum,
                 self.lower_action, self.upper_action,
@@ -404,10 +420,15 @@ class TrainerMacros(Trainer):
                 self._strategy_buf, self._cf_buf,
                 bool(self.use_temp_value),
                 scores, int(self.n_macros), self._bstar_buf, self._mcf_buf,
+                int(self.history_depth),
             )
             if self.state[1] != 0:
                 raise RuntimeError(f"Capacity {self.capacity} exhausted mid-iter {i}.")
-            utils[starting_player] += v
+            # OPENER value: accumulate only when the traverser is also the opener
+            # (1/npl^2 of iters per player -> scale by npl^2 below). Traversal runs
+            # every iter regardless, so the trained strategy is unaffected.
+            if traverser == starting_player:
+                utils[traverser] += v
 
             if self.log_points > 0 and (i + 1) % (num_iterations // self.log_points) == 0:
                 now = time.time()
@@ -415,15 +436,16 @@ class TrainerMacros(Trainer):
                 overall_rate = (i + 1) / overall_secs if overall_secs > 0 else 0.0
                 chunk_rate = ((i + 1) - last_log_iter) / (now - last_log_time) if now > last_log_time else 0.0
                 eta = (num_iterations - (i + 1)) / overall_rate if overall_rate > 0 else 0.0
-                util0 = (utils[0] - last_utils[0]) / num_iterations * self.log_points * 2
-                util1 = (utils[1] - last_utils[1]) / num_iterations * self.log_points * 2
+                chunk = [(utils[p] - last_utils[p]) / num_iterations * self.log_points * npl * npl
+                         for p in range(npl)]
+                util_str = " ".join(f"P{p}={chunk[p]:+.4f}" for p in range(npl))
                 print(f"[train-macros] iter {i+1:>10,}/{num_iterations:,} "
                       f"({100*(i+1)/num_iterations:>3.0f}%) | chunk {chunk_rate:>5.0f} it/s | "
                       f"overall {overall_rate:>5.0f} it/s | "
                       f"ETA {time.strftime('%H:%M:%S', time.gmtime(eta))} | "
-                      f"rows={int(self.state[0]):,} | P0={util0:+.4f} P1={util1:+.4f}", flush=True)
-                utility_log[f"P0 Utility at Iter {i+1}"] = f"{util0:.4f}"
-                utility_log[f"P1 Utility at Iter {i+1}"] = f"{util1:.4f}"
+                      f"rows={int(self.state[0]):,} | {util_str}", flush=True)
+                for p in range(npl):
+                    utility_log[f"P{p} Utility at Iter {i+1}"] = f"{chunk[p]:.4f}"
                 last_utils = utils.copy()
                 last_log_time = now
                 last_log_iter = i + 1
@@ -432,8 +454,8 @@ class TrainerMacros(Trainer):
                     snap, _ = self.get_final_flat_strategy(drop_check_only=True, clear_lows_threshold=0.01)
                     snapshot_callback(i + 1, snap)
 
-        return (float(utils[0]) * 2 / num_iterations,
-                float(utils[1]) * 2 / num_iterations, utility_log)
+        return ([float(utils[p]) * npl * npl / num_iterations for p in range(npl)],
+                utility_log)
 
     # -- export ------------------------------------------------------------
 

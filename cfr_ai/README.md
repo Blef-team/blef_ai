@@ -6,7 +6,11 @@
 
 This AI is made using Counterfactual Regret Minimisation (CFR), an algorithm designed to solve fixed-sum imperfect-information games and the leading algorithm for building Poker AIs.
 
-The repository contains all code needed to train, evaluate and deploy the AI. 
+The repository contains all code needed to train, evaluate and deploy the AI.
+
+(Blef in one paragraph, for readers landing here first: each player holds hidden cards from a 24-card deck — values 9..A in four suits — and every bet is a claim that a certain poker-like set exists **among all cards on the table combined**. Bets escalate along a fixed 89-action ladder (88 sets + *check*); *check* challenges the last bet — the claimed set is revealed to exist or not, the loser of the round gains a card, and a player reaching the card cap is eliminated. `game.py` is the exact rules reference; EXPERIMENTS.md's preamble gives the strategic framing.)
+
+**Currently deployed (2026-07):** 2-player **V3.2x4** (40M/20M iterations) and 3-player **p3x4** (176 directed setups, 40M/20M), served together from one arm64 Lambda container with the uint8-quantised mmap layout. The full version lineage and every claim's evidence live in `EXPERIMENTS.md`; this README describes the mechanisms and final adopted settings.
 
 ## Algorithm
 
@@ -44,7 +48,7 @@ We are not discounting regrets (apart from imposing a minimum).
 
 However, we are discounting the strategy sum contributions. Contributions from the first 30% of iterations are not taken into account. Later contributions are multiplied by linearly increasing discounts. For example: 
 * Contributions from the 30-40% range of iterations weigh 40% as much as those from the 90-100% range
-* Contributions from the 40-50% range of tierations weigh 50% as much as those from the 90-100% range
+* Contributions from the 40-50% range of iterations weigh 50% as much as those from the 90-100% range
 
 ### Action thresholding
 
@@ -54,7 +58,7 @@ In the final (outputted) strategy, actions with probabilities of less than 1% ar
 
 In most setups in Blef, most information sets will never be reached by good players, and if they are encountered, checking 100% of the time is the best strategy in them. As a consequence:
 * to save on memory, we are only initialising information set objects when they are actually reached; 
-* the first strategy (for informations sets with 0 regrets) is checking 100% of the time; and
+* the first strategy (for information sets with 0 regrets) is checking 100% of the time; and
 * we do not record the strategy for information sets where the final strategy is to check 100% of the time.
 
 We are then instructing the agent who uses the CFR strategy to check with 100% probability if it cannot find the strategy for a given information set during online play.
@@ -63,13 +67,13 @@ We are then instructing the agent who uses the CFR strategy to check with 100% p
 
 We have considered:
 * ICFR — not implemented due to the expected effort/benefit ratio;
-* variance-reduction techniques on opponent's sampled actions or cards — tried, no noticeable benefit;
-* DCFR / CFR+ regret-matching variants — tried; on rounds 1-3 they converged to the same exploitability as `es` (the hand+history abstraction was the floor) but took 10-18× longer wall-clock because pruning has to be disabled and the α-discount adds per-visit cost. Strictly worse than `es` on a resource-adjusted basis, so removed from the codebase; and
+* variance-reduction techniques on opponent's sampled actions or cards — tried early on with no noticeable benefit; the measurements were not preserved (EXPERIMENTS.md carries no record), so treat this as a closed-but-undocumented probe;
+* DCFR / CFR+ regret-matching variants — tried; on rounds 1-3 they converged to the same exploitability as `es` (the hand+history abstraction was the floor) but took 10-18× longer wall-clock. Caveat (see EXPERIMENTS.md §7): that slowdown is *confounded* — it bundles the update rule with disabling pruning and the α-discount cost — so the clean claim is only that the *sampled* DCFR hybrid is resource-dominated by `es`; full-traversal CFR+ was separately shown structurally inapplicable (pruning is inert under RM⁺ and the 2⁸⁸-line betting tree forbids full traversals). Removed from the codebase; and
 * outcome-sampling MCCFR — implemented but **not** competitive with external sampling on Blef's structure. Removed from the codebase; see `README_Appendix_B.md` for the diagnosis.
 
 ## Resource limits and abstraction
 
-Memory, storage and computation constraints force us to heavily abstract information sets. Unabstracted, they would contain an list of our cards and the list of all moves that have been played in the given round.
+Memory, storage and computation constraints force us to heavily abstract information sets. Unabstracted, they would contain a list of our cards and the list of all moves that have been played in the given round.
 
 We train the AI separately for each sorted array of players' hand sizes (e.g. 3 cards vs 5 cards). There are 66 of those, which we call 'setups'.
 
@@ -80,9 +84,9 @@ One cannot compute this algorithm with 10^11.7 information sets.
 Instead, our abstraction is designed to have a limit of around 5 million (10^6.7) infosets. This has the following benefits: 
 * it limits the memory consumption to around 4 GB;
 * it keeps each setup's served strategy small enough that all 66 fit comfortably inside a single Lambda container image; and
-* each setup's strategy can be calibrated to a reasonable extent in around 0.5 core-days.
+* each setup's strategy can be calibrated to a reasonable extent within hours of a single core.
 
-The AI should then take around a core-month with 4GB of memory to train, which costs in the order of 30 USD when trained on on-demand AWS EC2 instances. It can also be reasonably trained on a personal machine.
+Measured full-retrain costs on the post-JIT trainer (see EXPERIMENTS.md): all 66 setups take **63.7 core-hours** at the V2.1 budget (10M/5M iterations) and **237 core-hours** at the deployed V3.2x4 budget (40M/20M) — roughly 8 to 30 hours wall on an 8-core box, with ~4 GB peak memory per training process. At on-demand cloud prices that is single-digit USD per full retrain. It can also be reasonably trained on a personal machine.
 
 ### Memory consumption
 
@@ -117,8 +121,8 @@ Then, the second and the third previous bet are being independently compressed a
     * Other full houses are categorised by whether they contain the same primary value, the same secondary value, the current first value as their second value, or otherwise denoted by their primary value
     * The two relevant three-of-a-kinds are recalled exactly, the rest as 'E'
     * Straights are recalled as an 'F'
-    * Two pairs are categoried by whether they contain the primary value, the secondary value, both or neither
-    * Pairs are recalled exactly if they contain on of the two values, otherwise as a 'J' 
+    * Two pairs are categorised by whether they contain the primary value, the secondary value, both or neither
+    * Pairs are recalled exactly if they contain one of the two values, otherwise as a 'J' 
     * High cards are merged into a 'Z'
 * If the last bet is a flush:
     * Other flushes are recalled exactly
@@ -140,6 +144,8 @@ Then, the second and the third previous bet are being independently compressed a
 
 This abstraction tries not to differentiate between bets that are less relevant or very junior to the last one. It's stored in `history.csv`. For example, if the last bet was on set 55 (Full house, Queens over Aces), a bet on set 5 (High Card, Ace) is represented in the history abstraction as a Z (row 55 column 5 in `history.csv`). 
 
+**History depth (`--history-depth`).** By default all three bets are kept (`last_bet` plus the `h_m1`/`h_m2` codes). Training with `--history-depth 2` drops the third-last code (`h_m2`) entirely, keeping only `last_bet` + `h_m1`. This is a *per-model* property — stored in the strategy and read back at serve time — so depth-2 and depth-3 models can be served side by side. It cuts the infoset keyspace by ~6×; see *History abstraction and convergence* for the measured strength effect and EXPERIMENTS.md §5.12.
+
 ### Hand abstraction
 
 The AI does not consider the exact cards in its hand. Instead, it uses a hand-crafted abstraction that extracts only the most strategically relevant features of the hand, which changes depending on the round and the last bet made. It's encoded in `get_hand_abstraction` in `information_set.py`.
@@ -152,23 +158,23 @@ In the later rounds, there is a more complex hand-crafted abstraction. First, as
 
 We then pick these numbers as identifiers of our hand, depending on the last bet (the one we are responding to):
 
-* For last best of a high card, pair or two pair or at the beginning of the round:
+* For the last bet of a high card, pair or two pair or at the beginning of the round:
     * If we have a flush or four of a kind on hand, only that feature is reported
     * Else if we have a three of a kind on hand, the top 2 value-related strengths are considered
     * Else, we look at card values and ignore suits
-* For the last best of any straight:
+* For the last bet of any straight:
     * If we have a flush or four of a kind on hand, only that feature is reported
     * Else, report if we have a 9, how many distinct values between 10 and King we have, if we have an Ace, and what our top strength is 
-* For the last best of a three-of-a-kind:
+* For the last bet of a three-of-a-kind:
     * If we have a flush or four of a kind on hand, only that feature is reported
     * Else, report how many of the value being bet on we have, and what our top strength is 
-* For the last best of a full house:
+* For the last bet of a full house:
     * If we have a flush or four of a kind on hand, only that feature is reported
     * Else, report how many of the two values being bet on we have, and what our top strength is 
-* For the last best of a flush, report how many of the suit being bet on we have, and what our top augmented strength is 
-* For the last best of a four-of-a-kind, report how many of the value being bet on we have, and what our top augmented strength is, but ignore strenghts related to values lower than the one being bet on
-* For the last best of a small/big straight flush, report augmented information about the suit being bet on and our strongest suit 
-* For the last best of a great straight flush, report augmented information about the suit being bet on and our strongest suit among those that can still be bet on
+* For the last bet of a flush, report how many of the suit being bet on we have, and what our top augmented strength is 
+* For the last bet of a four-of-a-kind, report how many of the value being bet on we have, and what our top augmented strength is, but ignore strengths related to values lower than the one being bet on
+* For the last bet of a small/big straight flush, report augmented information about the suit being bet on and our strongest suit 
+* For the last bet of a great straight flush, report augmented information about the suit being bet on and our strongest suit among those that can still be bet on
 
 At the largest hand sizes (total ≥ 17 cards), the round-start token is additionally refined by the player's own per-suit card counts, which sharpens play in the suit-heavy endgame.
 
@@ -203,10 +209,10 @@ Two on-disk layouts are supported, both produced from the same training run and 
    * `meta_keys.npy` (int64, sorted) — the composite infoset keys.
    * `meta_offset.npy` (int32) — length-`N+1` CSR-style prefix sum into the sparse arrays.
    * `meta_lower.npy` / `meta_upper.npy` (int16) — per-row legal-action bounds.
-   * `meta_masses.npy` (uint16 `[N, k]`, macro setups only) — each infoset's macro masses, on the same scale as its concrete probabilities.
+   * `meta_masses.npy` (`[N, k]`, macro setups only) — each infoset's macro masses, on the same value dtype and scale as its concrete probabilities.
    * `probs_sparse_indices.npy` (uint8) — non-zero positions within each row's legal-action slice.
-   * `probs_sparse_values.npy` (uint16) — non-zero probability values, quantised with scale `1/65535`.
-   * `strategy_meta.npz` (tiny, compressed) — just the scalars: format version, `min_bet`, and the macro `kinds`.
+   * `probs_sparse_values.npy` — non-zero probability values, quantised per `write_mmap_layout(value_bits=...)`: uint8 (scale 1/255) for the production image since V3.2x2 (validated strength-neutral vs uint16 in a 20k-game H2H, 0.5018 ± 0.0035 — EXPERIMENTS.md §5.9), or uint16 (scale 1/65535) as the full-fidelity evaluation-staging option. The loader is dtype-agnostic.
+   * `strategy_meta.npz` (tiny, compressed) — just the scalars: format version, `min_bet`, `history_depth`, and the macro `kinds`.
 
    The `.npy` files are `mmap`'d at load time, so peak resident memory per loaded strategy is a few tens of MB regardless of `N` (strategies are typically 5-10% dense after `clear_lows`). An older layout that packed `keys`/`lower`/`upper`/`probs_offset`/`masses` into the compressed `strategy_meta.npz` and read them eagerly is still recognised by the loader, so images staged before this change continue to load unchanged.
 
@@ -230,9 +236,11 @@ We have evaluated three ways of dealing with that problem:
 * caching the last value of a node and recording the last iteration it was touched, and if it's the second time we're touching it in a given iteration, returning the cached value instead of (1) getting the strategy, (2) traversing its children, (3) updating cumulative regrets and (4) updating strategy sum again . This is the 'temporary value' solution. However, that biases the regret updates. For example, if a node has 200 possible paths leading to it, and each of them has 1% opponent reach probability when opponent has hand X and each of them has 2% opponent reach probability when opponent has hand Y, this will result in the node having a near 100% chance of geting one full-sized regret update in the iteration conditional on hand X as well as Y. This means that the CFR strategy will be prepared for a distribution of hands with higher entropy than the one it should be.
 * using the 'temporary values', but every point in history that was either (A) visited or (B) considered by the opponent but not visited (because of the external sampling algorithm) will be marked as having been last considered in this iteration. Downstream nodes are not marked as considered. When (and if) that node is finally visited in this iteration, its value is calculated and (some of) its downstream nodes are visited. However, if the node was not visited the first time it was considered in this iteration, it will not get regret updates or strategy sum updates. Thanks to this, regret updates will be lower the lower the opponent's chance of making the last move (on the first path from which we considered this node) that reaches this node. This is the 'considered nodes' solution.
 
-Although we expected the 'temporary value' solution to yield the worst results, for the setups we tested, we found the two otehr solutions to not improve the strategy at the same number of training iterations. These other solutions are typically 2-5 time slower than the temporary value solution. 
+Although we expected the 'temporary value' solution to yield the worst results, for the setups we tested, we found the two other solutions to not improve the strategy at the same number of training iterations, while typically running 2-5 times slower than the temporary value solution. (These comparison runs predate the experiment record — EXPERIMENTS.md carries no numbers for the three-way test; its §2.3 records the surviving evidence: removing temporary-value re-traverses 85-89% of node visits for no strength gain, re-measured 2026-07-06.) 
 
-That is why we have left the temporary solution as the only one available to use. However, to enable all three, follow the steps in `README_Appendix_A.md.
+That is why we have left the temporary solution as the only one available to use. However, to enable all three, follow the steps in `README_Appendix_A.md`.
+
+**Dropping the third bet (`--history-depth 2`).** Keeping the third-last code (`h_m2`) roughly triples the keyspace, so dropping it merges ≈6 infosets into one: measured, **−85% of infosets** and **−80% of stored strategy** on the 66 two-player setups, at only **−33% of training compute** (iteration count is fixed; only the per-infoset bookkeeping shrinks). Its *strength* effect depends on convergence: at the well-converged 2p budget (V3.2x4, 4×) keeping `h_m2` is worth a small, macro-only edge — depth-3 wins the per-setup H2H by 0.6 pp (z = −5.1 over 66 setups) and the whole game 51.6% vs 48.4% — but at 1× (under-converged) the two are statistically identical (mean +0.000 ± 0.004). The same knob applies to the 3-player line, where the *self-play* sign flips and stays flipped: depth-2 wins at the deployed 2× budget (+0.66 pp/round) and still wins at the matched 4× budget (+0.38 pp/round, +1.93 pp whole-game, 2026-07-06). The best-response gate reversed the verdict, however: at that same matched budget depth-2 measures **~2.8× more exploitable under LBR-2** (+6.92% vs +2.48% band mean, worse on all 12 measurable setups) — a near-Nash H2H opponent never steers into the raise sequences a merged infoset misplays, a best-responder does. Depth-3 is what production serves, for both player counts. See EXPERIMENTS.md §5.12 for the full 2p + 3p record.
 
 ## Usage
 
@@ -254,6 +262,8 @@ CLI flags:
 * `--log-points` (default: 20) — number of evenly-spaced iter-rate / utility log lines.
 * `--archive-tag X` — save into `cfr_ai/archive/X/outputs/<setup>/` (snapshot for `head_to_head.py`) instead of the production `cfr_ai/outputs/<setup>/`.
 * `--high-priority` — bump the process to a higher OS priority (Windows: `HIGH_PRIORITY_CLASS`; POSIX: `nice -5`). Useful for shared machines.
+* `--history-depth` (default: 3; choices 2 or 3) — betting-history items kept in the infoset key: 3 (`last_bet` + `h_m1` + `h_m2` codes) or 2 (drop `h_m2`). Stored per-model and applied at serve time; default 3 is byte-identical to prior behaviour. See *History abstraction*.
+* `--no-diagnostic` — skip writing `diagnostic.npz` (the large regret / strategy-sum dump); keep `strategy.npz` + `metadata.csv` only.
 
 You will see a `tqdm` progress bar during training.
 
@@ -457,4 +467,4 @@ However, an earlier round of numba experimentation showed that using a dict of `
 
 We thank [Thomas Trenner](https://github.com/tt293) for his writings on the CFR algorithm, which inspired us to create this AI.
 
-Strategy outputs for every setup are avaiable upon request.
+Strategy outputs for every setup are available upon request.
