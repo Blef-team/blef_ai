@@ -607,7 +607,7 @@ def _hyge_survival_table(k, n_b, total_jokers):
     denom = math.comb(k, n_b) if 0 <= n_b <= k else 0
     for d in range(TJ + 1):
         W[d, 0] = 1.0
-        if denom == 0:
+        if denom == 0 or d > k:
             continue
         for sh in range(1, TJ + 1):
             W[d, sh] = sum(math.comb(d, x) * math.comb(k - d, n_b - x)
